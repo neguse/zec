@@ -15,10 +15,25 @@ use ratatui::{
 /// A cursor position in the complete document.
 ///
 /// `column` is a terminal-cell column, not a byte, char, or grapheme offset.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Cursor {
     pub row: usize,
     pub column: usize,
+}
+
+/// A half-open selection range in terminal-cell coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionRange {
+    pub start: Cursor,
+    pub end: Cursor,
+}
+
+/// A half-open style range on one line, in terminal-cell coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StyleSpan {
+    pub start_column: usize,
+    pub end_column: usize,
+    pub style: Style,
 }
 
 /// The document position displayed at the top-left of the body.
@@ -33,6 +48,9 @@ pub struct Viewport {
 pub struct RenderSnapshot {
     pub lines: Vec<String>,
     pub cursor: Option<Cursor>,
+    pub selections: Vec<SelectionRange>,
+    pub text_style: Style,
+    pub line_styles: Vec<Vec<StyleSpan>>,
     pub viewport: Viewport,
     pub status: String,
 }
@@ -111,6 +129,7 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
 
     let body_height = area.height.saturating_sub(1);
     let body_area = Rect::new(area.x, area.y, area.width, body_height).intersection(clipped);
+    buf.set_style(body_area, snapshot.text_style);
 
     for y in body_area.y..body_area.bottom() {
         let screen_row = usize::from(y.saturating_sub(area.y));
@@ -121,13 +140,19 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
 
         render_line(
             line,
-            Style::default(),
+            snapshot.text_style,
+            snapshot
+                .line_styles
+                .get(document_row)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
             y,
             area,
             clipped,
             snapshot.viewport.left_column,
             buf,
         );
+        render_selection_row(snapshot, document_row, line, y, area, clipped, buf);
     }
 
     if area.height == 0 {
@@ -140,11 +165,12 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
         return;
     }
 
-    let status_style = Style::new().add_modifier(Modifier::REVERSED);
+    let status_style = snapshot.text_style.add_modifier(Modifier::REVERSED);
     buf.set_style(status_area, status_style);
     render_line(
         &EditorWidget::new(snapshot).status_text(),
         status_style,
+        &[],
         status_y,
         area,
         clipped,
@@ -153,10 +179,66 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
     );
 }
 
+fn render_selection_row(
+    snapshot: &RenderSnapshot,
+    document_row: usize,
+    line: &str,
+    y: u16,
+    area: Rect,
+    clipped: Rect,
+    buf: &mut Buffer,
+) {
+    let line_width = usize::from(line.cell_width());
+    let viewport_left = snapshot.viewport.left_column;
+    let viewport_right = viewport_left.saturating_add(usize::from(area.width));
+    let selection_style = Style::new().add_modifier(Modifier::REVERSED);
+
+    for selection in &snapshot.selections {
+        if selection.start >= selection.end
+            || document_row < selection.start.row
+            || document_row > selection.end.row
+        {
+            continue;
+        }
+
+        let start = if document_row == selection.start.row {
+            selection.start.column
+        } else {
+            0
+        };
+        let end = if document_row == selection.end.row {
+            selection.end.column
+        } else {
+            // Make a selected newline visible, including on an empty line.
+            line_width.saturating_add(1)
+        };
+        let start = start.max(viewport_left);
+        let end = end.min(viewport_right);
+        if start >= end {
+            continue;
+        }
+
+        let screen_start = start - viewport_left;
+        let screen_end = end - viewport_left;
+        let x_start = area
+            .x
+            .saturating_add(u16::try_from(screen_start).unwrap_or(area.width))
+            .max(clipped.x);
+        let x_end = area
+            .x
+            .saturating_add(u16::try_from(screen_end).unwrap_or(area.width))
+            .min(clipped.right());
+        if x_start < x_end {
+            buf.set_style(Rect::new(x_start, y, x_end - x_start, 1), selection_style);
+        }
+    }
+}
+
 /// Draw one display-ready line, clipping in terminal-cell coordinates.
 fn render_line(
     line: &str,
     style: Style,
+    style_spans: &[StyleSpan],
     y: u16,
     area: Rect,
     clipped: Rect,
@@ -180,6 +262,10 @@ fn render_line(
         }
 
         let end_column = source_column.saturating_add(width);
+        let grapheme_style = style_spans
+            .iter()
+            .filter(|span| span.start_column <= source_column && end_column <= span.end_column)
+            .fold(grapheme.style, |style, span| style.patch(span.style));
         if end_column <= left_column {
             source_column = end_column;
             continue;
@@ -215,7 +301,7 @@ fn render_line(
             .min(clip_right.saturating_sub(screen_column));
 
         if width <= available {
-            buf.set_stringn(destination_x, y, grapheme.symbol, available, grapheme.style);
+            buf.set_stringn(destination_x, y, grapheme.symbol, available, grapheme_style);
         }
 
         source_column = end_column;
@@ -227,11 +313,11 @@ mod tests {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::{Modifier, Style},
+        style::{Color, Modifier, Style},
         widgets::Widget,
     };
 
-    use super::{Cursor, EditorWidget, RenderSnapshot, Viewport};
+    use super::{Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport};
 
     fn row(buf: &Buffer, y: u16) -> String {
         (buf.area.x..buf.area.right())
@@ -244,6 +330,9 @@ mod tests {
         let snapshot = RenderSnapshot {
             lines: vec!["zero".into(), "one".into(), "two".into()],
             cursor: Some(Cursor { row: 2, column: 1 }),
+            selections: Vec::new(),
+            text_style: Style::default(),
+            line_styles: Vec::new(),
             viewport: Viewport {
                 top_row: 1,
                 left_column: 0,
@@ -310,6 +399,9 @@ mod tests {
         let mut snapshot = RenderSnapshot {
             lines: vec![String::new(); 5],
             cursor: Some(Cursor { row: 3, column: 7 }),
+            selections: Vec::new(),
+            text_style: Style::default(),
+            line_styles: Vec::new(),
             viewport: Viewport {
                 top_row: 2,
                 left_column: 4,
@@ -371,5 +463,116 @@ mod tests {
 
         let outside = Rect::new(10, 10, 2, 2);
         EditorWidget::new(&snapshot).render(outside, &mut buf);
+    }
+
+    #[test]
+    fn renders_multiline_selection_and_selected_newlines() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["abc".into(), String::new(), "xyz".into()],
+            selections: vec![SelectionRange {
+                start: Cursor { row: 0, column: 1 },
+                end: Cursor { row: 2, column: 2 },
+            }],
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 5, 4);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        for (x, y) in [(1, 0), (2, 0), (3, 0), (0, 1), (0, 2), (1, 2)] {
+            assert!(
+                buf.cell((x, y))
+                    .expect("selected cell")
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "expected ({x}, {y}) to be selected"
+            );
+        }
+        for (x, y) in [(0, 0), (4, 0), (1, 1), (2, 2)] {
+            assert!(
+                !buf.cell((x, y))
+                    .expect("unselected cell")
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "expected ({x}, {y}) not to be selected"
+            );
+        }
+    }
+
+    #[test]
+    fn clips_selection_in_terminal_cell_coordinates() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["a界bc".into()],
+            selections: vec![SelectionRange {
+                start: Cursor { row: 0, column: 1 },
+                end: Cursor { row: 0, column: 4 },
+            }],
+            viewport: Viewport {
+                top_row: 0,
+                left_column: 2,
+            },
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 3, 2);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        assert_eq!(row(&buf, 0), " bc");
+        for x in [0, 1] {
+            assert!(
+                buf.cell((x, 0))
+                    .expect("selected cell")
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
+        assert!(
+            !buf.cell((2, 0))
+                .expect("unselected cell")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn combines_syntax_style_with_selection_on_wide_graphemes() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["a界b".into()],
+            selections: vec![SelectionRange {
+                start: Cursor { row: 0, column: 1 },
+                end: Cursor { row: 0, column: 3 },
+            }],
+            text_style: Style::new().fg(Color::White),
+            line_styles: vec![vec![StyleSpan {
+                start_column: 1,
+                end_column: 3,
+                style: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            }]],
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        let glyph = buf.cell((1, 0)).expect("wide grapheme start cell");
+        assert_eq!(glyph.fg, Color::Red);
+        assert!(glyph.modifier.contains(Modifier::BOLD));
+        assert!(glyph.modifier.contains(Modifier::REVERSED));
+        assert!(
+            buf.cell((2, 0))
+                .expect("wide grapheme continuation cell")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(buf.cell((0, 0)).expect("base cell").fg, Color::White);
+        assert!(
+            !buf.cell((3, 0))
+                .expect("unselected cell")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 }

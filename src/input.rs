@@ -2,9 +2,19 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers as Crosster
 use gpui::{Keystroke, Modifiers as GpuiModifiers};
 
 pub fn is_quit(event: &KeyEvent) -> bool {
-    event.kind != KeyEventKind::Release
+    event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('q')
         && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_save(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('s')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
+    event.modifiers == CrosstermModifiers::CONTROL && matches!(event.code, KeyCode::Char('q' | 's'))
 }
 
 pub fn to_gpui_keystroke(event: KeyEvent) -> Option<Keystroke> {
@@ -132,6 +142,56 @@ mod tests {
         assert!(!is_quit(&KeyEvent::new(
             KeyCode::Char('q'),
             CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+        )));
+        assert!(!is_quit(&KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert!(!is_quit(&KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+    }
+
+    #[test]
+    fn recognizes_only_plain_control_s_press_as_save() {
+        assert!(is_save(&KeyEvent::new(
+            KeyCode::Char('s'),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(!is_save(&KeyEvent::new(
+            KeyCode::Char('s'),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+        )));
+        assert!(!is_save(&KeyEvent::new_with_kind(
+            KeyCode::Char('s'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert!(!is_save(&KeyEvent::new_with_kind(
+            KeyCode::Char('s'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+    }
+
+    #[test]
+    fn reserves_quit_and_save_repeats_for_the_cli() {
+        assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+            KeyCode::Char('s'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+        assert!(!is_intercepted_shortcut(&KeyEvent::new(
+            KeyCode::Char('z'),
+            CrosstermModifiers::CONTROL,
         )));
     }
 }

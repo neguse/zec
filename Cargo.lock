@@ -3921,6 +3921,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "grammars"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "language_core",
+ "rust-embed",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9897,6 +9908,16 @@ version = "0.1.8"
 source = "git+https://github.com/tree-sitter/tree-sitter?rev=dff1fd868c750dbbae179fcd5c43ce987e4e0528#dff1fd868c750dbbae179fcd5c43ce987e4e0528"
 
 [[package]]
+name = "tree-sitter-rust"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11933,17 +11954,23 @@ dependencies = [
 name = "zec"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-channel 2.5.0",
  "crossterm",
  "editor",
+ "fs",
  "gpui",
  "gpui_platform",
+ "grammars",
  "language",
+ "project",
  "ratatui",
  "release_channel",
  "semver",
  "settings",
  "theme",
+ "theme_settings",
+ "tree-sitter-rust",
  "unicode-width",
 ]
 

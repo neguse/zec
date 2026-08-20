@@ -8,7 +8,8 @@ Zed の `editor::Editor` を編集機能の本体として使い、端末固有�
 Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
-paste、resize、終了時の端末復元まで実装済み。
+selection表示、Rustのsyntax highlight、paste、resize、実ファイルのopen/save、
+dirty表示、終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -30,11 +31,20 @@ crossterm Event
     -> ratatui::Buffer
     -> CrosstermBackend
     -> terminal
+
+FILE
+    -> Zed RealFs
+    -> WorktreeStore
+    -> BufferStore
+    -> Zed Buffer
+    -> tree-sitter parse / highlighted chunks
 ```
 
 | Component | Responsibility |
 | --- | --- |
-| Zed Editor / Buffer | テキスト、カーソル、selection、編集 action、undo |
+| Zed Editor / Buffer | テキスト、カーソル、selection、編集 action、undo、dirty状態 |
+| Zed BufferStore / WorktreeStore / RealFs | ファイルのopen/save、encoding・改行・disk state |
+| Zed Language / tree-sitter | language query、parse、syntax highlight range |
 | GPUI headless | Zed の runtime と window/action context |
 | Crossterm | raw mode、キー・paste・resize入力、端末への出力 |
 | Ratatui | レイアウト、cell buffer、style、差分描画 |
@@ -46,6 +56,37 @@ crossterm Event
 Ratatui は cell buffer、style、レイアウト、前後 frame の差分描画を既に提供するため
 採用する。入力 loop は所有しないので、Crossterm で読んだイベントを zec が Zed の
 入力へ変換する。
+
+## File I/O
+
+`zec FILE` はCLI入力を絶対パス化し、Zedの `RealFs -> WorktreeStore -> BufferStore` で
+開く。`Project` 全体や手書きの `std::fs::write` は使わない。これによりencoding、BOM、
+改行コード、保存version、外部ファイル状態をZed側の実装に任せられる。
+
+該当worktreeがなければ、ファイル自身を非表示のsingle-file worktreeとして扱う。
+未作成パスもfile付きの `DiskState::New` Bufferになるため、編集後の `save_buffer` で
+新規作成できる。引数なしのscratchはfileを持たないので、save-as UIを実装するまでは
+保存不可とする。
+
+Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEditorなので
+保存handlerがない。そのため `Ctrl-S` だけCLI側で捕捉して `BufferStore::save_buffer`
+を呼ぶ。編集・undo・移動などは引き続きZedのkey dispatchへ渡す。dirtyな状態での
+`Ctrl-Q` は初回に警告し、直後の2回目だけ破棄終了にする。
+
+## Syntax highlighting
+
+最初の対応言語はRustだけに限定する。Zedの `grammars` crateからRustのconfig/queryを
+読み、`tree-sitter-rust` を `LanguageRegistry` に登録して `.rs` のBufferへ設定する。
+全built-in用の `languages::init` はLSP adapterやNode runtimeの初期化まで要求するため、
+この段階では使わない。
+
+表示時は `DisplaySnapshot::highlighted_chunks` にtree-sitter stylingを要求し、Zedの
+themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。Ratatuiではbase/syntaxを
+描いた後にselectionを重ねる。24-bit color、bold、italic、underline、strikethroughは
+端末へ写し、font weightの細分やwavy underlineなど端末にない表現は落とす。
+
+parse完了は非同期なので `BufferEvent::Reparsed` をterminal event channelへ戻して再描画
+する。これにより、入力イベントを待たずにhighlightが現れる。
 
 ## Why not `ratatui-textarea`
 
@@ -61,6 +102,8 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 - Zed の表示 column は UTF-8 byte 基準、端末は grapheme/cell 幅基準なので、zec に
   一箇所だけ座標変換層を置く。
+- Zedの全selectionを表示座標の半開区間として取得し、端末cell座標へ変換してから
+  Ratatuiの文字描画後に反転styleだけを重ねる。文字列やselection状態は複製しない。
 - 初期段階では soft wrap を無効にして横スクロールを使う。GPUI の pixel 幅と端末の
   cell 幅を混ぜない。
 - terminal reader は別 thread で blocking input を読み、channel 経由で GPUI
@@ -71,8 +114,8 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-現在は最新cursorのみ描画し、selection範囲のstyleはまだ描画しない。
-syntax highlight、file I/O、tabs、LSP、terminal-aware soft wrapは後続で追加する。
+Rust以外のsyntax、save-as、tabs、LSP、terminal-aware soft wrapは後続で追加する。
 
-自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、終了と
-raw mode / alternate screenの復元まで確認する。
+自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
+新規・既存ファイルの保存、dirtyな終了保護、raw mode / alternate screenの復元まで
+確認する。

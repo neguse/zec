@@ -27,6 +27,7 @@ pub enum TerminalEvent {
     Key(KeyEvent),
     Paste(String),
     Resize,
+    Redraw,
     Error(String),
 }
 

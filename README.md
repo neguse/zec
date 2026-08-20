@@ -8,11 +8,23 @@ Zed の keymap へ入力を渡し、Ratatui で plain text とカーソルを描
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に記録します。
 
 ```sh
-cargo run
+cargo run -- path/to/file
 ```
 
-空のbufferで起動します。文字入力、移動、`Ctrl-Z` のundo、`Ctrl-Y` のredoがZedの
-編集処理を通ります。終了は `Ctrl-Q` です。
+既存ファイルと未作成ファイルのどちらも開けます。文字入力、移動、`Ctrl-Z` のundo、
+`Ctrl-Y` のredoがZedの編集処理を通り、`Ctrl-S` でZedの `BufferStore` 経由で保存します。
+終了は `Ctrl-Q` です。未保存の変更がある場合だけ、破棄確認としてもう一度
+`Ctrl-Q` を押します。
+
+`Shift` + 矢印や `Ctrl-A` のselectionもZedのkeymapで動き、選択範囲を端末上に
+反転表示します。
+
+`.rs` ファイルではZed同梱のRust queryとtree-sitter parserを使ってsyntax highlight
+します。現在は実行時にLSPやNode runtimeを初期化しません。`NO_COLOR` が設定された
+環境ではCrosstermの規約どおり色を出しません。
+
+引数なしでは空のscratch bufferを開きます。現時点では保存先を選ぶUIがないため、
+scratch bufferの `Ctrl-S` は保存せずstatusにエラーを表示します。
 
 端末を使わず、最初の挿入・undo PoCだけを実行する場合:
 
