@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Status: Accepted (2026-08-20)
+Status: Accepted (2026-08-21)
 
 ## Goal
 
@@ -8,7 +8,7 @@ Zed の `editor::Editor` を編集機能の本体として使い、端末固有�
 Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
-selection表示、Rustのsyntax highlight、paste、resize、実ファイルのopen/save、
+selection表示、native languageのsyntax highlight、paste、resize、実ファイルのopen/save、
 dirty表示、終了時の端末復元まで実装済み。
 
 ## Repository strategy
@@ -75,10 +75,17 @@ Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEd
 
 ## Syntax highlighting
 
-最初の対応言語はRustだけに限定する。Zedの `grammars` crateからRustのconfig/queryを
-読み、`tree-sitter-rust` を `LanguageRegistry` に登録して `.rs` のBufferへ設定する。
-全built-in用の `languages::init` はLSP adapterやNode runtimeの初期化まで要求するため、
-この段階では使わない。
+Zedの `grammars` crateが同梱するnative parserを直接 `LanguageRegistry` に登録する。
+`native_grammars()` の20組に加え、TSX parserを共有するJavaScriptとRust parserを共有する
+Zed Keybind Contextを登録し、Zed本体と同じ22個のbundled language config/queryを扱う。
+通常ファイルとして選ばれるのはShell、C/C++、CSS、Diff、Go/Go Mod/Go Work、JSON/JSONC、
+JavaScript/TypeScript/TSX、Markdown、Python、Rust、YAML、Git Commitで、残りは主に
+injection用のhidden languageである。
+
+`languages::init` はLSP adapterやNode runtimeまで初期化するため、この段階では使わない。
+つまり複数言語のtree-sitter解析は行うが、LSPや外部processは起動しない。現在は拡張子で
+言語を選ぶため、拡張子のないscriptをshebangだけで判定する処理と、native set外のgrammar、
+未登録言語へのinjectionは後続課題とする。
 
 表示時は `DisplaySnapshot::highlighted_chunks` にtree-sitter stylingを要求し、Zedの
 themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。Ratatuiではbase/syntaxを
@@ -109,12 +116,14 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 - terminal reader は別 thread で blocking input を読み、channel 経由で GPUI
   foreground に渡す。Editor 自体は単一 thread で操作する。resize event が欠ける
   PTY向けに、同じreader threadで低頻度のsize確認も行う。
-- headless clipboard は使えないため、paste は bracketed paste を直接渡す。copy の
-  terminal bridge は後続課題とする。
+- headless clipboard は使えないため、bracketed pasteの文字列をZedの `do_paste` へ
+  直接渡す。これによりpaste時のselection置換、auto-indent、undo単位はZedに任せる。
+  copy のterminal bridgeは後続課題とする。
 
 ## Deferred
 
-Rust以外のsyntax、save-as、tabs、LSP、terminal-aware soft wrapは後続で追加する。
+save-as、tabs、LSP、native set外のgrammar、完全なlanguage injection、terminal-aware
+soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、dirtyな終了保護、raw mode / alternate screenの復元まで

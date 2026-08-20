@@ -228,7 +228,7 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                         quit_armed = false;
                         message = None;
                         if let Err(error) = editor_window.update(cx, |editor, window, cx| {
-                            editor.handle_input(&text, window, cx);
+                            editor.do_paste(&text, None, true, window, cx);
                         }) {
                             failure = Some(format!("failed to paste text: {error}"));
                             break;
@@ -277,7 +277,7 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
         }));
     };
 
-    let language_registry = match rust_language_registry(cx) {
+    let language_registry = match native_language_registry(cx) {
         Ok(registry) => registry,
         Err(error) => return Task::ready(Err(error)),
     };
@@ -318,16 +318,30 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
     })
 }
 
-fn rust_language_registry(cx: &mut App) -> Result<Arc<LanguageRegistry>> {
+fn native_language_registry(cx: &mut App) -> Result<Arc<LanguageRegistry>> {
     let registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
     registry.set_theme(cx.theme().clone());
-    let rust = Language::new(
-        grammars::load_config("rust"),
-        Some(tree_sitter_rust::LANGUAGE.into()),
-    )
-    .with_queries(grammars::load_queries("rust"))
-    .context("could not initialize the bundled Rust grammar")?;
-    registry.add(Arc::new(rust));
+    let native_grammars = grammars::native_grammars();
+    let tsx_grammar = native_grammars
+        .iter()
+        .find(|(name, _)| *name == "tsx")
+        .map(|(_, grammar)| grammar.clone())
+        .context("bundled TSX grammar is missing")?;
+    let rust_grammar = native_grammars
+        .iter()
+        .find(|(name, _)| *name == "rust")
+        .map(|(_, grammar)| grammar.clone())
+        .context("bundled Rust grammar is missing")?;
+
+    for (name, grammar) in native_grammars.into_iter().chain([
+        ("javascript", tsx_grammar),
+        ("zed-keybind-context", rust_grammar),
+    ]) {
+        let language = Language::new(grammars::load_config(name), Some(grammar))
+            .with_queries(grammars::load_queries(name))
+            .with_context(|| format!("could not initialize the bundled {name} grammar"))?;
+        registry.add(Arc::new(language));
+    }
     Ok(registry)
 }
 

@@ -3,7 +3,8 @@
 Zed の編集コアを使う CUI エディタの実現可能性を検証するプロジェクトです。
 
 現在は、GPUI の headless runtime 上で `editor::Editor` を動かし、Crossterm から
-Zed の keymap へ入力を渡し、Ratatui で plain text とカーソルを描画します。
+Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを
+描画します。
 
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に記録します。
 
@@ -19,7 +20,8 @@ cargo run -- path/to/file
 `Shift` + 矢印や `Ctrl-A` のselectionもZedのkeymapで動き、選択範囲を端末上に
 反転表示します。
 
-`.rs` ファイルではZed同梱のRust queryとtree-sitter parserを使ってsyntax highlight
+Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
+Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight
 します。現在は実行時にLSPやNode runtimeを初期化しません。`NO_COLOR` が設定された
 環境ではCrosstermの規約どおり色を出しません。
 
