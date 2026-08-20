@@ -8,8 +8,8 @@ Zed の `editor::Editor` を編集機能の本体として使い、端末固有�
 Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
-selection表示、native languageのsyntax highlight、paste、resize、実ファイルのopen/save、
-dirty表示、終了時の端末復元まで実装済み。
+selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
+実ファイルのopen/save、dirty表示、終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -111,6 +111,9 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
   一箇所だけ座標変換層を置く。
 - Zedの全selectionを表示座標の半開区間として取得し、端末cell座標へ変換してから
   Ratatuiの文字描画後に反転styleだけを重ねる。文字列やselection状態は複製しない。
+- 行番号はdisplay rowを数えず、`DisplaySnapshot::row_infos` の `buffer_row` を表示する。
+  block rowやsoft-wrap継続行は空欄にし、`widest_line_number` からガター幅を固定する。
+  本文、cursor、selection、横scrollはすべてガターを除いた同じRectで計算する。
 - 初期段階では soft wrap を無効にして横スクロールを使う。GPUI の pixel 幅と端末の
   cell 幅を混ぜない。
 - terminal reader は別 thread で blocking input を読み、channel 経由で GPUI

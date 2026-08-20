@@ -18,7 +18,8 @@ cargo run -- path/to/file
 `Ctrl-Q` を押します。
 
 `Shift` + 矢印や `Ctrl-A` のselectionもZedのkeymapで動き、選択範囲を端末上に
-反転表示します。
+反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを
+追加した後も表示行を単純に数え直しません。
 
 Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
 Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight

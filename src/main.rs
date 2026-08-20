@@ -433,6 +433,12 @@ fn capture_editor(
     let lines = (0..=display.max_point().row().0)
         .map(|row| display.line(DisplayRow(row)))
         .collect::<Vec<_>>();
+    let line_numbers = display
+        .row_infos(DisplayRow(0))
+        .take(lines.len())
+        .map(|row| row.buffer_row.map(|row| row.saturating_add(1)))
+        .collect();
+    let widest_line_number = display.widest_line_number();
     let cursor = display_cursor(&lines, editor.selections.newest_display(&display).head());
     let selections = editor
         .selections
@@ -446,6 +452,13 @@ fn capture_editor(
         .collect();
     let line_styles = terminal_line_styles(&display, &editor_style, lines.len());
     let text_style = terminal_text_style(&editor_style.text, editor_style.background);
+    let gutter_style = TerminalStyle::new()
+        .fg(terminal_color(
+            editor_style
+                .background
+                .blend(cx.theme().colors().editor_line_number),
+        ))
+        .bg(terminal_color(editor_style.background));
 
     let dirty_marker = if dirty { " [+]" } else { "" };
     let mut status = format!("zec {label}{dirty_marker}  Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo");
@@ -455,9 +468,12 @@ fn capture_editor(
 
     RenderSnapshot {
         lines,
+        line_numbers,
+        widest_line_number,
         cursor: Some(cursor),
         selections,
         text_style,
+        gutter_style,
         line_styles,
         viewport,
         status,
@@ -576,7 +592,8 @@ fn draw(
     terminal
         .draw(|frame| {
             let area = frame.area();
-            keep_cursor_visible(viewport, snapshot.cursor, area.width, area.height);
+            let text_width = EditorWidget::new(snapshot).text_width(area);
+            keep_cursor_visible(viewport, snapshot.cursor, text_width, area.height);
             snapshot.viewport = *viewport;
 
             let widget = EditorWidget::new(snapshot);
@@ -689,5 +706,28 @@ mod tests {
                 left_column: 1,
             }
         );
+    }
+
+    #[test]
+    fn horizontal_scroll_uses_width_remaining_after_line_number_gutter() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["abcdef".into()],
+            line_numbers: vec![Some(1)],
+            widest_line_number: 9,
+            ..RenderSnapshot::default()
+        };
+        let area = ratatui::layout::Rect::new(0, 0, 6, 2);
+        let text_width = EditorWidget::new(&snapshot).text_width(area);
+        let mut viewport = Viewport::default();
+
+        keep_cursor_visible(
+            &mut viewport,
+            Some(Cursor { row: 0, column: 4 }),
+            text_width,
+            area.height,
+        );
+
+        assert_eq!(text_width, 4);
+        assert_eq!(viewport.left_column, 1);
     }
 }
