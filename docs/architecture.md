@@ -10,7 +10,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
 実ファイルのopen/save/save-as、buffer search、terminal clipboard、dirty表示、
-終了時の端末復元まで実装済み。
+複数tab、終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -37,7 +37,8 @@ FILE
     -> Zed RealFs
     -> WorktreeStore
     -> BufferStore
-    -> Zed Buffer
+    -> Zed Buffer × N
+    -> hidden Editor window × N
     -> tree-sitter parse / highlighted chunks
 ```
 
@@ -60,7 +61,7 @@ Ratatui は cell buffer、style、レイアウト、前後 frame の差分描画
 
 ## File I/O
 
-`zec FILE` はCLI入力を絶対パス化し、Zedの `RealFs -> WorktreeStore -> BufferStore` で
+`zec FILE...` はCLI入力を絶対パス化し、Zedの `RealFs -> WorktreeStore -> BufferStore` で
 開く。`Project` 全体や手書きの `std::fs::write` は使わない。これによりencoding、BOM、
 改行コード、保存version、外部ファイル状態をZed側の実装に任せられる。
 
@@ -79,6 +80,10 @@ Save Asの相対パスは起動時working directory基準で、shell expansion�
 regular fileは1回目のEnterで警告し、同じ入力で2回目のEnterを押した時だけ上書きする。
 directory、FIFO、その他のspecial fileは拒否する。この確認は操作ミスを防ぐUI境界であり、
 確認から保存までの外部filesystem raceを排除するatomic no-clobber保証ではない。
+複数tabは1組のLanguageRegistry、RealFs、WorktreeStore、BufferStoreを共有する。同じ
+ProjectPathのopenはBufferStoreが同じBuffer Entityへdedupeし、CLIの完全に同じpathも
+事前に除外する。Save As先が別tabのBufferとして既にopenなら、同じdisk pathに2 Bufferを
+結びつけず明示的に拒否する。
 
 Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEditorなので
 保存handlerがない。そのため `Ctrl-S` だけCLI側で捕捉して `BufferStore::save_buffer`
@@ -126,6 +131,20 @@ Zedのbackground highlightを `DisplayPoint` で取得してterminal cell範囲�
 query変更ごとに逐次awaitする。regex/word/case option、history、長時間検索のcancel/debounce、
 multiline queryは後続課題とする。
 
+## Tabs
+
+1 tabにつき `Editor::for_buffer` をrootにした非表示GPUI windowを1つ持つ。Zedのfocus、
+key context、action dispatch、selection、cursor、undo、DisplayMapはwindowごとそのまま使い、
+zecが持つ可変状態はactive indexとterminal viewportだけにする。公開 `replace_root` では既存の
+Editor Entityをrootへ付け替えられず、1 window内でchildを交換すると専用hostとfocus treeの
+同期が必要になるため採用しない。
+
+`Ctrl-PageUp` / `Ctrl-PageDown` はWorkspace/Paneを作っていないのでzecが捕捉し、activeな
+WindowHandleだけを描画・入力対象にする。各windowのfocusはwindow-localなのでOS windowの
+activateは不要。切替時はBuffer固有Anchorを別Editorへ渡さないよう検索をcloseし、Save As
+promptもcancelする。statusはactive位置と全tabのdirty状態を表示し、`Ctrl-S` はactiveだけ、
+`Ctrl-Q` は全Bufferを検査する。
+
 ## Why not `ratatui-textarea`
 
 `ratatui-textarea` は表示だけでなく、テキスト、カーソル、selection、入力処理、undo
@@ -166,9 +185,10 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-tabs、LSP、検索option/history、clipboard metadata/read、native set外のgrammar、
-完全なlanguage injection、terminal-aware soft wrapは後続で追加する。
+tabのopen/close/reorder UI、LSP、検索option/history、clipboard metadata/read、native set外の
+grammar、完全なlanguage injection、terminal-aware soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
-dirtyな終了保護、raw mode / alternate screenの復元まで確認する。
+tabごとの編集・undo・active save・全tab dirty終了保護、raw mode / alternate screenの復元まで
+確認する。

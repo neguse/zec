@@ -9,13 +9,14 @@ Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に記録します。
 
 ```sh
-cargo run -- path/to/file
+cargo run -- path/to/file another/file
 ```
 
-既存ファイルと未作成ファイルのどちらも開けます。文字入力、移動、`Ctrl-Z` のundo、
-`Ctrl-Y` のredoがZedの編集処理を通り、`Ctrl-S` でZedの `BufferStore` 経由で保存します。
-終了は `Ctrl-Q` です。未保存の変更がある場合だけ、破棄確認としてもう一度
-`Ctrl-Q` を押します。
+既存ファイルと未作成ファイルのどちらも複数指定でき、`Ctrl-PageUp` / `Ctrl-PageDown` で
+tabを切り替えます。各tabの本文、cursor、selection、undoは独立したZed Editorが保持し、
+viewportだけを端末側で保持します。`Ctrl-S` はactive tabだけをZedの `BufferStore` 経由で
+保存します。終了は `Ctrl-Q` です。どれか1つでも未保存なら、破棄確認としてもう一度
+`Ctrl-Q` を押します。statusには全tabのdirty markerを表示します。
 
 引数なしでは空のscratch bufferを開きます。`Ctrl-S` で1行のSave As promptに入り、
 相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、

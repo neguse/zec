@@ -2,9 +2,11 @@ mod clipboard;
 mod input;
 mod prompt;
 mod render;
+mod tabs;
 mod terminal;
 
 use std::{
+    collections::HashSet,
     env,
     ffi::OsString,
     io::{self, IsTerminal as _},
@@ -40,17 +42,18 @@ use ratatui::style::{
 use render::{
     BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
 };
+use tabs::{Direction as TabDirection, TabLabel};
 use terminal::{InputReader, TerminalEvent, TerminalSession, ZecTerminal};
 use theme::ActiveTheme as _;
 use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE]\n       zec --smoke\n\nKeys: Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
-    Edit(Option<PathBuf>),
+    Edit(Vec<PathBuf>),
     Smoke,
     Help,
 }
@@ -135,7 +138,7 @@ impl ActiveSearch {
 
 fn main() -> Result<()> {
     match parse_command(env::args_os().skip(1))? {
-        Command::Edit(path) => run_interactive(path),
+        Command::Edit(paths) => run_interactive(paths),
         Command::Smoke => {
             run_smoke();
             Ok(())
@@ -148,46 +151,61 @@ fn main() -> Result<()> {
 }
 
 fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Command> {
-    let mut arguments = arguments.into_iter();
-    let Some(first) = arguments.next() else {
-        return Ok(Command::Edit(None));
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    let Some(first) = arguments.first() else {
+        return Ok(Command::Edit(Vec::new()));
     };
 
     if first == "--help" || first == "-h" {
-        if arguments.next().is_some() {
+        if arguments.len() > 1 {
             bail!("--help does not accept arguments");
         }
         return Ok(Command::Help);
     }
     if first == "--smoke" {
-        if arguments.next().is_some() {
+        if arguments.len() > 1 {
             bail!("--smoke does not accept arguments");
         }
         return Ok(Command::Smoke);
     }
 
-    let path = if first == "--" {
-        arguments.next().context("expected a file path after --")?
-    } else {
-        if first.to_string_lossy().starts_with('-') {
-            bail!("unknown option: {}", first.to_string_lossy());
+    let mut paths = Vec::new();
+    let mut positional_only = false;
+    for argument in arguments {
+        if !positional_only && argument == "--" {
+            positional_only = true;
+            continue;
         }
-        first
-    };
-    if arguments.next().is_some() {
-        bail!("zec currently opens one file at a time");
+        if !positional_only && argument.to_string_lossy().starts_with('-') {
+            bail!("unknown option: {}", argument.to_string_lossy());
+        }
+        paths.push(argument.into());
+    }
+    if positional_only && paths.is_empty() {
+        bail!("expected a file path after --");
     }
 
-    Ok(Command::Edit(Some(path.into())))
+    Ok(Command::Edit(paths))
 }
 
-fn run_interactive(path: Option<PathBuf>) -> Result<()> {
-    let path = path
+fn absolute_unique_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut unique_paths = HashSet::new();
+    paths
+        .into_iter()
         .map(|path| {
             std::path::absolute(&path)
                 .with_context(|| format!("failed to make {} absolute", path.display()))
         })
-        .transpose()?;
+        .filter_map(|path| match path {
+            Ok(path) if unique_paths.insert(path.clone()) => Some(Ok(path)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
+    let paths = absolute_unique_paths(paths)?;
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(
@@ -205,44 +223,65 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
 
     gpui_platform::headless().run(move |cx| {
         init_zed(cx);
-        let document = open_document(path, cx);
+        let services = file_services(cx);
+        let documents = if paths.is_empty() {
+            vec![open_document(None, services.clone(), cx)]
+        } else {
+            paths
+                .into_iter()
+                .map(|path| open_document(Some(path), services.clone(), cx))
+                .collect()
+        };
 
         cx.spawn(async move |cx| {
-            let mut document = match document.await {
-                Ok(document) => document,
-                Err(error) => {
-                    let _ = error_sender.try_send(format!("failed to open file: {error:#}"));
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
-                }
-            };
-            let editor_window = match cx.update(|cx| open_editor(document.buffer.clone(), cx)) {
-                Ok(window) => window,
-                Err(error) => {
-                    let _ = error_sender
-                        .try_send(format!("failed to open headless editor window: {error:#}"));
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
-                }
-            };
-            let input_window: AnyWindowHandle = editor_window.into();
-            if let Err(error) = editor_window.update(cx, |_editor, _window, cx| {
-                cx.subscribe(&document.buffer, move |_, _, event, _| {
-                    if matches!(
-                        event,
-                        BufferEvent::LanguageChanged(_) | BufferEvent::Reparsed
-                    ) {
-                        let _ = redraw_sender.try_send(TerminalEvent::Redraw);
+            let mut tabs = Vec::with_capacity(documents.len());
+            let mut opened_buffer_ids = HashSet::new();
+            for document in documents {
+                let document = match document.await {
+                    Ok(document) => document,
+                    Err(error) => {
+                        let _ = error_sender.try_send(format!("failed to open file: {error:#}"));
+                        let _ = cx.update(|cx| cx.quit());
+                        return;
                     }
-                })
-                .detach();
-            }) {
-                let _ =
-                    error_sender.try_send(format!("failed to observe syntax updates: {error:#}"));
-                let _ = cx.update(|cx| cx.quit());
-                return;
+                };
+                if !opened_buffer_ids.insert(document.buffer.entity_id()) {
+                    continue;
+                }
+                let editor_window = match cx.update(|cx| open_editor(document.buffer.clone(), cx)) {
+                    Ok(window) => window,
+                    Err(error) => {
+                        let _ = error_sender
+                            .try_send(format!("failed to open headless editor window: {error:#}"));
+                        let _ = cx.update(|cx| cx.quit());
+                        return;
+                    }
+                };
+                let tab_redraw_sender = redraw_sender.clone();
+                if let Err(error) = editor_window.update(cx, |_editor, _window, cx| {
+                    cx.subscribe(&document.buffer, move |_, _, event, _| {
+                        if matches!(
+                            event,
+                            BufferEvent::LanguageChanged(_) | BufferEvent::Reparsed
+                        ) {
+                            let _ = tab_redraw_sender.try_send(TerminalEvent::Redraw);
+                        }
+                    })
+                    .detach();
+                }) {
+                    let _ = error_sender
+                        .try_send(format!("failed to observe syntax updates: {error:#}"));
+                    let _ = cx.update(|cx| cx.quit());
+                    return;
+                }
+                tabs.push(DocumentTab {
+                    document,
+                    editor_window,
+                    viewport: Viewport::default(),
+                });
             }
-            let mut viewport = Viewport::default();
+
+            let mut active_index = 0;
             let mut failure = None;
             let mut message = None;
             let mut quit_armed = false;
@@ -250,14 +289,16 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
             let mut save_as_prompt: Option<SaveAsPrompt> = None;
 
             loop {
+                let editor_window = tabs[active_index].editor_window;
+                let input_window: AnyWindowHandle = editor_window.into();
+                let status_label = tab_status(&tabs, active_index, cx);
+                let viewport = tabs[active_index].viewport;
                 let mut snapshot = match editor_window.update(cx, |editor, _window, cx| {
-                    let dirty = document.buffer.read(cx).is_dirty();
                     capture_editor(
                         editor,
                         cx,
                         viewport,
-                        &document.label,
-                        dirty,
+                        &status_label,
                         message.as_deref(),
                         active_search.as_ref(),
                         save_as_prompt.as_ref(),
@@ -270,7 +311,11 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                     }
                 };
 
-                if let Err(error) = draw(&mut terminal, &mut snapshot, &mut viewport) {
+                if let Err(error) = draw(
+                    &mut terminal,
+                    &mut snapshot,
+                    &mut tabs[active_index].viewport,
+                ) {
                     failure = Some(format!("failed to draw terminal: {error}"));
                     break;
                 }
@@ -285,19 +330,56 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
 
                 match event {
                     TerminalEvent::Key(event) if input::is_quit(&event) => {
-                        let dirty = document.buffer.read_with(cx, |buffer, _| buffer.is_dirty());
-                        if !dirty || quit_armed {
+                        let dirty_count = tabs
+                            .iter()
+                            .filter(|tab| {
+                                tab.document
+                                    .buffer
+                                    .read_with(cx, |buffer, _| buffer.is_dirty())
+                            })
+                            .count();
+                        if dirty_count == 0 || quit_armed {
                             break;
                         }
 
                         quit_armed = true;
-                        message = Some("unsaved changes; press Ctrl-Q again to discard".to_owned());
+                        message = Some(format!(
+                            "{dirty_count} unsaved tab(s); press Ctrl-Q again to discard"
+                        ));
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_previous_tab(&event) || input::is_next_tab(&event) =>
+                    {
+                        let direction = if input::is_previous_tab(&event) {
+                            TabDirection::Previous
+                        } else {
+                            TabDirection::Next
+                        };
+                        let Some(next_index) =
+                            tabs::adjacent_index(active_index, tabs.len(), direction)
+                        else {
+                            continue;
+                        };
+                        if next_index != active_index {
+                            if active_search.take().is_some()
+                                && let Err(error) = close_search(&editor_window, cx)
+                            {
+                                failure = Some(format!("failed to close buffer search: {error:#}"));
+                                break;
+                            }
+                            save_as_prompt = None;
+                            active_index = next_index;
+                            quit_armed = false;
+                            message = None;
+                        }
                     }
                     TerminalEvent::Key(event) if input::is_save(&event) => {
                         quit_armed = false;
                         if save_as_prompt.is_none() {
-                            if document.path.is_some() {
-                                match save_document(&document, cx).await {
+                            if tabs[active_index].document.path.is_some() {
+                                match save_document(&tabs[active_index].document, &services, cx)
+                                    .await
+                                {
                                     Ok(()) => message = Some("saved".to_owned()),
                                     Err(error) => message = Some(format!("save failed: {error:#}")),
                                 }
@@ -423,7 +505,8 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                                     )
                                 };
                                 match save_document_as(
-                                    &document,
+                                    &tabs[active_index].document,
+                                    &services,
                                     &path,
                                     overwrite_path.as_deref(),
                                     cx,
@@ -441,14 +524,15 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                                         );
                                     }
                                     Ok(SaveAsOutcome::Saved(path)) => {
-                                        document.path = Some(path.clone());
-                                        document.label = path.display().to_string();
+                                        tabs[active_index].document.path = Some(path.clone());
+                                        tabs[active_index].document.label =
+                                            path.display().to_string();
                                         save_as_prompt = None;
                                         message = Some("saved".to_owned());
                                         if let Err(error) = assign_file_language(
                                             &path,
-                                            &document.buffer,
-                                            document.language_registry.clone(),
+                                            &tabs[active_index].document.buffer,
+                                            services.language_registry.clone(),
                                             cx,
                                         )
                                         .await
@@ -610,42 +694,60 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-struct OpenDocument {
-    buffer: Entity<Buffer>,
+#[derive(Clone)]
+struct FileServices {
     buffer_store: Entity<BufferStore>,
     worktree_store: Entity<WorktreeStore>,
     file_system: Arc<dyn Fs>,
     language_registry: Arc<LanguageRegistry>,
+}
+
+struct OpenDocument {
+    buffer: Entity<Buffer>,
     path: Option<PathBuf>,
     label: String,
 }
 
-fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocument>> {
+struct DocumentTab {
+    document: OpenDocument,
+    editor_window: WindowHandle<Editor>,
+    viewport: Viewport,
+}
+
+fn file_services(cx: &mut App) -> FileServices {
     let language_registry = native_language_registry(cx);
     let file_system: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
     let worktree_store =
         cx.new(|cx| WorktreeStore::local(true, file_system.clone(), WorktreeIdCounter::get(cx)));
     let buffer_store = cx.new(|cx| BufferStore::local(worktree_store.clone(), cx));
+    FileServices {
+        buffer_store,
+        worktree_store,
+        file_system,
+        language_registry,
+    }
+}
 
+fn open_document(
+    path: Option<PathBuf>,
+    services: FileServices,
+    cx: &mut App,
+) -> Task<Result<OpenDocument>> {
     let Some(path) = path else {
-        let buffer = buffer_store.update(cx, |store, cx| {
+        let buffer = services.buffer_store.update(cx, |store, cx| {
             store.create_local_buffer("", None, false, cx)
         });
         buffer
             .read(cx)
-            .set_language_registry(language_registry.clone());
+            .set_language_registry(services.language_registry.clone());
         return Task::ready(Ok(OpenDocument {
             buffer,
-            buffer_store,
-            worktree_store,
-            file_system,
-            language_registry,
             path: None,
             label: "[No Name]".to_owned(),
         }));
     };
 
-    let find_worktree = worktree_store.update(cx, |store, cx| {
+    let find_worktree = services.worktree_store.update(cx, |store, cx| {
         store.find_or_create_worktree(&path, false, cx)
     });
 
@@ -654,7 +756,8 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
             .await
             .with_context(|| format!("could not create a worktree for {}", path.display()))?;
         let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
-        let buffer = buffer_store
+        let buffer = services
+            .buffer_store
             .update(cx, |store, cx| {
                 store.open_buffer(
                     ProjectPath {
@@ -666,16 +769,12 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
             })
             .await
             .with_context(|| format!("could not load {}", path.display()))?;
-        assign_file_language(&path, &buffer, language_registry.clone(), cx)
+        assign_file_language(&path, &buffer, services.language_registry.clone(), cx)
             .await
             .with_context(|| format!("could not select a language for {}", path.display()))?;
 
         Ok(OpenDocument {
             buffer,
-            buffer_store,
-            worktree_store,
-            file_system,
-            language_registry,
             path: Some(path.clone()),
             label: path.display().to_string(),
         })
@@ -757,9 +856,13 @@ async fn assign_file_language(
     Ok(())
 }
 
-async fn save_document(document: &OpenDocument, cx: &mut gpui::AsyncApp) -> Result<()> {
+async fn save_document(
+    document: &OpenDocument,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
     let path = document.path.as_ref().context("buffer has no file path")?;
-    document
+    services
         .buffer_store
         .update(cx, |store, cx| {
             store.save_buffer(document.buffer.clone(), cx)
@@ -776,12 +879,13 @@ enum SaveAsOutcome {
 
 async fn save_document_as(
     document: &OpenDocument,
+    services: &FileServices,
     input: &str,
     overwrite_path: Option<&Path>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<SaveAsOutcome> {
     let path = resolve_save_path(input)?;
-    if let Some(metadata) = document
+    if let Some(metadata) = services
         .file_system
         .metadata(&path)
         .await
@@ -790,7 +894,7 @@ async fn save_document_as(
         if metadata.is_dir {
             bail!("{} is a directory", path.display());
         }
-        if metadata.is_fifo || !document.file_system.is_file(&path).await {
+        if metadata.is_fifo || !services.file_system.is_file(&path).await {
             bail!("{} is not a regular file", path.display());
         }
         if overwrite_path != Some(path.as_path()) {
@@ -798,7 +902,7 @@ async fn save_document_as(
         }
     }
 
-    let (worktree, relative_path) = document
+    let (worktree, relative_path) = services
         .worktree_store
         .update(cx, |store, cx| {
             store.find_or_create_worktree(&path, false, cx)
@@ -806,17 +910,20 @@ async fn save_document_as(
         .await
         .with_context(|| format!("could not create a worktree for {}", path.display()))?;
     let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
-    document
+    let project_path = ProjectPath {
+        worktree_id,
+        path: relative_path,
+    };
+    let open_buffer = services
+        .buffer_store
+        .read_with(cx, |store, _| store.get_by_path(&project_path));
+    if open_buffer.is_some_and(|buffer| buffer != document.buffer) {
+        bail!("{} is already open in another tab", path.display());
+    }
+    services
         .buffer_store
         .update(cx, |store, cx| {
-            store.save_buffer_as(
-                document.buffer.clone(),
-                ProjectPath {
-                    worktree_id,
-                    path: relative_path,
-                },
-                cx,
-            )
+            store.save_buffer_as(document.buffer.clone(), project_path, cx)
         })
         .await
         .with_context(|| format!("could not save {}", path.display()))?;
@@ -972,12 +1079,36 @@ fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Edit
     .context("GPUI could not create the hidden window")
 }
 
+fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> String {
+    let multiple = tabs.len() > 1;
+    let labels = tabs
+        .iter()
+        .map(|tab| {
+            let name = if multiple {
+                tab.document
+                    .path
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| tab.document.label.clone())
+            } else {
+                tab.document.label.clone()
+            };
+            let dirty = tab
+                .document
+                .buffer
+                .read_with(cx, |buffer, _| buffer.is_dirty());
+            TabLabel { name, dirty }
+        })
+        .collect::<Vec<_>>();
+    tabs::format_status(&labels, active)
+}
+
 fn capture_editor(
     editor: &mut Editor,
     cx: &mut gpui::Context<Editor>,
     viewport: Viewport,
-    label: &str,
-    dirty: bool,
+    status_label: &str,
     message: Option<&str>,
     search: Option<&ActiveSearch>,
     save_as: Option<&SaveAsPrompt>,
@@ -1043,9 +1174,8 @@ fn capture_editor(
         let (status, cursor) = search.status(message);
         (status, Some(cursor))
     } else {
-        let dirty_marker = if dirty { " [+]" } else { "" };
         let mut status = format!(
-            "zec {label}{dirty_marker}  Ctrl-F find  Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo"
+            "zec {status_label}  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -1252,24 +1382,47 @@ mod tests {
 
     #[test]
     fn parses_cli_modes_and_file_paths() {
-        assert_eq!(command(&[]).unwrap(), Command::Edit(None));
+        assert_eq!(command(&[]).unwrap(), Command::Edit(Vec::new()));
         assert_eq!(
             command(&["notes.txt"]).unwrap(),
-            Command::Edit(Some(PathBuf::from("notes.txt")))
+            Command::Edit(vec![PathBuf::from("notes.txt")])
+        );
+        assert_eq!(
+            command(&["one.rs", "two.rs"]).unwrap(),
+            Command::Edit(vec![PathBuf::from("one.rs"), PathBuf::from("two.rs")])
         );
         assert_eq!(command(&["--smoke"]).unwrap(), Command::Smoke);
         assert_eq!(command(&["--help"]).unwrap(), Command::Help);
         assert_eq!(
-            command(&["--", "-draft.txt"]).unwrap(),
-            Command::Edit(Some(PathBuf::from("-draft.txt")))
+            command(&["--", "-draft.txt", "second.txt"]).unwrap(),
+            Command::Edit(vec![
+                PathBuf::from("-draft.txt"),
+                PathBuf::from("second.txt")
+            ])
         );
     }
 
     #[test]
-    fn rejects_unknown_options_and_multiple_files() {
+    fn rejects_unknown_options_and_invalid_modes() {
         assert!(command(&["--wat"]).is_err());
-        assert!(command(&["one", "two"]).is_err());
         assert!(command(&["--"]).is_err());
+        assert!(command(&["--help", "file.txt"]).is_err());
+        assert!(command(&["--smoke", "file.txt"]).is_err());
+    }
+
+    #[test]
+    fn makes_cli_paths_absolute_and_removes_exact_duplicates() {
+        let paths = absolute_unique_paths(vec![
+            PathBuf::from("one.rs"),
+            PathBuf::from("one.rs"),
+            PathBuf::from("two.rs"),
+        ])
+        .unwrap();
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|path| path.is_absolute()));
+        assert!(paths[0].ends_with("one.rs"));
+        assert!(paths[1].ends_with("two.rs"));
     }
 
     #[test]
