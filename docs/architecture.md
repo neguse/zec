@@ -131,6 +131,19 @@ Zedのbackground highlightを `DisplayPoint` で取得してterminal cell範囲�
 query変更ごとに逐次awaitする。regex/word/case option、history、長時間検索のcancel/debounce、
 multiline queryは後続課題とする。
 
+`Ctrl-H`で同じsessionにsingle-line replacement promptを加える。query/replacementの入力と
+focusだけはterminal chromeが持つが、置換範囲、anchor、編集順、transaction、undoは公開
+`SearchableItem::replace` / `replace_all`へ戻す。Editor実装は単一置換を1 transaction、全件を
+まとめて1 transactionにするため、zecは本文editを組み立てない。単一置換では編集前のmatch
+anchorで次へ進んでから検索し直し、replacement自体がqueryを含んでも同じmatchに留まりにくくする。
+全置換後も明示的に再検索し、terminal側のmatch countとbackground highlightを同期する。
+
+legacy terminalでは`Ctrl-Enter`と`Enter`を区別できない場合があるため、replace欄では
+`Enter`を単一置換、`Alt-Enter`を全置換のportableな操作とし、識別できる場合だけ
+`Ctrl-Enter`も全置換として受ける。replacementの改行入力はsingle-line promptの境界外として
+後続課題にする。prompt中の本文shortcut漏れを防ぐため、置換の`Ctrl-Z`は`Esc`で検索を
+閉じた後に実行する。
+
 ## Go to line
 
 `Ctrl-G`のZed actionはWorkspace modalを要求し、standalone Editorではhandlerが何も行わない。
@@ -186,7 +199,8 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 メイン編集領域には状態を持たない専用 Ratatui Widget を使い、
 `DisplaySnapshot -> terminal cells` の変換だけを実装する。
-検索欄、Save As、OpenはZed管理外の小さなsingle-line入力なので、共通の軽量prompt stateをzecが
+検索・置換欄、Save As、Open、Go to lineはZed管理外の小さなsingle-line入力なので、
+共通の軽量prompt stateをzecが
 持つ。必要な操作が文字入力、cursor移動、削除、submit、cancelだけであるため、現時点では
 `ratatui-textarea`を追加せず、この境界を約1型に限定している。
 

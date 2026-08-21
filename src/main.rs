@@ -50,7 +50,7 @@ use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-G go to line, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G go to line, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -62,10 +62,20 @@ enum Command {
 #[derive(Debug)]
 struct ActiveSearch {
     prompt: LinePrompt,
+    replacement: LinePrompt,
+    replace_enabled: bool,
+    focused_field: SearchField,
     matches: Vec<Range<Anchor>>,
     active_match: Option<usize>,
     token: SearchToken,
     error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SearchField {
+    #[default]
+    Query,
+    Replacement,
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +177,9 @@ impl Default for ActiveSearch {
     fn default() -> Self {
         Self {
             prompt: LinePrompt::new(),
+            replacement: LinePrompt::new(),
+            replace_enabled: false,
+            focused_field: SearchField::Query,
             matches: Vec::new(),
             active_match: None,
             token: SearchToken::default(),
@@ -180,23 +193,60 @@ impl ActiveSearch {
         let position = self.active_match.map_or(0, |index| index.saturating_add(1));
         let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
         let prompt_prefix = format!("{message_prefix}Find: ");
-        let cursor_column = prompt_prefix.width().saturating_add(
-            self.prompt
-                .text()
-                .get(..self.prompt.cursor())
-                .unwrap_or_default()
-                .width(),
-        );
-        let mut status = format!(
-            "{prompt_prefix}{}  {position}/{}",
-            self.prompt.text(),
-            self.matches.len()
-        );
+        let (mut status, cursor_column) = if self.replace_enabled {
+            let replacement_prefix = format!("{prompt_prefix}{}  Replace: ", self.prompt.text());
+            let cursor_column = match self.focused_field {
+                SearchField::Query => prompt_prefix.width().saturating_add(
+                    self.prompt
+                        .text()
+                        .get(..self.prompt.cursor())
+                        .unwrap_or_default()
+                        .width(),
+                ),
+                SearchField::Replacement => replacement_prefix.width().saturating_add(
+                    self.replacement
+                        .text()
+                        .get(..self.replacement.cursor())
+                        .unwrap_or_default()
+                        .width(),
+                ),
+            };
+            (
+                format!(
+                    "{replacement_prefix}{}  {position}/{}  Tab/BackTab field  Enter replace  Alt-Enter all  Esc close",
+                    self.replacement.text(),
+                    self.matches.len()
+                ),
+                cursor_column,
+            )
+        } else {
+            (
+                format!(
+                    "{prompt_prefix}{}  {position}/{}",
+                    self.prompt.text(),
+                    self.matches.len()
+                ),
+                prompt_prefix.width().saturating_add(
+                    self.prompt
+                        .text()
+                        .get(..self.prompt.cursor())
+                        .unwrap_or_default()
+                        .width(),
+                ),
+            )
+        };
         if let Some(error) = &self.error {
             status.push_str("  ");
             status.push_str(error);
         }
         (status, cursor_column)
+    }
+
+    fn focused_prompt_mut(&mut self) -> &mut LinePrompt {
+        match self.focused_field {
+            SearchField::Query => &mut self.prompt,
+            SearchField::Replacement => &mut self.replacement,
+        }
     }
 }
 
@@ -510,16 +560,52 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
-                            && active_search.is_none()
                         {
                             message = None;
-                            if let Err(error) = editor_window.update(cx, |editor, window, cx| {
-                                editor.search_bar_visibility_changed(true, window, cx);
-                            }) {
-                                failure = Some(format!("failed to start buffer search: {error}"));
-                                break;
+                            if let Some(search) = active_search.as_mut() {
+                                search.focused_field = SearchField::Query;
+                            } else {
+                                if let Err(error) =
+                                    editor_window.update(cx, |editor, window, cx| {
+                                        editor.search_bar_visibility_changed(true, window, cx);
+                                    })
+                                {
+                                    failure =
+                                        Some(format!("failed to start buffer search: {error}"));
+                                    break;
+                                }
+                                active_search = Some(ActiveSearch::default());
                             }
-                            active_search = Some(ActiveSearch::default());
+                        }
+                    }
+                    TerminalEvent::Key(event) if input::is_replace(&event) => {
+                        quit_armed = false;
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                        {
+                            message = None;
+                            if let Some(search) = active_search.as_mut() {
+                                search.replace_enabled = !search.replace_enabled;
+                                search.focused_field = if search.replace_enabled {
+                                    SearchField::Replacement
+                                } else {
+                                    SearchField::Query
+                                };
+                            } else {
+                                if let Err(error) =
+                                    editor_window.update(cx, |editor, window, cx| {
+                                        editor.search_bar_visibility_changed(true, window, cx);
+                                    })
+                                {
+                                    failure =
+                                        Some(format!("failed to start buffer search: {error}"));
+                                    break;
+                                }
+                                let mut search = ActiveSearch::default();
+                                search.replace_enabled = true;
+                                active_search = Some(search);
+                            }
                         }
                     }
                     TerminalEvent::Key(event) if input::is_go_to_line(&event) => {
@@ -875,10 +961,55 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         }
                     }
                     TerminalEvent::Key(event) if active_search.is_some() => {
+                        let replace_enabled = active_search
+                            .as_ref()
+                            .expect("search checked above")
+                            .replace_enabled;
+                        if replace_enabled && let Some(field) = search_field_for_key(&event) {
+                            let search = active_search.as_mut().expect("search checked above");
+                            search.focused_field = field;
+                            quit_armed = false;
+                            message = None;
+                            continue;
+                        }
+
+                        let focused_field = active_search
+                            .as_ref()
+                            .expect("search checked above")
+                            .focused_field;
+                        if replace_enabled
+                            && focused_field == SearchField::Replacement
+                            && is_replace_all(&event)
+                        {
+                            quit_armed = false;
+                            message = None;
+                            match replace_all_matches(
+                                active_search.as_mut().expect("search checked above"),
+                                &editor_window,
+                                cx,
+                            )
+                            .await
+                            {
+                                Ok(Some(0)) => message = Some("no matches".to_owned()),
+                                Ok(Some(count)) => {
+                                    message = Some(format!("replaced {count} matches"))
+                                }
+                                Ok(None) => {
+                                    active_search.as_mut().expect("search checked above").error =
+                                        Some("buffer is read-only".to_owned());
+                                }
+                                Err(error) => {
+                                    failure = Some(format!("buffer replace failed: {error:#}"));
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+
                         let action = active_search
                             .as_mut()
                             .expect("search checked above")
-                            .prompt
+                            .focused_prompt_mut()
                             .handle_key(&event);
                         if action != PromptAction::Ignored {
                             quit_armed = false;
@@ -895,8 +1026,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             message = None;
                         }
 
-                        let result = match action {
-                            PromptAction::Changed => {
+                        let result = match (focused_field, action) {
+                            (SearchField::Query, PromptAction::Changed) => {
                                 refresh_search(
                                     active_search.as_mut().expect("search checked above"),
                                     &editor_window,
@@ -904,20 +1035,52 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 )
                                 .await
                             }
-                            PromptAction::Submit | PromptAction::Next => step_search(
+                            (SearchField::Replacement, PromptAction::Changed) => {
+                                active_search.as_mut().expect("search checked above").error = None;
+                                Ok(())
+                            }
+                            (SearchField::Replacement, PromptAction::Submit) => {
+                                match replace_current_match(
+                                    active_search.as_mut().expect("search checked above"),
+                                    &editor_window,
+                                    cx,
+                                )
+                                .await
+                                {
+                                    Ok(Some(0)) => {
+                                        message = Some("no match".to_owned());
+                                        Ok(())
+                                    }
+                                    Ok(Some(_)) => {
+                                        message = Some("replaced 1 match".to_owned());
+                                        Ok(())
+                                    }
+                                    Ok(None) => {
+                                        active_search
+                                            .as_mut()
+                                            .expect("search checked above")
+                                            .error = Some("buffer is read-only".to_owned());
+                                        Ok(())
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            (_, PromptAction::Submit | PromptAction::Next) => step_search(
                                 active_search.as_mut().expect("search checked above"),
                                 Direction::Next,
                                 &editor_window,
                                 cx,
                             ),
-                            PromptAction::AlternateSubmit | PromptAction::Previous => step_search(
-                                active_search.as_mut().expect("search checked above"),
-                                Direction::Prev,
-                                &editor_window,
-                                cx,
-                            ),
-                            PromptAction::Cancel => close_search(&editor_window, cx),
-                            PromptAction::CursorMoved | PromptAction::Ignored => Ok(()),
+                            (_, PromptAction::AlternateSubmit | PromptAction::Previous) => {
+                                step_search(
+                                    active_search.as_mut().expect("search checked above"),
+                                    Direction::Prev,
+                                    &editor_window,
+                                    cx,
+                                )
+                            }
+                            (_, PromptAction::Cancel) => close_search(&editor_window, cx),
+                            (_, PromptAction::CursorMoved | PromptAction::Ignored) => Ok(()),
                         };
                         if let Err(error) = result {
                             failure = Some(format!("buffer search failed: {error:#}"));
@@ -968,23 +1131,31 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         }
                     }
                     TerminalEvent::Paste(text) if active_search.is_some() => {
+                        let focused_field = active_search
+                            .as_ref()
+                            .expect("search checked above")
+                            .focused_field;
                         let action = active_search
                             .as_mut()
                             .expect("search checked above")
-                            .prompt
+                            .focused_prompt_mut()
                             .handle_paste(&text);
                         if action == PromptAction::Changed {
                             quit_armed = false;
                             message = None;
-                            if let Err(error) = refresh_search(
-                                active_search.as_mut().expect("search checked above"),
-                                &editor_window,
-                                cx,
-                            )
-                            .await
-                            {
-                                failure = Some(format!("buffer search failed: {error:#}"));
-                                break;
+                            if focused_field == SearchField::Query {
+                                if let Err(error) = refresh_search(
+                                    active_search.as_mut().expect("search checked above"),
+                                    &editor_window,
+                                    cx,
+                                )
+                                .await
+                                {
+                                    failure = Some(format!("buffer search failed: {error:#}"));
+                                    break;
+                                }
+                            } else {
+                                active_search.as_mut().expect("search checked above").error = None;
                             }
                         }
                     }
@@ -1035,6 +1206,27 @@ fn resets_confirmation(
             if event.kind == crossterm::event::KeyEventKind::Press
                 && !confirmation_key(event)
     ) || matches!(event, TerminalEvent::Paste(_))
+}
+
+fn search_field_for_key(event: &crossterm::event::KeyEvent) -> Option<SearchField> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if event.kind != KeyEventKind::Press {
+        return None;
+    }
+    match (event.code, event.modifiers) {
+        (KeyCode::Tab, KeyModifiers::NONE) => Some(SearchField::Replacement),
+        (KeyCode::BackTab, KeyModifiers::NONE | KeyModifiers::SHIFT) => Some(SearchField::Query),
+        _ => None,
+    }
+}
+
+fn is_replace_all(event: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Enter
+        && matches!(event.modifiers, KeyModifiers::ALT | KeyModifiers::CONTROL)
 }
 
 #[derive(Clone)]
@@ -1351,16 +1543,7 @@ async fn refresh_search(
         return Ok(());
     }
 
-    let query = match SearchQuery::text(
-        search.prompt.text(),
-        false,
-        false,
-        false,
-        Default::default(),
-        Default::default(),
-        false,
-        None,
-    ) {
+    let query = match build_search_query(search) {
         Ok(query) => query,
         Err(error) => {
             editor_window.update(cx, |editor, window, cx| {
@@ -1390,6 +1573,68 @@ async fn refresh_search(
     search.active_match = active_match;
     search.token = token;
     Ok(())
+}
+
+fn build_search_query(search: &ActiveSearch) -> Result<SearchQuery> {
+    SearchQuery::text(
+        search.prompt.text(),
+        false,
+        false,
+        false,
+        Default::default(),
+        Default::default(),
+        false,
+        None,
+    )
+}
+
+async fn replace_current_match(
+    search: &mut ActiveSearch,
+    editor_window: &WindowHandle<Editor>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Option<usize>> {
+    let Some(active_match) = search.active_match else {
+        return Ok(Some(0));
+    };
+    let Some(search_match) = search.matches.get(active_match).cloned() else {
+        return Ok(Some(0));
+    };
+    if editor_window.update(cx, |editor, _window, cx| editor.read_only(cx))? {
+        return Ok(None);
+    }
+
+    let query = build_search_query(search)?.with_replacement(search.replacement.text().to_owned());
+    editor_window.update(cx, |editor, window, cx| {
+        editor.replace(&search_match, &query, search.token, window, cx);
+    })?;
+
+    // Advance through the pre-edit anchors before refreshing. This avoids selecting the same
+    // occurrence again when its replacement also contains the query.
+    step_search(search, Direction::Next, editor_window, cx)?;
+    refresh_search(search, editor_window, cx).await?;
+    Ok(Some(1))
+}
+
+async fn replace_all_matches(
+    search: &mut ActiveSearch,
+    editor_window: &WindowHandle<Editor>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Option<usize>> {
+    if search.matches.is_empty() {
+        return Ok(Some(0));
+    }
+    if editor_window.update(cx, |editor, _window, cx| editor.read_only(cx))? {
+        return Ok(None);
+    }
+
+    let query = build_search_query(search)?.with_replacement(search.replacement.text().to_owned());
+    let matches = search.matches.clone();
+    editor_window.update(cx, |editor, window, cx| {
+        editor.replace_all(&mut matches.iter(), &query, search.token, window, cx);
+    })?;
+    let replaced = matches.len();
+    refresh_search(search, editor_window, cx).await?;
+    Ok(Some(replaced))
 }
 
 fn step_search(
@@ -1607,7 +1852,7 @@ fn capture_editor(
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-G line  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -2038,6 +2283,130 @@ mod tests {
     }
 
     #[test]
+    fn search_replace_uses_zed_anchors_and_undo_transactions() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let original = "one two one";
+            let buffer = cx.new(|cx| Buffer::local(original.to_owned(), cx));
+            let window = open_editor(buffer, cx).expect("open editor");
+
+            cx.spawn(async move |cx| {
+                let mut search = ActiveSearch {
+                    prompt: LinePrompt::with_text("one"),
+                    replacement: LinePrompt::with_text("X"),
+                    replace_enabled: true,
+                    focused_field: SearchField::Replacement,
+                    ..ActiveSearch::default()
+                };
+
+                refresh_search(&mut search, &window, cx)
+                    .await
+                    .expect("find initial matches");
+                let initial_matches = search.matches.len();
+                let single_count = replace_current_match(&mut search, &window, cx)
+                    .await
+                    .expect("replace current match");
+                let single_text = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read single replacement");
+
+                window
+                    .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))
+                    .expect("undo single replacement");
+                let after_single_undo = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read single replacement undo");
+
+                search.replacement = LinePrompt::with_text("one!");
+                refresh_search(&mut search, &window, cx)
+                    .await
+                    .expect("refresh self-matching query");
+                replace_current_match(&mut search, &window, cx)
+                    .await
+                    .expect("replace first self-matching occurrence");
+                let self_matching_first_text = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read first self-matching replacement");
+                replace_current_match(&mut search, &window, cx)
+                    .await
+                    .expect("advance past self-matching replacement");
+                let self_matching_second_text = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read second self-matching replacement");
+
+                window
+                    .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))
+                    .expect("undo self-matching replacements");
+                let after_self_matching_undo = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read self-matching replacement undo");
+
+                search.replacement = LinePrompt::with_text("X");
+                refresh_search(&mut search, &window, cx)
+                    .await
+                    .expect("refresh matches after undo");
+                let all_count = replace_all_matches(&mut search, &window, cx)
+                    .await
+                    .expect("replace all matches");
+                let all_text = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read all replacements");
+
+                window
+                    .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))
+                    .expect("undo all replacements");
+                let after_all_undo = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read all replacement undo");
+
+                sender
+                    .send((
+                        initial_matches,
+                        single_count,
+                        single_text,
+                        after_single_undo,
+                        self_matching_first_text,
+                        self_matching_second_text,
+                        after_self_matching_undo,
+                        all_count,
+                        all_text,
+                        after_all_undo,
+                    ))
+                    .expect("send replacement results");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (
+            initial_matches,
+            single_count,
+            single_text,
+            after_single_undo,
+            self_matching_first_text,
+            self_matching_second_text,
+            after_self_matching_undo,
+            all_count,
+            all_text,
+            after_all_undo,
+        ) = receiver.recv().expect("receive replacement results");
+
+        assert_eq!(initial_matches, 2);
+        assert_eq!(single_count, Some(1));
+        assert_eq!(single_text.matches('X').count(), 1);
+        assert_eq!(single_text.matches("one").count(), 1);
+        assert_eq!(after_single_undo, "one two one");
+        assert_eq!(self_matching_first_text, "one! two one");
+        assert_eq!(self_matching_second_text, "one! two one!");
+        assert_eq!(after_self_matching_undo, "one two one");
+        assert_eq!(all_count, Some(2));
+        assert_eq!(all_text, "X two X");
+        assert_eq!(after_all_undo, "one two one");
+    }
+
+    #[test]
     fn open_status_tracks_unicode_cursor_and_clears_feedback_on_edit() {
         let mut open = OpenPrompt {
             prompt: LinePrompt::with_text("日本.rs"),
@@ -2065,6 +2434,74 @@ mod tests {
 
         go_to_line.text_changed();
         assert_eq!(go_to_line.feedback, None);
+    }
+
+    #[test]
+    fn replace_status_tracks_the_focused_unicode_prompt() {
+        let mut search = ActiveSearch {
+            prompt: LinePrompt::with_text("日本"),
+            replacement: LinePrompt::with_text("世界"),
+            replace_enabled: true,
+            focused_field: SearchField::Query,
+            ..ActiveSearch::default()
+        };
+
+        let (status, query_cursor) = search.status(Some("notice"));
+        assert!(status.starts_with("notice  |  Find: 日本  Replace: 世界"));
+        assert_eq!(query_cursor, "notice  |  Find: 日本".width());
+
+        search.focused_field = SearchField::Replacement;
+        let (_, replacement_cursor) = search.status(Some("notice"));
+        assert_eq!(
+            replacement_cursor,
+            "notice  |  Find: 日本  Replace: 世界".width()
+        );
+    }
+
+    #[test]
+    fn replace_prompt_shortcuts_are_unambiguous_and_press_only() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+        assert_eq!(
+            search_field_for_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SearchField::Replacement)
+        );
+        assert_eq!(
+            search_field_for_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(SearchField::Query)
+        );
+        assert!(is_replace_all(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT
+        )));
+        assert!(is_replace_all(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL
+        )));
+
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            assert_eq!(
+                search_field_for_key(&KeyEvent::new_with_kind(
+                    KeyCode::Tab,
+                    KeyModifiers::NONE,
+                    kind,
+                )),
+                None
+            );
+            assert!(!is_replace_all(&KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::ALT,
+                kind,
+            )));
+        }
+        assert!(!is_replace_all(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(!is_replace_all(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT
+        )));
     }
 
     #[test]

@@ -1,14 +1,14 @@
 //! Single-line terminal prompt state for terminal-owned commands.
 //!
 //! Zed owns the document editor. This module only edits text shown in terminal
-//! chrome (currently search and Save As) and translates prompt-local keys into
-//! commands for the caller.
+//! chrome (currently search/replace, Save As, Open, and Go to line) and translates
+//! prompt-local keys into commands for the caller.
 //!
 //! The cursor is always a UTF-8 byte offset on a `char` boundary. Movement and
 //! deletion operate on Unicode scalar values, not grapheme clusters. Paste is
 //! intentionally single-line: only the text before the first `\r` or `\n` is
 //! inserted. Search history, selection, undo, and search options are outside
-//! this minimal prompt.
+//! this minimal prompt. Search replacement transactions remain owned by Zed.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 

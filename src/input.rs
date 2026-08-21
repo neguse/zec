@@ -19,6 +19,12 @@ pub fn is_find(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_replace(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('h')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
 pub fn is_go_to_line(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('g')
@@ -71,7 +77,7 @@ pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
     event.modifiers == CrosstermModifiers::CONTROL
         && matches!(
             event.code,
-            KeyCode::Char('c' | 'f' | 'g' | 'n' | 'o' | 'q' | 's' | 'w' | 'x')
+            KeyCode::Char('c' | 'f' | 'g' | 'h' | 'n' | 'o' | 'q' | 's' | 'w' | 'x')
                 | KeyCode::PageUp
                 | KeyCode::PageDown
         )
@@ -265,6 +271,11 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_plain_control_h_press_as_replace() {
+        assert_plain_control_press_only(is_replace, 'h');
+    }
+
+    #[test]
     fn recognizes_only_plain_control_c_press_as_copy() {
         assert_plain_control_press_only(is_copy, 'c');
     }
@@ -357,7 +368,7 @@ mod tests {
             CrosstermModifiers::CONTROL,
             KeyEventKind::Repeat,
         )));
-        for character in ['c', 'g', 'n', 'o', 'w', 'x'] {
+        for character in ['c', 'g', 'h', 'n', 'o', 'w', 'x'] {
             assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
                 KeyCode::Char(character),
                 CrosstermModifiers::CONTROL,

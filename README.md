@@ -40,6 +40,9 @@ pasteは従来どおりterminalのbracketed pasteをZedへ渡します。
 `Ctrl-F` で大文字小文字を区別しないliteral検索を開始します。入力中にmatchを更新し、
 `Enter` または下矢印で次、上矢印（対応端末では `Shift-Enter` も可）で前へ移動し、
 `Esc` で検索を閉じます。match、移動、selection、autoscrollはZedの検索実装を使います。
+`Ctrl-H`ではreplace欄も表示します。`Tab` / `BackTab`でqueryとreplace欄を移動し、replace欄の
+`Enter`で現在のmatchを1件、`Alt-Enter`（識別できる端末では`Ctrl-Enter`も可）で全件を
+置換します。`Esc`で検索を閉じた後、単一置換と全置換はどちらも`Ctrl-Z`で戻せます。
 
 `Ctrl-G`では`line[:column]`形式の1-based位置へ移動します。行やcolumnが範囲外ならZedの
 BufferSnapshotで文書境界・行末へclipし、Unicode columnはbyte数ではなく文字位置として解決します。
