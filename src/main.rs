@@ -1,3 +1,4 @@
+mod clipboard;
 mod input;
 mod prompt;
 mod render;
@@ -15,7 +16,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use editor::{
     Anchor, Editor, EditorStyle, MultiBufferOffset,
-    actions::Undo,
+    actions::{Cut, Undo},
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
 };
 use gpui::{
@@ -45,7 +46,7 @@ use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE]\n       zec --smoke\n\nKeys: Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE]\n       zec --smoke\n\nKeys: Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -325,6 +326,74 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                             }
                             active_search = Some(ActiveSearch::default());
                         }
+                    }
+                    TerminalEvent::Key(event)
+                        if save_as_prompt.is_none()
+                            && active_search.is_none()
+                            && input::is_copy(&event) =>
+                    {
+                        quit_armed = false;
+                        let item = match editor_window.update(cx, |editor, _window, cx| {
+                            clipboard::item_for_copy(editor, cx)
+                        }) {
+                            Ok(item) => item,
+                            Err(error) => {
+                                failure =
+                                    Some(format!("failed to read clipboard selection: {error}"));
+                                break;
+                            }
+                        };
+                        match clipboard::write_osc52(terminal.backend_mut(), &item) {
+                            Ok(()) => message = Some("copied".to_owned()),
+                            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                                message = Some(format!("copy failed: {error}"));
+                            }
+                            Err(error) => {
+                                failure =
+                                    Some(format!("failed to write terminal clipboard: {error}"));
+                                break;
+                            }
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if save_as_prompt.is_none()
+                            && active_search.is_none()
+                            && input::is_cut(&event) =>
+                    {
+                        quit_armed = false;
+                        let item = match editor_window.update(cx, |editor, _window, cx| {
+                            (!editor.read_only(cx)).then(|| clipboard::item_for_cut(editor, cx))
+                        }) {
+                            Ok(Some(item)) => item,
+                            Ok(None) => {
+                                message = Some("cut failed: buffer is read-only".to_owned());
+                                continue;
+                            }
+                            Err(error) => {
+                                failure =
+                                    Some(format!("failed to read clipboard selection: {error}"));
+                                break;
+                            }
+                        };
+                        match clipboard::write_osc52(terminal.backend_mut(), &item) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                                message = Some(format!("cut failed: {error}"));
+                                continue;
+                            }
+                            Err(error) => {
+                                failure =
+                                    Some(format!("failed to write terminal clipboard: {error}"));
+                                break;
+                            }
+                        }
+                        if let Err(error) = input_window.update(cx, |_root, window, cx| {
+                            window.dispatch_action(Box::new(Cut), cx);
+                        }) {
+                            failure = Some(format!("failed to dispatch cut action: {error}"));
+                            break;
+                        }
+                        message = Some("cut".to_owned());
                     }
                     TerminalEvent::Key(event) if input::is_intercepted_shortcut(&event) => {}
                     TerminalEvent::Key(event) if save_as_prompt.is_some() => {

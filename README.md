@@ -26,6 +26,12 @@ promptはshellを通らないため、`~` はhome directoryへ展開しません
 反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを
 追加した後も表示行を単純に数え直しません。
 
+`Ctrl-C` はselection（空なら現在行）をterminal clipboardへcopyし、`Ctrl-X` はcopyに
+成功してからZedのCut actionで削除します。端末との受け渡しはOSC 52なので、対応端末の
+設定やtmuxのclipboard設定が必要な場合があります。端末から成功応答は返らないため、
+未対応端末では操作が無視されます。巨大なcontrol sequenceを避けるため1回256 KiBまでです。
+pasteは従来どおりterminalのbracketed pasteをZedへ渡します。
+
 `Ctrl-F` で大文字小文字を区別しないliteral検索を開始します。入力中にmatchを更新し、
 `Enter` または下矢印で次、上矢印（対応端末では `Shift-Enter` も可）で前へ移動し、
 `Esc` で検索を閉じます。match、移動、selection、autoscrollはZedの検索実装を使います。

@@ -19,9 +19,21 @@ pub fn is_find(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_copy(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('c')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_cut(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('x')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
 pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
     event.modifiers == CrosstermModifiers::CONTROL
-        && matches!(event.code, KeyCode::Char('f' | 'q' | 's'))
+        && matches!(event.code, KeyCode::Char('c' | 'f' | 'q' | 's' | 'x'))
 }
 
 pub fn to_gpui_keystroke(event: KeyEvent) -> Option<Keystroke> {
@@ -207,7 +219,42 @@ mod tests {
     }
 
     #[test]
-    fn reserves_quit_and_save_repeats_for_the_cli() {
+    fn recognizes_only_plain_control_c_press_as_copy() {
+        assert_plain_control_press_only(is_copy, 'c');
+    }
+
+    #[test]
+    fn recognizes_only_plain_control_x_press_as_cut() {
+        assert_plain_control_press_only(is_cut, 'x');
+    }
+
+    fn assert_plain_control_press_only(recognizer: fn(&KeyEvent) -> bool, character: char) {
+        assert!(recognizer(&KeyEvent::new(
+            KeyCode::Char(character),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(!recognizer(&KeyEvent::new(
+            KeyCode::Char(character),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+        )));
+        assert!(!recognizer(&KeyEvent::new(
+            KeyCode::Char(character),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::ALT,
+        )));
+        assert!(!recognizer(&KeyEvent::new_with_kind(
+            KeyCode::Char(character),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert!(!recognizer(&KeyEvent::new_with_kind(
+            KeyCode::Char(character),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+    }
+
+    #[test]
+    fn reserves_cli_shortcuts_for_all_event_kinds() {
         assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
             KeyCode::Char('q'),
             CrosstermModifiers::CONTROL,
@@ -223,9 +270,25 @@ mod tests {
             CrosstermModifiers::CONTROL,
             KeyEventKind::Repeat,
         )));
+        for character in ['c', 'x'] {
+            assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+                KeyCode::Char(character),
+                CrosstermModifiers::CONTROL,
+                KeyEventKind::Repeat,
+            )));
+            assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+                KeyCode::Char(character),
+                CrosstermModifiers::CONTROL,
+                KeyEventKind::Release,
+            )));
+        }
         assert!(!is_intercepted_shortcut(&KeyEvent::new(
             KeyCode::Char('z'),
             CrosstermModifiers::CONTROL,
+        )));
+        assert!(!is_intercepted_shortcut(&KeyEvent::new(
+            KeyCode::Char('c'),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
         )));
     }
 }

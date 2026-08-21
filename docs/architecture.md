@@ -9,7 +9,8 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
-実ファイルのopen/save/save-as、buffer search、dirty表示、終了時の端末復元まで実装済み。
+実ファイルのopen/save/save-as、buffer search、terminal clipboard、dirty表示、
+終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -153,13 +154,21 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
   PTY向けに、同じreader threadで低頻度のsize確認も行う。
 - headless clipboard は使えないため、bracketed pasteの文字列をZedの `do_paste` へ
   直接渡す。これによりpaste時のselection置換、auto-indent、undo単位はZedに任せる。
-  copy のterminal bridgeは後続課題とする。
+- GPUIのLinux headless clipboardはwriteがno-op、readが常に空で、ZedのCopy/Cutが作る
+  `ClipboardItem` を返す公開APIもない。そのためcopy payloadに限り、Zedの公開selectionと
+  buffer snapshotから本体と同じ行・multi-selection規則で組み立てる薄いadapterを置く。
+  Editor、selection、編集transaction、undo stateは所有しない。CutはpayloadをOSC 52へ
+  書けた後にZedのCut actionをdispatchし、削除とundoをZedへ任せる。
+- OSC 52はtextだけを運び成功応答を持たない。Zedのclipboard metadataをterminal越しに
+  保持できないため、bracketed pasteには推測したmetadataを付けず常に外部textとして渡す。
+  端末ごとのcontrol-string上限を踏みにくくするためraw textを256 KiBに制限し、超過時は
+  Copyを拒否し、Cutなら本文も変更しない。
 
 ## Deferred
 
-tabs、LSP、検索option/history、native set外のgrammar、完全なlanguage injection、
-terminal-aware soft wrapは後続で追加する。
+tabs、LSP、検索option/history、clipboard metadata/read、native set外のgrammar、
+完全なlanguage injection、terminal-aware soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
-新規・既存ファイルの保存、scratchのsave-asと上書き確認、dirtyな終了保護、raw mode /
-alternate screenの復元まで確認する。
+新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
+dirtyな終了保護、raw mode / alternate screenの復元まで確認する。
