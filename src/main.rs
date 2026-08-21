@@ -49,7 +49,7 @@ use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -72,6 +72,36 @@ struct SaveAsPrompt {
     prompt: LinePrompt,
     overwrite_path: Option<PathBuf>,
     feedback: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct OpenPrompt {
+    prompt: LinePrompt,
+    feedback: Option<String>,
+}
+
+impl OpenPrompt {
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Open: ");
+        let cursor_column = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let mut status = format!("{prefix}{}  Enter open  Esc cancel", self.prompt.text());
+        if let Some(feedback) = &self.feedback {
+            status.push_str("  |  ");
+            status.push_str(feedback);
+        }
+        (status, cursor_column)
+    }
+
+    fn text_changed(&mut self) {
+        self.feedback = None;
+    }
 }
 
 impl SaveAsPrompt {
@@ -248,8 +278,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                 if !opened_buffer_ids.insert(document.buffer.entity_id()) {
                     continue;
                 }
-                let editor_window = match cx.update(|cx| open_editor(document.buffer.clone(), cx)) {
-                    Ok(window) => window,
+                let tab = match create_document_tab(document, redraw_sender.clone(), cx) {
+                    Ok(tab) => tab,
                     Err(error) => {
                         let _ = error_sender
                             .try_send(format!("failed to open headless editor window: {error:#}"));
@@ -257,36 +287,17 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         return;
                     }
                 };
-                let tab_redraw_sender = redraw_sender.clone();
-                if let Err(error) = editor_window.update(cx, |_editor, _window, cx| {
-                    cx.subscribe(&document.buffer, move |_, _, event, _| {
-                        if matches!(
-                            event,
-                            BufferEvent::LanguageChanged(_) | BufferEvent::Reparsed
-                        ) {
-                            let _ = tab_redraw_sender.try_send(TerminalEvent::Redraw);
-                        }
-                    })
-                    .detach();
-                }) {
-                    let _ = error_sender
-                        .try_send(format!("failed to observe syntax updates: {error:#}"));
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
-                }
-                tabs.push(DocumentTab {
-                    document,
-                    editor_window,
-                    viewport: Viewport::default(),
-                });
+                tabs.push(tab);
             }
 
             let mut active_index = 0;
             let mut failure = None;
             let mut message = None;
             let mut quit_armed = false;
+            let mut close_armed = false;
             let mut active_search: Option<ActiveSearch> = None;
             let mut save_as_prompt: Option<SaveAsPrompt> = None;
+            let mut open_prompt: Option<OpenPrompt> = None;
 
             loop {
                 let editor_window = tabs[active_index].editor_window;
@@ -302,6 +313,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         message.as_deref(),
                         active_search.as_ref(),
                         save_as_prompt.as_ref(),
+                        open_prompt.as_ref(),
                     )
                 }) {
                     Ok(snapshot) => snapshot,
@@ -328,6 +340,18 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                 };
 
+                let reset_close = resets_confirmation(&event, input::is_close_tab);
+                let reset_quit = resets_confirmation(&event, input::is_quit);
+                if (reset_close && close_armed) || (reset_quit && quit_armed) {
+                    message = None;
+                }
+                if reset_close {
+                    close_armed = false;
+                }
+                if reset_quit {
+                    quit_armed = false;
+                }
+
                 match event {
                     TerminalEvent::Key(event) if input::is_quit(&event) => {
                         let dirty_count = tabs
@@ -346,6 +370,44 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         message = Some(format!(
                             "{dirty_count} unsaved tab(s); press Ctrl-Q again to discard"
                         ));
+                    }
+                    TerminalEvent::Key(event) if input::is_close_tab(&event) => {
+                        quit_armed = false;
+                        let dirty = tabs[active_index]
+                            .document
+                            .buffer
+                            .read_with(cx, |buffer, _| buffer.is_dirty());
+                        if dirty && !close_armed {
+                            close_armed = true;
+                            message = Some(
+                                "unsaved changes; press Ctrl-W again to discard this tab"
+                                    .to_owned(),
+                            );
+                            continue;
+                        }
+
+                        if active_search.take().is_some()
+                            && let Err(error) = close_search(&editor_window, cx)
+                        {
+                            failure = Some(format!("failed to close buffer search: {error:#}"));
+                            break;
+                        }
+                        if let Err(error) = editor_window.update(cx, |_editor, window, _cx| {
+                            window.remove_window();
+                        }) {
+                            failure = Some(format!("failed to close editor tab: {error}"));
+                            break;
+                        }
+
+                        tabs.remove(active_index);
+                        if tabs.is_empty() {
+                            break;
+                        }
+                        active_index = active_index.min(tabs.len() - 1);
+                        save_as_prompt = None;
+                        open_prompt = None;
+                        close_armed = false;
+                        message = Some("tab closed".to_owned());
                     }
                     TerminalEvent::Key(event)
                         if input::is_previous_tab(&event) || input::is_next_tab(&event) =>
@@ -368,6 +430,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 break;
                             }
                             save_as_prompt = None;
+                            open_prompt = None;
                             active_index = next_index;
                             quit_armed = false;
                             message = None;
@@ -375,7 +438,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                     TerminalEvent::Key(event) if input::is_save(&event) => {
                         quit_armed = false;
-                        if save_as_prompt.is_none() {
+                        if save_as_prompt.is_none() && open_prompt.is_none() {
                             if tabs[active_index].document.path.is_some() {
                                 match save_document(&tabs[active_index].document, &services, cx)
                                     .await
@@ -398,7 +461,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                     TerminalEvent::Key(event) if input::is_find(&event) => {
                         quit_armed = false;
-                        if save_as_prompt.is_none() && active_search.is_none() {
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && active_search.is_none()
+                        {
                             message = None;
                             if let Err(error) = editor_window.update(cx, |editor, window, cx| {
                                 editor.search_bar_visibility_changed(true, window, cx);
@@ -409,8 +475,22 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             active_search = Some(ActiveSearch::default());
                         }
                     }
+                    TerminalEvent::Key(event) if input::is_open(&event) => {
+                        quit_armed = false;
+                        if save_as_prompt.is_none() && open_prompt.is_none() {
+                            if active_search.take().is_some()
+                                && let Err(error) = close_search(&editor_window, cx)
+                            {
+                                failure = Some(format!("failed to close buffer search: {error:#}"));
+                                break;
+                            }
+                            message = None;
+                            open_prompt = Some(OpenPrompt::default());
+                        }
+                    }
                     TerminalEvent::Key(event)
                         if save_as_prompt.is_none()
+                            && open_prompt.is_none()
                             && active_search.is_none()
                             && input::is_copy(&event) =>
                     {
@@ -439,6 +519,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                     TerminalEvent::Key(event)
                         if save_as_prompt.is_none()
+                            && open_prompt.is_none()
                             && active_search.is_none()
                             && input::is_cut(&event) =>
                     {
@@ -561,6 +642,88 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             | PromptAction::Ignored => {}
                         }
                     }
+                    TerminalEvent::Key(event) if open_prompt.is_some() => {
+                        let action = open_prompt
+                            .as_mut()
+                            .expect("Open prompt checked above")
+                            .prompt
+                            .handle_key(&event);
+                        if action != PromptAction::Ignored {
+                            quit_armed = false;
+                            message = None;
+                        }
+
+                        match action {
+                            PromptAction::Changed => open_prompt
+                                .as_mut()
+                                .expect("Open prompt checked above")
+                                .text_changed(),
+                            PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                let input = open_prompt
+                                    .as_ref()
+                                    .expect("Open prompt checked above")
+                                    .prompt
+                                    .text()
+                                    .to_owned();
+                                let document = match resolve_path(&input) {
+                                    Ok(path) => {
+                                        cx.update(|cx| {
+                                            open_document(Some(path), services.clone(), cx)
+                                        })
+                                        .await
+                                    }
+                                    Err(error) => Err(error),
+                                };
+
+                                match document {
+                                    Ok(document) => {
+                                        if let Some(index) = tabs
+                                            .iter()
+                                            .position(|tab| tab.document.buffer == document.buffer)
+                                        {
+                                            active_index = index;
+                                            open_prompt = None;
+                                            message = Some("already open".to_owned());
+                                        } else {
+                                            match create_document_tab(
+                                                document,
+                                                redraw_sender.clone(),
+                                                cx,
+                                            ) {
+                                                Ok(tab) => {
+                                                    tabs.push(tab);
+                                                    active_index = tabs.len() - 1;
+                                                    open_prompt = None;
+                                                    message = Some("opened".to_owned());
+                                                }
+                                                Err(error) => {
+                                                    open_prompt
+                                                        .as_mut()
+                                                        .expect("Open prompt checked above")
+                                                        .feedback =
+                                                        Some(format!("open failed: {error:#}"));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        open_prompt
+                                            .as_mut()
+                                            .expect("Open prompt checked above")
+                                            .feedback = Some(format!("open failed: {error:#}"));
+                                    }
+                                }
+                            }
+                            PromptAction::Cancel => {
+                                open_prompt = None;
+                                message = Some("open cancelled".to_owned());
+                            }
+                            PromptAction::CursorMoved
+                            | PromptAction::Next
+                            | PromptAction::Previous
+                            | PromptAction::Ignored => {}
+                        }
+                    }
                     TerminalEvent::Key(event) if active_search.is_some() => {
                         let action = active_search
                             .as_mut()
@@ -636,6 +799,14 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             save_as.text_changed();
                         }
                     }
+                    TerminalEvent::Paste(text) if open_prompt.is_some() => {
+                        let open = open_prompt.as_mut().expect("Open prompt checked above");
+                        if open.prompt.handle_paste(&text) == PromptAction::Changed {
+                            quit_armed = false;
+                            message = None;
+                            open.text_changed();
+                        }
+                    }
                     TerminalEvent::Paste(text) if active_search.is_some() => {
                         let action = active_search
                             .as_mut()
@@ -692,6 +863,18 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resets_confirmation(
+    event: &TerminalEvent,
+    confirmation_key: fn(&crossterm::event::KeyEvent) -> bool,
+) -> bool {
+    matches!(
+        event,
+        TerminalEvent::Key(event)
+            if event.kind == crossterm::event::KeyEventKind::Press
+                && !confirmation_key(event)
+    ) || matches!(event, TerminalEvent::Paste(_))
 }
 
 #[derive(Clone)]
@@ -884,7 +1067,7 @@ async fn save_document_as(
     overwrite_path: Option<&Path>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<SaveAsOutcome> {
-    let path = resolve_save_path(input)?;
+    let path = resolve_path(input)?;
     if let Some(metadata) = services
         .file_system
         .metadata(&path)
@@ -931,7 +1114,7 @@ async fn save_document_as(
     Ok(SaveAsOutcome::Saved(path))
 }
 
-fn resolve_save_path(input: &str) -> Result<PathBuf> {
+fn resolve_path(input: &str) -> Result<PathBuf> {
     if input.is_empty() {
         bail!("path is empty");
     }
@@ -1079,6 +1262,35 @@ fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Edit
     .context("GPUI could not create the hidden window")
 }
 
+fn create_document_tab(
+    document: OpenDocument,
+    redraw_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<DocumentTab> {
+    let editor_window = cx.update(|cx| open_editor(document.buffer.clone(), cx))?;
+    let buffer = document.buffer.clone();
+    if let Err(error) = editor_window.update(cx, |_editor, _window, cx| {
+        cx.subscribe(&buffer, move |_, _, event, _| {
+            if matches!(
+                event,
+                BufferEvent::LanguageChanged(_) | BufferEvent::Reparsed
+            ) {
+                let _ = redraw_sender.try_send(TerminalEvent::Redraw);
+            }
+        })
+        .detach();
+    }) {
+        let _ = editor_window.update(cx, |_editor, window, _cx| window.remove_window());
+        return Err(error).context("failed to observe syntax updates");
+    }
+
+    Ok(DocumentTab {
+        document,
+        editor_window,
+        viewport: Viewport::default(),
+    })
+}
+
 fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> String {
     let multiple = tabs.len() > 1;
     let labels = tabs
@@ -1112,6 +1324,7 @@ fn capture_editor(
     message: Option<&str>,
     search: Option<&ActiveSearch>,
     save_as: Option<&SaveAsPrompt>,
+    open: Option<&OpenPrompt>,
 ) -> RenderSnapshot {
     let editor_style = editor.style(cx).clone();
     let display = editor.display_snapshot(cx);
@@ -1170,12 +1383,15 @@ fn capture_editor(
     let (status, status_cursor_column) = if let Some(save_as) = save_as {
         let (status, cursor) = save_as.status(message);
         (status, Some(cursor))
+    } else if let Some(open) = open {
+        let (status, cursor) = open.status(message);
+        (status, Some(cursor))
     } else if let Some(search) = search {
         let (status, cursor) = search.status(message);
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo"
+            "zec {status_label}  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -1426,17 +1642,57 @@ mod tests {
     }
 
     #[test]
-    fn resolves_nonempty_save_paths_without_shell_expansion() {
-        let relative = resolve_save_path("nested/file.rs").unwrap();
+    fn resolves_nonempty_prompt_paths_without_shell_expansion() {
+        let relative = resolve_path("nested/file.rs").unwrap();
         assert!(relative.is_absolute());
         assert!(relative.ends_with("nested/file.rs"));
 
         let absolute = PathBuf::from("/tmp/zec-save-as.rs");
-        assert_eq!(
-            resolve_save_path(absolute.to_str().unwrap()).unwrap(),
-            absolute
+        assert_eq!(resolve_path(absolute.to_str().unwrap()).unwrap(), absolute);
+        assert!(
+            resolve_path("~/notes.txt")
+                .unwrap()
+                .ends_with("~/notes.txt")
         );
-        assert!(resolve_save_path("").is_err());
+        assert!(resolve_path("").is_err());
+    }
+
+    #[test]
+    fn open_status_tracks_unicode_cursor_and_clears_feedback_on_edit() {
+        let mut open = OpenPrompt {
+            prompt: LinePrompt::with_text("日本.rs"),
+            feedback: Some("open failed".to_owned()),
+        };
+
+        let (status, cursor) = open.status(Some("notice"));
+        assert!(status.starts_with("notice  |  Open: 日本.rs"));
+        assert_eq!(cursor, "notice  |  Open: 日本.rs".width());
+
+        open.text_changed();
+        assert_eq!(open.feedback, None);
+    }
+
+    #[test]
+    fn only_another_press_or_paste_resets_discard_confirmation() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+        let quit = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        let other_press =
+            TerminalEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let other_repeat = TerminalEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+
+        assert!(!resets_confirmation(&quit, input::is_quit));
+        assert!(resets_confirmation(&other_press, input::is_quit));
+        assert!(!resets_confirmation(&other_repeat, input::is_quit));
+        assert!(resets_confirmation(
+            &TerminalEvent::Paste("text".to_owned()),
+            input::is_quit
+        ));
+        assert!(!resets_confirmation(&TerminalEvent::Redraw, input::is_quit));
     }
 
     #[test]

@@ -31,6 +31,18 @@ pub fn is_cut(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_open(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('o')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_close_tab(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('w')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
 pub fn is_previous_tab(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::PageUp
@@ -47,7 +59,9 @@ pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
     event.modifiers == CrosstermModifiers::CONTROL
         && matches!(
             event.code,
-            KeyCode::Char('c' | 'f' | 'q' | 's' | 'x') | KeyCode::PageUp | KeyCode::PageDown
+            KeyCode::Char('c' | 'f' | 'o' | 'q' | 's' | 'w' | 'x')
+                | KeyCode::PageUp
+                | KeyCode::PageDown
         )
 }
 
@@ -244,6 +258,16 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_plain_control_o_press_as_open() {
+        assert_plain_control_press_only(is_open, 'o');
+    }
+
+    #[test]
+    fn recognizes_only_plain_control_w_press_as_close_tab() {
+        assert_plain_control_press_only(is_close_tab, 'w');
+    }
+
+    #[test]
     fn recognizes_only_plain_control_page_up_press_as_previous_tab() {
         assert_plain_control_key_press_only(is_previous_tab, KeyCode::PageUp);
         assert!(!is_previous_tab(&KeyEvent::new(
@@ -311,7 +335,7 @@ mod tests {
             CrosstermModifiers::CONTROL,
             KeyEventKind::Repeat,
         )));
-        for character in ['c', 'x'] {
+        for character in ['c', 'o', 'w', 'x'] {
             assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
                 KeyCode::Char(character),
                 CrosstermModifiers::CONTROL,

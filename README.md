@@ -12,16 +12,19 @@ Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection
 cargo run -- path/to/file another/file
 ```
 
-既存ファイルと未作成ファイルのどちらも複数指定でき、`Ctrl-PageUp` / `Ctrl-PageDown` で
-tabを切り替えます。各tabの本文、cursor、selection、undoは独立したZed Editorが保持し、
-viewportだけを端末側で保持します。`Ctrl-S` はactive tabだけをZedの `BufferStore` 経由で
-保存します。終了は `Ctrl-Q` です。どれか1つでも未保存なら、破棄確認としてもう一度
-`Ctrl-Q` を押します。statusには全tabのdirty markerを表示します。
+既存ファイルと未作成ファイルのどちらも複数指定でき、実行中も`Ctrl-O`から追加できます。
+同じBufferがすでに開かれていればtabを重複させず、既存tabへ移動します。
+`Ctrl-PageUp` / `Ctrl-PageDown` でtabを切り替え、`Ctrl-W`でactive tabを閉じます。
+未保存tabは同じ`Ctrl-W`をもう一度押した場合だけ破棄し、最後のtabを閉じると終了します。
+各tabの本文、cursor、selection、undoは独立したZed Editorが保持し、viewportだけを端末側で
+保持します。`Ctrl-S` はactive tabだけをZedの `BufferStore` 経由で保存します。
+終了は `Ctrl-Q` です。どれか1つでも未保存なら、破棄確認としてもう一度`Ctrl-Q`を押します。
+statusには全tabのdirty markerを表示します。
 
 引数なしでは空のscratch bufferを開きます。`Ctrl-S` で1行のSave As promptに入り、
 相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、
 既存の通常ファイルはもう一度 `Enter` を押した場合だけ上書きします。`Esc` でcancelできます。
-promptはshellを通らないため、`~` はhome directoryへ展開しません。
+Save Asと`Ctrl-O`のpath promptはshellを通らないため、`~` はhome directoryへ展開しません。
 
 `Shift` + 矢印や `Ctrl-A` のselectionもZedのkeymapで動き、選択範囲を端末上に
 反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを

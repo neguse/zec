@@ -10,7 +10,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
 実ファイルのopen/save/save-as、buffer search、terminal clipboard、dirty表示、
-複数tab、終了時の端末復元まで実装済み。
+複数tab、実行中のtab open/close、終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -142,8 +142,19 @@ Editor Entityをrootへ付け替えられず、1 window内でchildを交換す�
 `Ctrl-PageUp` / `Ctrl-PageDown` はWorkspace/Paneを作っていないのでzecが捕捉し、activeな
 WindowHandleだけを描画・入力対象にする。各windowのfocusはwindow-localなのでOS windowの
 activateは不要。切替時はBuffer固有Anchorを別Editorへ渡さないよう検索をcloseし、Save As
-promptもcancelする。statusはactive位置と全tabのdirty状態を表示し、`Ctrl-S` はactiveだけ、
-`Ctrl-Q` は全Bufferを検査する。
+とOpen promptもcancelする。statusはactive位置と全tabのdirty状態を表示し、`Ctrl-S` は
+activeだけ、`Ctrl-Q` は全Bufferを検査する。
+
+`Ctrl-O`はterminal-ownedなsingle-line promptからpathを絶対化し、起動時と同じ
+`open_document`へ渡す。共有BufferStoreが同じBuffer Entityを返した場合は既存tabへ移動し、
+新しいBufferの場合だけhidden windowとsyntax再描画subscriptionを追加する。open失敗時は
+promptへerrorを返し、既存tabsとactive indexは変更しない。
+
+`Ctrl-W`はclean tabを即座に閉じ、dirty tabでは同じキーの再入力を要求する。他のkey pressや
+pasteで確認状態を解除する。GPUIのWindowHandleはwindowを所有しないため、handleをdropするだけ
+ではなく`Window::remove_window`を呼んだ後にDocumentTabを除去する。最後のwindowを閉じた場合は
+GPUIのheadless runtimeも終了する。BufferStoreはweak参照を保持するため、破棄したdirty tabを
+同じpathで開き直すとdiskから新しいBufferがloadされる。
 
 ## Why not `ratatui-textarea`
 
@@ -153,7 +164,7 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 メイン編集領域には状態を持たない専用 Ratatui Widget を使い、
 `DisplaySnapshot -> terminal cells` の変換だけを実装する。
-検索欄とSave AsはZed管理外の小さなsingle-line入力なので、共通の軽量prompt stateをzecが
+検索欄、Save As、OpenはZed管理外の小さなsingle-line入力なので、共通の軽量prompt stateをzecが
 持つ。必要な操作が文字入力、cursor移動、削除、submit、cancelだけであるため、現時点では
 `ratatui-textarea`を追加せず、この境界を約1型に限定している。
 
@@ -185,10 +196,10 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-tabのopen/close/reorder UI、LSP、検索option/history、clipboard metadata/read、native set外の
+tabのreorder UI、LSP、検索option/history、clipboard metadata/read、native set外の
 grammar、完全なlanguage injection、terminal-aware soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
-tabごとの編集・undo・active save・全tab dirty終了保護、raw mode / alternate screenの復元まで
-確認する。
+tabごとの編集・undo・active save・全tab dirty終了保護、実行中のopen・dedupe・未作成path保存・
+dirty close後のdisk reload・最後のwindow終了、raw mode / alternate screenの復元まで確認する。
