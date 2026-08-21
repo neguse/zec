@@ -41,6 +41,10 @@ pasteは従来どおりterminalのbracketed pasteをZedへ渡します。
 `Enter` または下矢印で次、上矢印（対応端末では `Shift-Enter` も可）で前へ移動し、
 `Esc` で検索を閉じます。match、移動、selection、autoscrollはZedの検索実装を使います。
 
+`Ctrl-G`では`line[:column]`形式の1-based位置へ移動します。行やcolumnが範囲外ならZedの
+BufferSnapshotで文書境界・行末へclipし、Unicode columnはbyte数ではなく文字位置として解決します。
+空入力や数値でない入力はprompt内にerrorを表示し、修正して再実行できます。
+
 Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
 Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight
 します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な

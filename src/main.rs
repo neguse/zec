@@ -17,9 +17,10 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use editor::{
-    Anchor, Editor, EditorStyle, MultiBufferOffset,
+    Anchor, Editor, EditorStyle, MultiBufferOffset, SelectionEffects,
     actions::{Cut, Undo},
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
+    scroll::Autoscroll,
 };
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Task, WindowBounds,
@@ -49,7 +50,7 @@ use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-G go to line, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -78,6 +79,39 @@ struct SaveAsPrompt {
 struct OpenPrompt {
     prompt: LinePrompt,
     feedback: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct GoToLinePrompt {
+    prompt: LinePrompt,
+    feedback: Option<String>,
+}
+
+impl GoToLinePrompt {
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Go to line: ");
+        let cursor_column = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let mut status = format!(
+            "{prefix}{}  line[:column]  Enter go  Esc cancel",
+            self.prompt.text()
+        );
+        if let Some(feedback) = &self.feedback {
+            status.push_str("  |  ");
+            status.push_str(feedback);
+        }
+        (status, cursor_column)
+    }
+
+    fn text_changed(&mut self) {
+        self.feedback = None;
+    }
 }
 
 impl OpenPrompt {
@@ -303,6 +337,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
             let mut active_search: Option<ActiveSearch> = None;
             let mut save_as_prompt: Option<SaveAsPrompt> = None;
             let mut open_prompt: Option<OpenPrompt> = None;
+            let mut go_to_line_prompt: Option<GoToLinePrompt> = None;
 
             loop {
                 let editor_window = tabs[active_index].editor_window;
@@ -319,6 +354,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         active_search.as_ref(),
                         save_as_prompt.as_ref(),
                         open_prompt.as_ref(),
+                        go_to_line_prompt.as_ref(),
                     )
                 }) {
                     Ok(snapshot) => snapshot,
@@ -411,6 +447,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         active_index = active_index.min(tabs.len() - 1);
                         save_as_prompt = None;
                         open_prompt = None;
+                        go_to_line_prompt = None;
                         close_armed = false;
                         message = Some("tab closed".to_owned());
                     }
@@ -436,6 +473,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             }
                             save_as_prompt = None;
                             open_prompt = None;
+                            go_to_line_prompt = None;
                             active_index = next_index;
                             quit_armed = false;
                             message = None;
@@ -443,7 +481,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                     TerminalEvent::Key(event) if input::is_save(&event) => {
                         quit_armed = false;
-                        if save_as_prompt.is_none() && open_prompt.is_none() {
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                        {
                             if tabs[active_index].document.path.is_some() {
                                 match save_document(&tabs[active_index].document, &services, cx)
                                     .await
@@ -468,6 +509,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         quit_armed = false;
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
                             && active_search.is_none()
                         {
                             message = None;
@@ -480,9 +522,28 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             active_search = Some(ActiveSearch::default());
                         }
                     }
+                    TerminalEvent::Key(event) if input::is_go_to_line(&event) => {
+                        quit_armed = false;
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                        {
+                            if active_search.take().is_some()
+                                && let Err(error) = close_search(&editor_window, cx)
+                            {
+                                failure = Some(format!("failed to close buffer search: {error:#}"));
+                                break;
+                            }
+                            message = None;
+                            go_to_line_prompt = Some(GoToLinePrompt::default());
+                        }
+                    }
                     TerminalEvent::Key(event) if input::is_open(&event) => {
                         quit_armed = false;
-                        if save_as_prompt.is_none() && open_prompt.is_none() {
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                        {
                             if active_search.take().is_some()
                                 && let Err(error) = close_search(&editor_window, cx)
                             {
@@ -503,6 +564,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         }
                         save_as_prompt = None;
                         open_prompt = None;
+                        go_to_line_prompt = None;
                         let mut document = match cx
                             .update(|cx| open_document(None, services.clone(), cx))
                             .await
@@ -529,6 +591,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     TerminalEvent::Key(event)
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
                             && active_search.is_none()
                             && input::is_copy(&event) =>
                     {
@@ -558,6 +621,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     TerminalEvent::Key(event)
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
                             && active_search.is_none()
                             && input::is_cut(&event) =>
                     {
@@ -762,6 +826,54 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             | PromptAction::Ignored => {}
                         }
                     }
+                    TerminalEvent::Key(event) if go_to_line_prompt.is_some() => {
+                        let action = go_to_line_prompt
+                            .as_mut()
+                            .expect("Go to line prompt checked above")
+                            .prompt
+                            .handle_key(&event);
+                        if action != PromptAction::Ignored {
+                            quit_armed = false;
+                            message = None;
+                        }
+
+                        match action {
+                            PromptAction::Changed => go_to_line_prompt
+                                .as_mut()
+                                .expect("Go to line prompt checked above")
+                                .text_changed(),
+                            PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                let input = go_to_line_prompt
+                                    .as_ref()
+                                    .expect("Go to line prompt checked above")
+                                    .prompt
+                                    .text()
+                                    .to_owned();
+                                match parse_go_to_location(&input).and_then(|(line, column)| {
+                                    go_to_location(&editor_window, line, column, cx)
+                                }) {
+                                    Ok(actual_line) => {
+                                        go_to_line_prompt = None;
+                                        message = Some(format!("line {actual_line}"));
+                                    }
+                                    Err(error) => {
+                                        go_to_line_prompt
+                                            .as_mut()
+                                            .expect("Go to line prompt checked above")
+                                            .feedback = Some(format!("go failed: {error:#}"));
+                                    }
+                                }
+                            }
+                            PromptAction::Cancel => {
+                                go_to_line_prompt = None;
+                                message = Some("go to line cancelled".to_owned());
+                            }
+                            PromptAction::CursorMoved
+                            | PromptAction::Next
+                            | PromptAction::Previous
+                            | PromptAction::Ignored => {}
+                        }
+                    }
                     TerminalEvent::Key(event) if active_search.is_some() => {
                         let action = active_search
                             .as_mut()
@@ -843,6 +955,16 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             quit_armed = false;
                             message = None;
                             open.text_changed();
+                        }
+                    }
+                    TerminalEvent::Paste(text) if go_to_line_prompt.is_some() => {
+                        let go_to_line = go_to_line_prompt
+                            .as_mut()
+                            .expect("Go to line prompt checked above");
+                        if go_to_line.prompt.handle_paste(&text) == PromptAction::Changed {
+                            quit_armed = false;
+                            message = None;
+                            go_to_line.text_changed();
                         }
                     }
                     TerminalEvent::Paste(text) if active_search.is_some() => {
@@ -1165,6 +1287,54 @@ fn untitled_label(id: usize) -> String {
     format!("Untitled {id}")
 }
 
+fn parse_go_to_location(input: &str) -> Result<(u32, Option<u32>)> {
+    let mut components = input.splitn(2, ':').map(str::trim);
+    let line = components
+        .next()
+        .unwrap_or_default()
+        .parse::<u32>()
+        .context("line must be an integer")?;
+
+    let column = components
+        .next()
+        .map(|column| column.parse::<u32>().context("column must be an integer"))
+        .transpose()?;
+    Ok((line, column))
+}
+
+fn go_to_location(
+    editor_window: &WindowHandle<Editor>,
+    line: u32,
+    column: Option<u32>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<u32> {
+    editor_window.update(cx, |editor, window, cx| -> Result<u32> {
+        let buffer = editor
+            .active_buffer(cx)
+            .context("editor has no active buffer")?;
+        let (anchor, actual_line) = {
+            let snapshot = buffer.read(cx).snapshot();
+            let row = line.saturating_sub(1).min(snapshot.max_point().row);
+            let point =
+                snapshot.point_from_external_input(row, column.unwrap_or(1).saturating_sub(1));
+            let anchor = editor
+                .buffer()
+                .read(cx)
+                .buffer_point_to_anchor(&buffer, point, cx)
+                .context("target line is not present in the editor")?;
+            (anchor, point.row.saturating_add(1))
+        };
+
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::center()),
+            window,
+            cx,
+            |selections| selections.select_anchor_ranges([anchor..anchor]),
+        );
+        Ok(actual_line)
+    })?
+}
+
 async fn refresh_search(
     search: &mut ActiveSearch,
     editor_window: &WindowHandle<Editor>,
@@ -1367,6 +1537,7 @@ fn capture_editor(
     search: Option<&ActiveSearch>,
     save_as: Option<&SaveAsPrompt>,
     open: Option<&OpenPrompt>,
+    go_to_line: Option<&GoToLinePrompt>,
 ) -> RenderSnapshot {
     let editor_style = editor.style(cx).clone();
     let display = editor.display_snapshot(cx);
@@ -1428,12 +1599,15 @@ fn capture_editor(
     } else if let Some(open) = open {
         let (status, cursor) = open.status(message);
         (status, Some(cursor))
+    } else if let Some(go_to_line) = go_to_line {
+        let (status, cursor) = go_to_line.status(message);
+        (status, Some(cursor))
     } else if let Some(search) = search {
         let (status, cursor) = search.status(message);
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-G line  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -1707,6 +1881,163 @@ mod tests {
     }
 
     #[test]
+    fn parses_absolute_go_to_line_and_column_locations() {
+        assert_eq!(parse_go_to_location("1").unwrap(), (1, None));
+        assert_eq!(parse_go_to_location(" 12 : 3 ").unwrap(), (12, Some(3)));
+        assert_eq!(parse_go_to_location("0:0").unwrap(), (0, Some(0)));
+        assert_eq!(
+            parse_go_to_location("4294967295").unwrap(),
+            (u32::MAX, None)
+        );
+
+        for invalid in ["", "abc", "-1", "1:", "1:nope", "1:2:3", "4294967296"] {
+            assert!(parse_go_to_location(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn go_to_location_uses_zed_buffer_coordinates_and_preserves_buffer_undo() {
+        use language::{Point, Selection, SelectionGoal};
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let original = "first\n日本語abc\nlast\n";
+            let buffer = cx.new(|cx| Buffer::local(original.to_owned(), cx));
+            let window = open_editor(buffer, cx).expect("open editor");
+
+            cx.spawn(async move |cx| {
+                window
+                    .update(cx, |editor, window, cx| {
+                        editor.change_selections(Default::default(), window, cx, |selections| {
+                            selections.select(vec![Selection {
+                                id: 0,
+                                start: Point::new(0, 0),
+                                end: Point::new(0, 0),
+                                reversed: false,
+                                goal: SelectionGoal::None,
+                            }]);
+                        });
+                        editor.insert("X", window, cx);
+                        editor.change_selections(Default::default(), window, cx, |selections| {
+                            selections.select(vec![
+                                Selection {
+                                    id: 0,
+                                    start: Point::new(0, 0),
+                                    end: Point::new(0, 0),
+                                    reversed: false,
+                                    goal: SelectionGoal::None,
+                                },
+                                Selection {
+                                    id: 1,
+                                    start: Point::new(2, 0),
+                                    end: Point::new(2, 0),
+                                    reversed: false,
+                                    goal: SelectionGoal::None,
+                                },
+                            ]);
+                        });
+                    })
+                    .expect("prepare editor");
+
+                let actual_line =
+                    go_to_location(&window, 2, Some(3), cx).expect("go to Unicode column");
+                let (point, selection_count, text_after_jump) = window
+                    .update(cx, |editor, _window, cx| {
+                        let display = editor.display_snapshot(cx);
+                        let selections = editor.selections.all::<MultiBufferOffset>(&display);
+                        let point = editor
+                            .buffer()
+                            .read(cx)
+                            .point_to_buffer_point(selections[0].head(), cx)
+                            .expect("selection belongs to the singleton buffer")
+                            .1;
+                        (point, selections.len(), editor.text(cx))
+                    })
+                    .expect("read location");
+
+                window
+                    .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))
+                    .expect("undo edit after jump");
+                let text_after_undo = window
+                    .update(cx, |editor, _window, cx| editor.text(cx))
+                    .expect("read text after undo");
+
+                go_to_location(&window, 2, Some(u32::MAX), cx).expect("clamp column");
+                let column_clamped_point = window
+                    .update(cx, |editor, _window, cx| {
+                        let display = editor.display_snapshot(cx);
+                        let head = editor
+                            .selections
+                            .newest::<MultiBufferOffset>(&display)
+                            .head();
+                        editor
+                            .buffer()
+                            .read(cx)
+                            .point_to_buffer_point(head, cx)
+                            .expect("selection belongs to the singleton buffer")
+                            .1
+                    })
+                    .expect("read clamped column");
+
+                let last_line =
+                    go_to_location(&window, u32::MAX, Some(u32::MAX), cx).expect("clamp line");
+                let final_point = window
+                    .update(cx, |editor, _window, cx| {
+                        let display = editor.display_snapshot(cx);
+                        let head = editor
+                            .selections
+                            .newest::<MultiBufferOffset>(&display)
+                            .head();
+                        editor
+                            .buffer()
+                            .read(cx)
+                            .point_to_buffer_point(head, cx)
+                            .expect("selection belongs to the singleton buffer")
+                            .1
+                    })
+                    .expect("read final location");
+
+                sender
+                    .send((
+                        actual_line,
+                        point,
+                        selection_count,
+                        text_after_jump,
+                        text_after_undo,
+                        column_clamped_point,
+                        last_line,
+                        final_point,
+                    ))
+                    .expect("send go-to-line results");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (
+            actual_line,
+            point,
+            selection_count,
+            text_after_jump,
+            text_after_undo,
+            column_clamped_point,
+            last_line,
+            final_point,
+        ) = receiver.recv().expect("receive go-to-line results");
+
+        assert_eq!(actual_line, 2);
+        assert_eq!(point, Point::new(1, 6));
+        assert_eq!(selection_count, 1);
+        assert_eq!(text_after_jump, "Xfirst\n日本語abc\nlast\n");
+        assert_eq!(text_after_undo, "first\n日本語abc\nlast\n");
+        assert_eq!(column_clamped_point, Point::new(1, 12));
+        assert_eq!(last_line, 4);
+        assert_eq!(final_point, Point::new(3, 0));
+    }
+
+    #[test]
     fn open_status_tracks_unicode_cursor_and_clears_feedback_on_edit() {
         let mut open = OpenPrompt {
             prompt: LinePrompt::with_text("日本.rs"),
@@ -1719,6 +2050,21 @@ mod tests {
 
         open.text_changed();
         assert_eq!(open.feedback, None);
+    }
+
+    #[test]
+    fn go_to_line_status_tracks_unicode_cursor_and_clears_feedback_on_edit() {
+        let mut go_to_line = GoToLinePrompt {
+            prompt: LinePrompt::with_text("日本:3"),
+            feedback: Some("invalid line".to_owned()),
+        };
+
+        let (status, cursor) = go_to_line.status(Some("notice"));
+        assert!(status.starts_with("notice  |  Go to line: 日本:3"));
+        assert_eq!(cursor, "notice  |  Go to line: 日本:3".width());
+
+        go_to_line.text_changed();
+        assert_eq!(go_to_line.feedback, None);
     }
 
     #[test]

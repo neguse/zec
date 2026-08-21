@@ -9,7 +9,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
-実ファイルのopen/save/save-as、buffer search、terminal clipboard、dirty表示、
+実ファイルのopen/save/save-as、buffer search、go to line/column、terminal clipboard、dirty表示、
 複数tab、実行中のtab open/close、終了時の端末復元まで実装済み。
 
 ## Repository strategy
@@ -131,6 +131,22 @@ Zedのbackground highlightを `DisplayPoint` で取得してterminal cell範囲�
 query変更ごとに逐次awaitする。regex/word/case option、history、長時間検索のcancel/debounce、
 multiline queryは後続課題とする。
 
+## Go to line
+
+`Ctrl-G`のZed actionはWorkspace modalを要求し、standalone Editorではhandlerが何も行わない。
+そのため入力欄だけはterminal-ownedな`LinePrompt`にし、確定後の位置解決とselection変更は
+Zedの公開APIへ戻す。入力形式はabsoluteな`line[:column]`で、lineとcolumnは1-basedとする。
+
+対象はactive Bufferの`BufferSnapshot::point_from_external_input`で解決する。このAPIを使うことで
+Unicode columnをUTF-8 byte columnと取り違えず、範囲外のline/columnもZed本体と同様に文書境界・
+行末へclipできる。得たBuffer PointをMultiBuffer Anchorへ変換し、
+`Editor::change_selections`と`SelectionEffects::scroll(Autoscroll::center())`で全selectionを1つの
+caretへ畳む。本文やundo transactionは変更しない。fold/wrap/display rowをzec側では計算しない。
+
+hidden GPUI Editorのscroll位置はterminal viewportのsource of truthではないため、端末側では既存の
+`keep_cursor_visible`が移動先を最小scrollで表示する。Zed GUIと同じ厳密な中央寄せ、相対指定、
+入力中のpreview highlightは後続課題とする。
+
 ## Tabs
 
 1 tabにつき `Editor::for_buffer` をrootにした非表示GPUI windowを1つ持つ。Zedのfocus、
@@ -202,7 +218,7 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-tabのreorder UI、LSP、検索option/history、clipboard metadata/read、native set外の
+tabのreorder UI、LSP、検索option/history、Go to lineの相対指定/live preview、clipboard metadata/read、native set外の
 grammar、完全なlanguage injection、terminal-aware soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
