@@ -150,6 +150,12 @@ activeだけ、`Ctrl-Q` は全Bufferを検査する。
 新しいBufferの場合だけhidden windowとsyntax再描画subscriptionを追加する。open失敗時は
 promptへerrorを返し、既存tabsとactive indexは変更しない。
 
+`Ctrl-N`は同じBufferStoreの`create_local_buffer`を使う`open_document(None)`経路でscratchを
+作り、`Untitled N`というprocess内で単調増加する表示名を付ける。裸のBufferを作らないため、
+後のSave Asでfile path mappingと外部変更監視へ正常に移行する。新しいscratchも通常tabと同じ
+hidden window、dirty保護、Save As、close lifecycleを使う。active tabが変わる操作なので、
+検索を閉じ、入力途中のSave As/Open promptはtab切替と同様にcancelする。
+
 `Ctrl-W`はclean tabを即座に閉じ、dirty tabでは同じキーの再入力を要求する。他のkey pressや
 pasteで確認状態を解除する。GPUIのWindowHandleはwindowを所有しないため、handleをdropするだけ
 ではなく`Window::remove_window`を呼んだ後にDocumentTabを除去する。最後のwindowを閉じた場合は
@@ -202,4 +208,5 @@ grammar、完全なlanguage injection、terminal-aware soft wrapは後続で追�
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
 tabごとの編集・undo・active save・全tab dirty終了保護、実行中のopen・dedupe・未作成path保存・
-dirty close後のdisk reload・最後のwindow終了、raw mode / alternate screenの復元まで確認する。
+scratch tab追加とSave As、dirty close後のdisk reload・最後のwindow終了、raw mode / alternate
+screenの復元まで確認する。

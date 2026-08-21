@@ -13,6 +13,7 @@ cargo run -- path/to/file another/file
 ```
 
 既存ファイルと未作成ファイルのどちらも複数指定でき、実行中も`Ctrl-O`から追加できます。
+`Ctrl-N`では、`Untitled N`という保存先未定のscratch tabを追加できます。
 同じBufferがすでに開かれていればtabを重複させず、既存tabへ移動します。
 `Ctrl-PageUp` / `Ctrl-PageDown` でtabを切り替え、`Ctrl-W`でactive tabを閉じます。
 未保存tabは同じ`Ctrl-W`をもう一度押した場合だけ破棄し、最後のtabを閉じると終了します。
@@ -21,7 +22,7 @@ cargo run -- path/to/file another/file
 終了は `Ctrl-Q` です。どれか1つでも未保存なら、破棄確認としてもう一度`Ctrl-Q`を押します。
 statusには全tabのdirty markerを表示します。
 
-引数なしでは空のscratch bufferを開きます。`Ctrl-S` で1行のSave As promptに入り、
+引数なし、または`Ctrl-N`では空のscratch bufferを開きます。`Ctrl-S`で1行のSave As promptに入り、
 相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、
 既存の通常ファイルはもう一度 `Enter` を押した場合だけ上書きします。`Esc` でcancelできます。
 Save Asと`Ctrl-O`のpath promptはshellを通らないため、`~` はhome directoryへ展開しません。

@@ -49,7 +49,7 @@ use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -266,8 +266,9 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
         cx.spawn(async move |cx| {
             let mut tabs = Vec::with_capacity(documents.len());
             let mut opened_buffer_ids = HashSet::new();
+            let mut next_untitled_id = 1usize;
             for document in documents {
-                let document = match document.await {
+                let mut document = match document.await {
                     Ok(document) => document,
                     Err(error) => {
                         let _ = error_sender.try_send(format!("failed to open file: {error:#}"));
@@ -277,6 +278,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                 };
                 if !opened_buffer_ids.insert(document.buffer.entity_id()) {
                     continue;
+                }
+                if document.path.is_none() {
+                    document.label = untitled_label(next_untitled_id);
+                    next_untitled_id = next_untitled_id.saturating_add(1);
                 }
                 let tab = match create_document_tab(document, redraw_sender.clone(), cx) {
                     Ok(tab) => tab,
@@ -486,6 +491,39 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             }
                             message = None;
                             open_prompt = Some(OpenPrompt::default());
+                        }
+                    }
+                    TerminalEvent::Key(event) if input::is_new_tab(&event) => {
+                        quit_armed = false;
+                        if active_search.take().is_some()
+                            && let Err(error) = close_search(&editor_window, cx)
+                        {
+                            failure = Some(format!("failed to close buffer search: {error:#}"));
+                            break;
+                        }
+                        save_as_prompt = None;
+                        open_prompt = None;
+                        let mut document = match cx
+                            .update(|cx| open_document(None, services.clone(), cx))
+                            .await
+                        {
+                            Ok(document) => document,
+                            Err(error) => {
+                                message = Some(format!("new tab failed: {error:#}"));
+                                continue;
+                            }
+                        };
+                        document.label = untitled_label(next_untitled_id);
+                        match create_document_tab(document, redraw_sender.clone(), cx) {
+                            Ok(tab) => {
+                                tabs.push(tab);
+                                active_index = tabs.len() - 1;
+                                next_untitled_id = next_untitled_id.saturating_add(1);
+                                message = Some("new tab".to_owned());
+                            }
+                            Err(error) => {
+                                message = Some(format!("new tab failed: {error:#}"));
+                            }
                         }
                     }
                     TerminalEvent::Key(event)
@@ -1123,6 +1161,10 @@ fn resolve_path(input: &str) -> Result<PathBuf> {
         .with_context(|| format!("could not make {} absolute", input.display()))
 }
 
+fn untitled_label(id: usize) -> String {
+    format!("Untitled {id}")
+}
+
 async fn refresh_search(
     search: &mut ActiveSearch,
     editor_window: &WindowHandle<Editor>,
@@ -1391,7 +1433,7 @@ fn capture_editor(
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -1655,6 +1697,13 @@ mod tests {
                 .ends_with("~/notes.txt")
         );
         assert!(resolve_path("").is_err());
+    }
+
+    #[test]
+    fn gives_scratch_tabs_stable_distinct_labels() {
+        assert_eq!(untitled_label(1), "Untitled 1");
+        assert_eq!(untitled_label(2), "Untitled 2");
+        assert_ne!(untitled_label(1), untitled_label(2));
     }
 
     #[test]

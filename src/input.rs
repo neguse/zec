@@ -31,6 +31,12 @@ pub fn is_cut(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_new_tab(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('n')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
 pub fn is_open(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('o')
@@ -59,7 +65,7 @@ pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
     event.modifiers == CrosstermModifiers::CONTROL
         && matches!(
             event.code,
-            KeyCode::Char('c' | 'f' | 'o' | 'q' | 's' | 'w' | 'x')
+            KeyCode::Char('c' | 'f' | 'n' | 'o' | 'q' | 's' | 'w' | 'x')
                 | KeyCode::PageUp
                 | KeyCode::PageDown
         )
@@ -258,6 +264,11 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_plain_control_n_press_as_new_tab() {
+        assert_plain_control_press_only(is_new_tab, 'n');
+    }
+
+    #[test]
     fn recognizes_only_plain_control_o_press_as_open() {
         assert_plain_control_press_only(is_open, 'o');
     }
@@ -335,7 +346,7 @@ mod tests {
             CrosstermModifiers::CONTROL,
             KeyEventKind::Repeat,
         )));
-        for character in ['c', 'o', 'w', 'x'] {
+        for character in ['c', 'n', 'o', 'w', 'x'] {
             assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
                 KeyCode::Char(character),
                 CrosstermModifiers::CONTROL,
