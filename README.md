@@ -41,6 +41,10 @@ mouse wheelは3 display rowずつ、`Alt-PageUp` / `Alt-PageDown`は原則termin
 変更せず、cursorが移動すれば自動追従へ戻ります。mouse capture中にterminal自身の文字選択を
 使う場合、多くのterminalでは`Shift`を押しながらdragします。
 
+modifierなしの左clickで、表示中の本文位置へZedのcaretを移動できます。ガター、
+status行、viewport境界で半分に切れたwide文字はclick対象にしません。dragによる
+Zed selection、double/triple click、modifier付きmouse操作はまだ対象外です。
+
 `Ctrl-C` はselection（空なら現在行）をterminal clipboardへcopyし、`Ctrl-X` はcopyに
 成功してからZedのCut actionで削除します。端末との受け渡しはOSC 52なので、対応端末の
 設定やtmuxのclipboard設定が必要な場合があります。端末から成功応答は返らないため、

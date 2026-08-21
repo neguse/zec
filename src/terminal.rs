@@ -13,7 +13,7 @@ use crossterm::{
     cursor::{Hide, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyEvent, MouseEventKind,
+        Event, KeyEvent, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{
@@ -35,6 +35,7 @@ pub enum ScrollDirection {
 pub enum TerminalEvent {
     Key(KeyEvent),
     Paste(String),
+    Mouse(MouseEvent),
     MouseScroll(ScrollDirection),
     Resize,
     Redraw,
@@ -172,6 +173,9 @@ fn map_event(event: Event) -> Option<TerminalEvent> {
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => Some(TerminalEvent::MouseScroll(ScrollDirection::Up)),
             MouseEventKind::ScrollDown => Some(TerminalEvent::MouseScroll(ScrollDirection::Down)),
+            MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_) => {
+                Some(TerminalEvent::Mouse(mouse))
+            }
             _ => None,
         },
         Event::Resize(_, _) => Some(TerminalEvent::Resize),
@@ -181,17 +185,21 @@ fn map_event(event: Event) -> Option<TerminalEvent> {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
 
     use super::*;
 
-    fn mouse(kind: MouseEventKind) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse_event(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
             kind,
             column: 7,
             row: 11,
             modifiers: KeyModifiers::NONE,
-        })
+        }
+    }
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(mouse_event(kind))
     }
 
     #[test]
@@ -207,11 +215,34 @@ mod tests {
     }
 
     #[test]
-    fn drops_mouse_events_other_than_vertical_scroll() {
+    fn preserves_button_mouse_events() {
+        let events = [
+            mouse_event(MouseEventKind::Down(MouseButton::Left)),
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Right),
+                column: 19,
+                row: 23,
+                modifiers: KeyModifiers::ALT | KeyModifiers::CONTROL,
+            },
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Middle),
+                column: 29,
+                row: 31,
+                modifiers: KeyModifiers::SHIFT,
+            },
+        ];
+
+        for event in events {
+            assert!(matches!(
+                map_event(Event::Mouse(event)),
+                Some(TerminalEvent::Mouse(mapped)) if mapped == event
+            ));
+        }
+    }
+
+    #[test]
+    fn drops_unhandled_mouse_events() {
         for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-            MouseEventKind::Drag(MouseButton::Left),
             MouseEventKind::Moved,
             MouseEventKind::ScrollLeft,
             MouseEventKind::ScrollRight,

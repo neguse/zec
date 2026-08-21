@@ -21,6 +21,15 @@ pub struct Cursor {
     pub column: usize,
 }
 
+/// A position in the display-ready text captured from Zed.
+///
+/// `byte_column` is a UTF-8 byte offset in the corresponding display line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextPosition {
+    pub row: usize,
+    pub byte_column: usize,
+}
+
 /// A half-open selection range in terminal-cell coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectionRange {
@@ -95,6 +104,71 @@ impl<'a> EditorWidget<'a> {
     /// Width available for document text after reserving the line-number gutter.
     pub fn text_width(&self, area: Rect) -> u16 {
         area.width.saturating_sub(self.gutter_width(area))
+    }
+
+    /// Maps a terminal body cell to a UTF-8 byte position in a captured display line.
+    ///
+    /// Cells in the gutter, status row, outside `area`, or below the captured text
+    /// do not identify an editor position.
+    pub fn text_position_at(&self, area: Rect, position: Position) -> Option<TextPosition> {
+        if area.width == 0 || area.height <= 1 {
+            return None;
+        }
+
+        let body_bottom = area.y.saturating_add(area.height - 1);
+        if position.y < area.y || position.y >= body_bottom {
+            return None;
+        }
+
+        let text_area = self.text_area(area);
+        if position.x < text_area.x || position.x >= text_area.right() {
+            return None;
+        }
+
+        let screen_row = usize::from(position.y - area.y);
+        let row = self.snapshot.viewport.top_row.checked_add(screen_row)?;
+        let line = self.snapshot.lines.get(row)?;
+        let screen_column = usize::from(position.x - text_area.x);
+        let target_column = self
+            .snapshot
+            .viewport
+            .left_column
+            .checked_add(screen_column)?;
+        let viewport_left = self.snapshot.viewport.left_column;
+        let viewport_right = viewport_left.saturating_add(usize::from(text_area.width));
+
+        let mut byte_column = 0usize;
+        let mut terminal_column = 0usize;
+        for grapheme in Span::raw(line).styled_graphemes(Style::default()) {
+            let start_byte = byte_column;
+            byte_column = byte_column.saturating_add(grapheme.symbol.len());
+            let width = usize::from(grapheme.symbol.cell_width());
+            if width == 0 {
+                continue;
+            }
+
+            let end_column = terminal_column.saturating_add(width);
+            if target_column < end_column {
+                // render_line leaves a grapheme blank when a viewport boundary
+                // cuts through it.  Do not make that blank cell clickable.
+                if terminal_column < viewport_left || end_column > viewport_right {
+                    return None;
+                }
+                let offset = target_column.saturating_sub(terminal_column);
+                let byte_column = if offset.saturating_mul(2) < width {
+                    start_byte
+                } else {
+                    byte_column
+                };
+                return Some(TextPosition { row, byte_column });
+            }
+            terminal_column = end_column;
+        }
+
+        Some(TextPosition {
+            row,
+            byte_column: line.len(),
+        })
     }
 
     fn line_number_digits(&self) -> usize {
@@ -472,13 +546,14 @@ fn render_line(
 mod tests {
     use ratatui::{
         buffer::Buffer,
-        layout::Rect,
+        layout::{Position, Rect},
         style::{Color, Modifier, Style},
         widgets::Widget,
     };
 
     use super::{
-        BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
+        BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan,
+        TextPosition, Viewport,
     };
 
     fn row(buf: &Buffer, y: u16) -> String {
@@ -555,6 +630,103 @@ mod tests {
         assert!(row(&buf, 3).starts_with("NORMAL  Ln 105, Col 2"));
         assert_eq!(buf.cell((2, 1)).expect("line number").fg, Color::Yellow);
         assert_eq!(buf.cell((4, 1)).expect("document text").fg, Color::White);
+    }
+
+    #[test]
+    fn maps_terminal_cells_to_display_byte_positions() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["zero".into(), "a界e\u{301}".into(), "tail".into()],
+            line_numbers: vec![Some(1), Some(2), Some(3)],
+            widest_line_number: 99,
+            viewport: Viewport {
+                top_row: 1,
+                left_column: 1,
+            },
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(10, 5, 8, 4);
+        let widget = EditorWidget::new(&snapshot);
+
+        assert_eq!(
+            widget.text_position_at(area, Position::new(13, 5)),
+            Some(TextPosition {
+                row: 1,
+                byte_column: 1,
+            })
+        );
+        assert_eq!(
+            widget.text_position_at(area, Position::new(14, 5)),
+            Some(TextPosition {
+                row: 1,
+                byte_column: 4,
+            })
+        );
+        assert_eq!(
+            widget.text_position_at(area, Position::new(15, 5)),
+            Some(TextPosition {
+                row: 1,
+                byte_column: 4,
+            })
+        );
+        assert_eq!(
+            widget.text_position_at(area, Position::new(16, 5)),
+            Some(TextPosition {
+                row: 1,
+                byte_column: 7,
+            })
+        );
+        assert_eq!(
+            widget.text_position_at(area, Position::new(13, 6)),
+            Some(TextPosition {
+                row: 2,
+                byte_column: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn text_hit_testing_rejects_gutter_status_and_rows_after_end() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["only".into()],
+            line_numbers: vec![Some(1)],
+            widest_line_number: 99,
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(10, 5, 8, 4);
+        let widget = EditorWidget::new(&snapshot);
+
+        assert_eq!(widget.text_position_at(area, Position::new(12, 5)), None);
+        assert_eq!(widget.text_position_at(area, Position::new(13, 6)), None);
+        assert_eq!(widget.text_position_at(area, Position::new(13, 8)), None);
+        assert_eq!(widget.text_position_at(area, Position::new(9, 5)), None);
+        assert_eq!(widget.text_position_at(area, Position::new(18, 5)), None);
+    }
+
+    #[test]
+    fn text_hit_testing_rejects_wide_graphemes_cut_by_the_viewport() {
+        let left_cut = RenderSnapshot {
+            lines: vec!["a界b".into()],
+            viewport: Viewport {
+                top_row: 0,
+                left_column: 2,
+            },
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 4, 2);
+        assert_eq!(
+            EditorWidget::new(&left_cut).text_position_at(area, Position::new(0, 0)),
+            None
+        );
+
+        let right_cut = RenderSnapshot {
+            lines: vec!["a界".into()],
+            ..RenderSnapshot::default()
+        };
+        let narrow_area = Rect::new(0, 0, 2, 2);
+        assert_eq!(
+            EditorWidget::new(&right_cut).text_position_at(narrow_area, Position::new(1, 0)),
+            None
+        );
     }
 
     #[test]

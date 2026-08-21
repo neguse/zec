@@ -17,7 +17,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use editor::{
-    Anchor, Editor, EditorStyle, MultiBufferOffset, SelectionEffects,
+    Anchor, Bias, Editor, EditorStyle, MultiBufferOffset, SelectionEffects,
     actions::{Cut, Undo},
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
     scroll::Autoscroll,
@@ -37,11 +37,13 @@ use project::{
     worktree_store::{WorktreeIdCounter, WorktreeStore},
 };
 use prompt::{LinePrompt, PromptAction};
-use ratatui::style::{
-    Color as TerminalColor, Modifier as TerminalModifier, Style as TerminalStyle,
+use ratatui::{
+    layout::{Position as TerminalPosition, Rect},
+    style::{Color as TerminalColor, Modifier as TerminalModifier, Style as TerminalStyle},
 };
 use render::{
-    BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
+    BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, TextPosition,
+    Viewport,
 };
 use tabs::{Direction as TabDirection, TabLabel};
 use terminal::{InputReader, ScrollDirection, TerminalEvent, TerminalSession, ZecTerminal};
@@ -429,18 +431,19 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         snapshot.cursor,
                     )
                 };
-                let body_height = match draw(
+                let frame_area = match draw(
                     &mut terminal,
                     &mut snapshot,
                     &mut tabs[active_index].viewport,
                     follow_vertical_cursor,
                 ) {
-                    Ok(body_height) => body_height,
+                    Ok(frame_area) => frame_area,
                     Err(error) => {
                         failure = Some(format!("failed to draw terminal: {error}"));
                         break;
                     }
                 };
+                let body_height = usize::from(frame_area.height.saturating_sub(1));
 
                 let event = match event_receiver.recv().await {
                     Ok(event) => event,
@@ -1323,6 +1326,35 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             message = None;
                         }
                     }
+                    TerminalEvent::Mouse(mouse) => {
+                        use crossterm::event::{
+                            KeyModifiers, MouseButton, MouseEventKind,
+                        };
+
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && active_search.is_none()
+                            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                            && mouse.modifiers == KeyModifiers::NONE
+                            && let Some(position) = EditorWidget::new(&snapshot).text_position_at(
+                                frame_area,
+                                TerminalPosition::new(mouse.column, mouse.row),
+                            )
+                        {
+                            if let Err(error) = move_caret_to_text_position(
+                                &editor_window,
+                                position,
+                                cx,
+                            ) {
+                                failure = Some(format!(
+                                    "failed to position editor caret: {error:#}"
+                                ));
+                                break;
+                            }
+                            message = None;
+                        }
+                    }
                     TerminalEvent::ReloadFinished { buffer_id, result } => {
                         let Some(reloaded_index) = tabs.iter().position(|tab| {
                             tab.document
@@ -1413,7 +1445,7 @@ fn resets_confirmation(
                 && !confirmation_key(event)
     ) || matches!(
         event,
-        TerminalEvent::Paste(_) | TerminalEvent::MouseScroll(_)
+        TerminalEvent::Paste(_) | TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_)
     )
 }
 
@@ -1752,6 +1784,42 @@ fn go_to_location(
         );
         Ok(actual_line)
     })?
+}
+
+fn move_caret_to_text_position(
+    editor_window: &WindowHandle<Editor>,
+    position: TextPosition,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    editor_window.update(cx, |editor, window, cx| {
+        let Ok(row) = u32::try_from(position.row) else {
+            return;
+        };
+        let Ok(column) = u32::try_from(position.byte_column) else {
+            return;
+        };
+
+        // Resolve against the latest DisplaySnapshot. The screen hit test was
+        // made from the previously rendered frame, so an asynchronous reparse
+        // or reload may have changed which display positions are valid.
+        let display = editor.display_snapshot(cx);
+        let raw = DisplayPoint::new(DisplayRow(row), column);
+        let previous = display.clip_point(raw, Bias::Left);
+        let next = display.clip_point(raw, Bias::Right);
+        let nearest = if previous == next {
+            previous
+        } else {
+            match display.inlay_bias_at(raw) {
+                Some(Bias::Left) => next,
+                Some(Bias::Right) | None => previous,
+            }
+        };
+        let anchor = display.display_point_to_anchor(nearest, Bias::Left);
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_anchor_ranges([anchor..anchor])
+        });
+    })?;
+    Ok(())
 }
 
 async fn refresh_search(
@@ -2240,11 +2308,12 @@ fn draw(
     snapshot: &mut RenderSnapshot,
     viewport: &mut Viewport,
     follow_vertical_cursor: bool,
-) -> io::Result<usize> {
-    let mut body_height = 0;
+) -> io::Result<Rect> {
+    let mut frame_area = Rect::default();
     terminal.draw(|frame| {
         let area = frame.area();
-        body_height = usize::from(area.height.saturating_sub(1));
+        frame_area = area;
+        let body_height = usize::from(area.height.saturating_sub(1));
         let text_width = EditorWidget::new(snapshot).text_width(area);
         keep_cursor_visible(
             viewport,
@@ -2265,7 +2334,7 @@ fn draw(
             frame.set_cursor_position(cursor_position);
         }
     })?;
-    Ok(body_height)
+    Ok(frame_area)
 }
 
 fn max_viewport_top(line_count: usize, body_height: usize) -> usize {
@@ -2727,6 +2796,52 @@ mod tests {
     }
 
     #[test]
+    fn mouse_caret_position_uses_zed_display_anchors_without_editing() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let original = "first\n日本語abc\nlast\n";
+            let buffer = cx.new(|cx| Buffer::local(original.to_owned(), cx));
+            let window = open_editor(buffer.clone(), cx).expect("open editor");
+
+            cx.spawn(async move |cx| {
+                let result: Result<_> = (|| {
+                    move_caret_to_text_position(
+                        &window,
+                        TextPosition {
+                            row: 1,
+                            byte_column: 3,
+                        },
+                        cx,
+                    )?;
+                    let (head, selection_count, text) =
+                        window.update(cx, |editor, _window, cx| {
+                            let display = editor.display_snapshot(cx);
+                            let selections = editor.selections.all_display(&display);
+                            (selections[0].head(), selections.len(), editor.text(cx))
+                        })?;
+                    let dirty = buffer.read_with(cx, |buffer, _| buffer.is_dirty());
+                    Ok((head, selection_count, text, dirty))
+                })();
+
+                sender.send(result).expect("send mouse caret result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (head, selection_count, text, dirty) = receiver
+            .recv()
+            .expect("receive mouse caret result")
+            .expect("mouse caret positioning should succeed");
+        assert_eq!(head, DisplayPoint::new(DisplayRow(1), 3));
+        assert_eq!(selection_count, 1);
+        assert_eq!(text, "first\n日本語abc\nlast\n");
+        assert!(!dirty);
+    }
+
+    #[test]
     fn search_replace_uses_zed_anchors_and_undo_transactions() {
         let (sender, receiver) = mpsc::sync_channel(1);
 
@@ -2950,7 +3065,9 @@ mod tests {
 
     #[test]
     fn another_input_action_resets_discard_confirmation() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
 
         let quit = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         let other_press =
@@ -2970,6 +3087,15 @@ mod tests {
         ));
         assert!(resets_confirmation(
             &TerminalEvent::MouseScroll(ScrollDirection::Down),
+            input::is_quit
+        ));
+        assert!(resets_confirmation(
+            &TerminalEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 3,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
             input::is_quit
         ));
         assert!(!resets_confirmation(&TerminalEvent::Redraw, input::is_quit));

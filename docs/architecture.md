@@ -10,6 +10,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
 terminal viewportのscroll、
+本文のmouse clickによるcaret移動、
 実ファイルのopen/save/save-as、buffer search、go to line/column、terminal clipboard、dirty表示、
 複数tab、実行中のtab open/close、終了時の端末復元まで実装済み。
 
@@ -193,6 +194,23 @@ hidden GPUI windowのpage sizeはterminal本文の高さと一致しないため
 境界とする。またmouse capture中にterminal自身の文字選択を使う場合、多くのterminalでは
 `Shift`付きdragが必要になる。
 
+## Terminal mouse positioning
+
+modifierなしの左button Downだけをcaret移動として扱う。Ratatuiで描画したのと同じ
+grapheme/cell幅、ガター、viewportを使ってscreen cellをdisplay行のUTF-8 byte位置へ
+逆変換する。wide graphemeはcellの中心に最も近い境界へ寄せ、viewport境界で
+切れて描画されないgraphemeの空c白cellはclick不可とする。
+
+逆変換の結果はclick処理時点の最新`DisplaySnapshot`でclipし、
+`display_point_to_anchor -> Editor::change_selections`へ渡す。zecはcaretやselection状態を所有せず、
+mouse clickでBuffer本文やundo transactionも変更しない。ガター、status行、本文外、
+right/middle button、modifier付きclickはcaretやBufferに作用しない。promptや検索の入力中も
+本文のcaretは動かさない。
+
+Zed GUIのdrag、word/line selection、multi-cursorのmouse state machine入口は現在
+`pub(super)`である。そのロジックをzecへ複製せず、drag/double/triple/modifier selectionは
+Zed側に小さな公開hookを追加するか判断するまで後続課題とする。
+
 ## Tabs
 
 1 tabにつき `Editor::for_buffer` をrootにした非表示GPUI windowを1つ持つ。Zedのfocus、
@@ -240,7 +258,7 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 ## Boundaries
 
 - Zed の表示 column は UTF-8 byte 基準、端末は grapheme/cell 幅基準なので、zec に
-  一箇所だけ座標変換層を置く。
+  一箇所だけ座標変換層を置く。mouse hit testも同じcell metricsを使う逆変換にする。
 - Zedの全selectionを表示座標の半開区間として取得し、端末cell座標へ変換してから
   Ratatuiの文字描画後に反転styleだけを重ねる。文字列やselection状態は複製しない。
 - 行番号はdisplay rowを数えず、`DisplaySnapshot::row_infos` の `buffer_row` を表示する。
@@ -266,10 +284,12 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 ## Deferred
 
 tabのreorder UI、LSP、検索option/history、Go to lineの相対指定/live preview、clipboard metadata/read、native set外の
-grammar、完全なlanguage injection、terminal-aware soft wrap、外部rename/deleteの専用UIは後続で追加する。
+grammar、完全なlanguage injection、terminal-aware soft wrap、mouse drag/double/triple/modifier selection、
+外部rename/deleteの専用UIは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
 tabごとの編集・undo・active save・全tab dirty終了保護、実行中のopen・dedupe・未作成path保存・
 scratch tab追加とSave As、cleanな外部変更の自動reload、dirtyな外部変更のreload/overwrite確認、
-dirty close後のdisk reload・最後のwindow終了、raw mode / alternate screenの復元まで確認する。
+dirty close後のdisk reload・最後のwindow終了、ASCII/wide文字上のmouse clickによるcaret移動、
+raw mode / alternate screenの復元まで確認する。
