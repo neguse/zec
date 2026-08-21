@@ -12132,6 +12132,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "unicode-width",
+ "workspace",
 ]
 
 [[package]]

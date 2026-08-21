@@ -1,18 +1,20 @@
 mod input;
 mod render;
+mod search;
 mod terminal;
 
 use std::{
     env,
     ffi::OsString,
     io::{self, IsTerminal as _},
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
 };
 
 use anyhow::{Context as _, Result, bail};
 use editor::{
-    Editor, EditorStyle,
+    Anchor, Editor, EditorStyle, MultiBufferOffset,
     actions::Undo,
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
 };
@@ -27,25 +29,75 @@ use language::{
 use project::{
     ProjectPath,
     buffer_store::BufferStore,
+    search::SearchQuery,
     worktree_store::{WorktreeIdCounter, WorktreeStore},
 };
 use ratatui::style::{
     Color as TerminalColor, Modifier as TerminalModifier, Style as TerminalStyle,
 };
-use render::{Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport};
+use render::{
+    BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
+};
+use search::{SearchPrompt, SearchPromptAction};
 use terminal::{InputReader, TerminalEvent, TerminalSession, ZecTerminal};
 use theme::ActiveTheme as _;
 use unicode_width::UnicodeWidthStr as _;
+use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str =
-    "Usage: zec [FILE]\n       zec --smoke\n\nKeys: Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE]\n       zec --smoke\n\nKeys: Ctrl-F find, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
     Edit(Option<PathBuf>),
     Smoke,
     Help,
+}
+
+#[derive(Debug)]
+struct ActiveSearch {
+    prompt: SearchPrompt,
+    matches: Vec<Range<Anchor>>,
+    active_match: Option<usize>,
+    token: SearchToken,
+    error: Option<String>,
+}
+
+impl Default for ActiveSearch {
+    fn default() -> Self {
+        Self {
+            prompt: SearchPrompt::new(),
+            matches: Vec::new(),
+            active_match: None,
+            token: SearchToken::default(),
+            error: None,
+        }
+    }
+}
+
+impl ActiveSearch {
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let position = self.active_match.map_or(0, |index| index.saturating_add(1));
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prompt_prefix = format!("{message_prefix}Find: ");
+        let cursor_column = prompt_prefix.width().saturating_add(
+            self.prompt
+                .query()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let mut status = format!(
+            "{prompt_prefix}{}  {position}/{}",
+            self.prompt.query(),
+            self.matches.len()
+        );
+        if let Some(error) = &self.error {
+            status.push_str("  ");
+            status.push_str(error);
+        }
+        (status, cursor_column)
+    }
 }
 
 fn main() -> Result<()> {
@@ -161,6 +213,7 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
             let mut failure = None;
             let mut message = None;
             let mut quit_armed = false;
+            let mut active_search: Option<ActiveSearch> = None;
 
             loop {
                 let mut snapshot = match editor_window.update(cx, |editor, _window, cx| {
@@ -172,6 +225,7 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                         &document.label,
                         dirty,
                         message.as_deref(),
+                        active_search.as_ref(),
                     )
                 }) {
                     Ok(snapshot) => snapshot,
@@ -211,7 +265,71 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                             Err(error) => message = Some(format!("save failed: {error:#}")),
                         }
                     }
+                    TerminalEvent::Key(event) if input::is_find(&event) => {
+                        quit_armed = false;
+                        message = None;
+                        if active_search.is_none() {
+                            if let Err(error) = editor_window.update(cx, |editor, window, cx| {
+                                editor.search_bar_visibility_changed(true, window, cx);
+                            }) {
+                                failure = Some(format!("failed to start buffer search: {error}"));
+                                break;
+                            }
+                            active_search = Some(ActiveSearch::default());
+                        }
+                    }
                     TerminalEvent::Key(event) if input::is_intercepted_shortcut(&event) => {}
+                    TerminalEvent::Key(event) if active_search.is_some() => {
+                        let action = active_search
+                            .as_mut()
+                            .expect("search checked above")
+                            .prompt
+                            .handle_key(&event);
+                        if action != SearchPromptAction::Ignored {
+                            quit_armed = false;
+                        }
+                        if matches!(
+                            action,
+                            SearchPromptAction::QueryChanged
+                                | SearchPromptAction::NextMatch
+                                | SearchPromptAction::PreviousMatch
+                                | SearchPromptAction::Cancel
+                        ) {
+                            message = None;
+                        }
+
+                        let result = match action {
+                            SearchPromptAction::QueryChanged => {
+                                refresh_search(
+                                    active_search.as_mut().expect("search checked above"),
+                                    &editor_window,
+                                    cx,
+                                )
+                                .await
+                            }
+                            SearchPromptAction::NextMatch => step_search(
+                                active_search.as_mut().expect("search checked above"),
+                                Direction::Next,
+                                &editor_window,
+                                cx,
+                            ),
+                            SearchPromptAction::PreviousMatch => step_search(
+                                active_search.as_mut().expect("search checked above"),
+                                Direction::Prev,
+                                &editor_window,
+                                cx,
+                            ),
+                            SearchPromptAction::Cancel => close_search(&editor_window, cx),
+                            SearchPromptAction::CursorMoved | SearchPromptAction::Ignored => Ok(()),
+                        };
+                        if let Err(error) = result {
+                            failure = Some(format!("buffer search failed: {error:#}"));
+                            break;
+                        }
+                        if action == SearchPromptAction::Cancel {
+                            active_search = None;
+                        }
+                    }
                     TerminalEvent::Key(event) => {
                         if let Some(keystroke) = input::to_gpui_keystroke(event) {
                             quit_armed = false;
@@ -220,6 +338,27 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                                 window.dispatch_keystroke(keystroke, cx)
                             }) {
                                 failure = Some(format!("failed to dispatch keystroke: {error}"));
+                                break;
+                            }
+                        }
+                    }
+                    TerminalEvent::Paste(text) if active_search.is_some() => {
+                        let action = active_search
+                            .as_mut()
+                            .expect("search checked above")
+                            .prompt
+                            .handle_paste(&text);
+                        if action == SearchPromptAction::QueryChanged {
+                            quit_armed = false;
+                            message = None;
+                            if let Err(error) = refresh_search(
+                                active_search.as_mut().expect("search checked above"),
+                                &editor_window,
+                                cx,
+                            )
+                            .await
+                            {
+                                failure = Some(format!("buffer search failed: {error:#}"));
                                 break;
                             }
                         }
@@ -403,6 +542,103 @@ async fn save_document(document: &OpenDocument, cx: &mut gpui::AsyncApp) -> Resu
         .with_context(|| format!("could not save {}", document.label))
 }
 
+async fn refresh_search(
+    search: &mut ActiveSearch,
+    editor_window: &WindowHandle<Editor>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    search.error = None;
+    if search.prompt.query().is_empty() {
+        editor_window.update(cx, |editor, window, cx| {
+            editor.clear_matches(window, cx);
+        })?;
+        search.matches.clear();
+        search.active_match = None;
+        search.token = SearchToken::default();
+        return Ok(());
+    }
+
+    let query = match SearchQuery::text(
+        search.prompt.query(),
+        false,
+        false,
+        false,
+        Default::default(),
+        Default::default(),
+        false,
+        None,
+    ) {
+        Ok(query) => query,
+        Err(error) => {
+            editor_window.update(cx, |editor, window, cx| {
+                editor.clear_matches(window, cx);
+            })?;
+            search.matches.clear();
+            search.active_match = None;
+            search.error = Some(error.to_string());
+            return Ok(());
+        }
+    };
+
+    let find_matches = editor_window.update(cx, |editor, window, cx| {
+        editor.find_matches_with_token(Arc::new(query), window, cx)
+    })?;
+    let (matches, token) = find_matches.await;
+    let active_match = editor_window.update(cx, |editor, window, cx| {
+        let active_match = editor.active_match_index(Direction::Next, &matches, token, window, cx);
+        editor.update_matches(&matches, active_match, token, window, cx);
+        if let Some(index) = active_match {
+            editor.activate_match(index, &matches, token, window, cx);
+        }
+        active_match
+    })?;
+
+    search.matches = matches;
+    search.active_match = active_match;
+    search.token = token;
+    Ok(())
+}
+
+fn step_search(
+    search: &mut ActiveSearch,
+    direction: Direction,
+    editor_window: &WindowHandle<Editor>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    if search.matches.is_empty() {
+        return Ok(());
+    }
+
+    let active_match = editor_window.update(cx, |editor, window, cx| {
+        let index = match search.active_match {
+            None => editor
+                .active_match_index(direction, &search.matches, search.token, window, cx)
+                .unwrap_or_default(),
+            Some(current) => editor.match_index_for_direction(
+                &search.matches,
+                current,
+                direction,
+                1,
+                search.token,
+                window,
+                cx,
+            ),
+        };
+        editor.update_matches(&search.matches, Some(index), search.token, window, cx);
+        editor.activate_match(index, &search.matches, search.token, window, cx);
+        index
+    })?;
+    search.active_match = Some(active_match);
+    Ok(())
+}
+
+fn close_search(editor_window: &WindowHandle<Editor>, cx: &mut gpui::AsyncApp) -> Result<()> {
+    editor_window.update(cx, |editor, window, cx| {
+        editor.clear_matches(window, cx);
+        editor.search_bar_visibility_changed(false, window, cx);
+    })
+}
+
 fn init_zed(cx: &mut App) {
     release_channel::init_test(
         semver::Version::new(0, 0, 0),
@@ -452,6 +688,7 @@ fn capture_editor(
     label: &str,
     dirty: bool,
     message: Option<&str>,
+    search: Option<&ActiveSearch>,
 ) -> RenderSnapshot {
     let editor_style = editor.style(cx).clone();
     let display = editor.display_snapshot(cx);
@@ -476,6 +713,28 @@ fn capture_editor(
         })
         .collect();
     let line_styles = terminal_line_styles(&display, &editor_style, lines.len());
+    let buffer = display.buffer_snapshot();
+    let whole_buffer =
+        buffer.anchor_before(MultiBufferOffset(0))..buffer.anchor_after(buffer.len());
+    let mut background_highlights =
+        editor.background_highlights_in_range(whole_buffer, &display, cx.theme());
+    background_highlights.sort_by(|left, right| {
+        left.0
+            .start
+            .cmp(&right.0.start)
+            .then_with(|| left.0.end.cmp(&right.0.end))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let background_ranges = background_highlights
+        .into_iter()
+        .map(|(range, color)| BackgroundRange {
+            range: SelectionRange {
+                start: display_cursor(&lines, range.start),
+                end: display_cursor(&lines, range.end),
+            },
+            style: TerminalStyle::new().bg(terminal_color(editor_style.background.blend(color))),
+        })
+        .collect();
     let text_style = terminal_text_style(&editor_style.text, editor_style.background);
     let gutter_style = TerminalStyle::new()
         .fg(terminal_color(
@@ -485,11 +744,19 @@ fn capture_editor(
         ))
         .bg(terminal_color(editor_style.background));
 
-    let dirty_marker = if dirty { " [+]" } else { "" };
-    let mut status = format!("zec {label}{dirty_marker}  Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo");
-    if let Some(message) = message {
-        status = format!("{message}  |  {status}");
-    }
+    let (status, status_cursor_column) = if let Some(search) = search {
+        let (status, cursor) = search.status(message);
+        (status, Some(cursor))
+    } else {
+        let dirty_marker = if dirty { " [+]" } else { "" };
+        let mut status = format!(
+            "zec {label}{dirty_marker}  Ctrl-F find  Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo"
+        );
+        if let Some(message) = message {
+            status = format!("{message}  |  {status}");
+        }
+        (status, None)
+    };
 
     RenderSnapshot {
         lines,
@@ -500,8 +767,10 @@ fn capture_editor(
         text_style,
         gutter_style,
         line_styles,
+        background_ranges,
         viewport,
         status,
+        status_cursor_column,
     }
 }
 

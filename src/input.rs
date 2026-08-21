@@ -13,8 +13,15 @@ pub fn is_save(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_find(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('f')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
 pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
-    event.modifiers == CrosstermModifiers::CONTROL && matches!(event.code, KeyCode::Char('q' | 's'))
+    event.modifiers == CrosstermModifiers::CONTROL
+        && matches!(event.code, KeyCode::Char('f' | 'q' | 's'))
 }
 
 pub fn to_gpui_keystroke(event: KeyEvent) -> Option<Keystroke> {
@@ -178,6 +185,28 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_plain_control_f_press_as_find() {
+        assert!(is_find(&KeyEvent::new(
+            KeyCode::Char('f'),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(!is_find(&KeyEvent::new(
+            KeyCode::Char('f'),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+        )));
+        assert!(!is_find(&KeyEvent::new_with_kind(
+            KeyCode::Char('f'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert!(!is_find(&KeyEvent::new_with_kind(
+            KeyCode::Char('f'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+    }
+
+    #[test]
     fn reserves_quit_and_save_repeats_for_the_cli() {
         assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
             KeyCode::Char('q'),
@@ -188,6 +217,11 @@ mod tests {
             KeyCode::Char('s'),
             CrosstermModifiers::CONTROL,
             KeyEventKind::Release,
+        )));
+        assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+            KeyCode::Char('f'),
+            CrosstermModifiers::CONTROL,
+            KeyEventKind::Repeat,
         )));
         assert!(!is_intercepted_shortcut(&KeyEvent::new(
             KeyCode::Char('z'),

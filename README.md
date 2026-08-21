@@ -21,6 +21,10 @@ cargo run -- path/to/file
 反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを
 追加した後も表示行を単純に数え直しません。
 
+`Ctrl-F` で大文字小文字を区別しないliteral検索を開始します。入力中にmatchを更新し、
+`Enter` または下矢印で次、上矢印（対応端末では `Shift-Enter` も可）で前へ移動し、
+`Esc` で検索を閉じます。match、移動、selection、autoscrollはZedの検索実装を使います。
+
 Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
 Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight
 します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な

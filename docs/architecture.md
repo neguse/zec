@@ -9,7 +9,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
-実ファイルのopen/save、dirty表示、終了時の端末復元まで実装済み。
+実ファイルのopen/save、buffer search、dirty表示、終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -101,6 +101,19 @@ themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。
 parse完了は非同期なので `BufferEvent::Reparsed` をterminal event channelへ戻して再描画
 する。これにより、入力イベントを待たずにhighlightが現れる。
 
+## Buffer search
+
+`Ctrl-F` の本文検索はWorkspaceのGUI search barを生成せず、`Editor` が実装する公開
+`SearchableItem` APIを直接使う。`SearchQuery` の実行、matchのstable anchor、active match、
+next/previousのwrap、selection、autoscroll、highlight色はZed側に任せる。zecが所有するのは
+status行に表示するsingle-line queryとそのcursor、match一覧をAPIへ戻すための短命なsession
+だけで、本文やundo stateは持たない。
+
+Zedのbackground highlightを `DisplayPoint` で取得してterminal cell範囲へ変換し、syntaxの
+後、selectionの前に背景色だけを重ねる。現在は大文字小文字を区別しないliteral検索を
+query変更ごとに逐次awaitする。regex/word/case option、history、長時間検索のcancel/debounce、
+multiline queryは後続課題とする。
+
 ## Why not `ratatui-textarea`
 
 `ratatui-textarea` は表示だけでなく、テキスト、カーソル、selection、入力処理、undo
@@ -131,8 +144,8 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-save-as、tabs、LSP、native set外のgrammar、完全なlanguage injection、terminal-aware
-soft wrapは後続で追加する。
+save-as、tabs、LSP、検索option/history、native set外のgrammar、完全なlanguage injection、
+terminal-aware soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、dirtyな終了保護、raw mode / alternate screenの復元まで

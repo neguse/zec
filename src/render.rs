@@ -28,6 +28,16 @@ pub struct SelectionRange {
     pub end: Cursor,
 }
 
+/// A half-open background highlight range in terminal-cell coordinates.
+///
+/// Only the background component of `style` is rendered.  Foreground colors
+/// and modifiers remain owned by syntax highlighting and selections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackgroundRange {
+    pub range: SelectionRange,
+    pub style: Style,
+}
+
 /// A half-open style range on one line, in terminal-cell coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StyleSpan {
@@ -61,8 +71,11 @@ pub struct RenderSnapshot {
     pub text_style: Style,
     pub gutter_style: Style,
     pub line_styles: Vec<Vec<StyleSpan>>,
+    pub background_ranges: Vec<BackgroundRange>,
     pub viewport: Viewport,
     pub status: String,
+    /// Terminal-cell column for an input cursor on the status row.
+    pub status_cursor_column: Option<usize>,
 }
 
 /// A stateless editor widget.
@@ -123,7 +136,18 @@ impl<'a> EditorWidget<'a> {
 
     /// Maps the document cursor to a terminal position when it is visible.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
-        if area.width == 0 || area.height <= 1 {
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+
+        if let Some(column) = self.snapshot.status_cursor_column {
+            let column = column.min(usize::from(area.width - 1));
+            let x = area.x.checked_add(u16::try_from(column).ok()?)?;
+            let y = area.y.checked_add(area.height - 1)?;
+            return Some(Position::new(x, y));
+        }
+
+        if area.height <= 1 {
             return None;
         }
 
@@ -238,6 +262,7 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
             snapshot.viewport.left_column,
             buf,
         );
+        render_background_row(snapshot, document_row, line, y, text_rect, text_area, buf);
         render_selection_row(snapshot, document_row, line, y, text_rect, text_area, buf);
     }
 
@@ -265,6 +290,37 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
     );
 }
 
+fn render_background_row(
+    snapshot: &RenderSnapshot,
+    document_row: usize,
+    line: &str,
+    y: u16,
+    area: Rect,
+    clipped: Rect,
+    buf: &mut Buffer,
+) {
+    let line_width = usize::from(line.cell_width());
+
+    for background in &snapshot.background_ranges {
+        let Some(color) = background.style.bg else {
+            continue;
+        };
+        let Some(area) = visible_range_rect(
+            background.range,
+            document_row,
+            line_width,
+            y,
+            area,
+            clipped,
+            snapshot.viewport.left_column,
+        ) else {
+            continue;
+        };
+
+        buf.set_style(area, Style::new().bg(color));
+    }
+}
+
 fn render_selection_row(
     snapshot: &RenderSnapshot,
     document_row: usize,
@@ -275,49 +331,67 @@ fn render_selection_row(
     buf: &mut Buffer,
 ) {
     let line_width = usize::from(line.cell_width());
-    let viewport_left = snapshot.viewport.left_column;
-    let viewport_right = viewport_left.saturating_add(usize::from(area.width));
     let selection_style = Style::new().add_modifier(Modifier::REVERSED);
 
     for selection in &snapshot.selections {
-        if selection.start >= selection.end
-            || document_row < selection.start.row
-            || document_row > selection.end.row
-        {
+        let Some(area) = visible_range_rect(
+            *selection,
+            document_row,
+            line_width,
+            y,
+            area,
+            clipped,
+            snapshot.viewport.left_column,
+        ) else {
             continue;
-        }
-
-        let start = if document_row == selection.start.row {
-            selection.start.column
-        } else {
-            0
         };
-        let end = if document_row == selection.end.row {
-            selection.end.column
-        } else {
-            // Make a selected newline visible, including on an empty line.
-            line_width.saturating_add(1)
-        };
-        let start = start.max(viewport_left);
-        let end = end.min(viewport_right);
-        if start >= end {
-            continue;
-        }
 
-        let screen_start = start - viewport_left;
-        let screen_end = end - viewport_left;
-        let x_start = area
-            .x
-            .saturating_add(u16::try_from(screen_start).unwrap_or(area.width))
-            .max(clipped.x);
-        let x_end = area
-            .x
-            .saturating_add(u16::try_from(screen_end).unwrap_or(area.width))
-            .min(clipped.right());
-        if x_start < x_end {
-            buf.set_style(Rect::new(x_start, y, x_end - x_start, 1), selection_style);
-        }
+        buf.set_style(area, selection_style);
     }
+}
+
+fn visible_range_rect(
+    range: SelectionRange,
+    document_row: usize,
+    line_width: usize,
+    y: u16,
+    area: Rect,
+    clipped: Rect,
+    viewport_left: usize,
+) -> Option<Rect> {
+    if range.start >= range.end || document_row < range.start.row || document_row > range.end.row {
+        return None;
+    }
+
+    let start = if document_row == range.start.row {
+        range.start.column
+    } else {
+        0
+    };
+    let end = if document_row == range.end.row {
+        range.end.column
+    } else {
+        // Make a highlighted newline visible, including on an empty line.
+        line_width.saturating_add(1)
+    };
+    let viewport_right = viewport_left.saturating_add(usize::from(area.width));
+    let start = start.max(viewport_left);
+    let end = end.min(viewport_right);
+    if start >= end {
+        return None;
+    }
+
+    let screen_start = start - viewport_left;
+    let screen_end = end - viewport_left;
+    let x_start = area
+        .x
+        .saturating_add(u16::try_from(screen_start).unwrap_or(area.width))
+        .max(clipped.x);
+    let x_end = area
+        .x
+        .saturating_add(u16::try_from(screen_end).unwrap_or(area.width))
+        .min(clipped.right());
+    (x_start < x_end).then(|| Rect::new(x_start, y, x_end - x_start, 1))
 }
 
 /// Draw one display-ready line, clipping in terminal-cell coordinates.
@@ -403,7 +477,9 @@ mod tests {
         widgets::Widget,
     };
 
-    use super::{Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport};
+    use super::{
+        BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
+    };
 
     fn row(buf: &Buffer, y: u16) -> String {
         (buf.area.x..buf.area.right())
@@ -422,11 +498,13 @@ mod tests {
             text_style: Style::default(),
             gutter_style: Style::default(),
             line_styles: Vec::new(),
+            background_ranges: Vec::new(),
             viewport: Viewport {
                 top_row: 1,
                 left_column: 0,
             },
             status: "NORMAL".into(),
+            status_cursor_column: None,
         };
         let area = Rect::new(0, 0, 20, 4);
         let mut buf = Buffer::empty(area);
@@ -545,6 +623,139 @@ mod tests {
     }
 
     #[test]
+    fn layers_multiline_backgrounds_between_syntax_and_selection() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["a界e\u{301}z".into(), String::new(), "xyz".into()],
+            line_numbers: vec![Some(1), Some(2), Some(3)],
+            widest_line_number: 3,
+            selections: vec![SelectionRange {
+                start: Cursor { row: 0, column: 3 },
+                end: Cursor { row: 1, column: 0 },
+            }],
+            text_style: Style::new().fg(Color::White).bg(Color::Black),
+            line_styles: vec![
+                vec![StyleSpan {
+                    start_column: 1,
+                    end_column: 4,
+                    style: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                }],
+                Vec::new(),
+                Vec::new(),
+            ],
+            background_ranges: vec![BackgroundRange {
+                range: SelectionRange {
+                    start: Cursor { row: 0, column: 1 },
+                    end: Cursor { row: 2, column: 2 },
+                },
+                style: Style::new()
+                    .fg(Color::Green)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::ITALIC),
+            }],
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 10, 4);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        let wide = buf.cell((3, 0)).expect("wide highlighted grapheme");
+        assert_eq!(wide.symbol(), "界");
+        assert_eq!(wide.fg, Color::Red);
+        assert_eq!(wide.bg, Color::Blue);
+        assert!(wide.modifier.contains(Modifier::BOLD));
+        assert!(!wide.modifier.contains(Modifier::ITALIC));
+
+        let combining = buf.cell((5, 0)).expect("combining grapheme");
+        assert_eq!(combining.symbol(), "e\u{301}");
+        assert_eq!(combining.bg, Color::Blue);
+        assert!(combining.modifier.contains(Modifier::REVERSED));
+
+        let selected_newline = buf.cell((7, 0)).expect("selected newline");
+        assert_eq!(selected_newline.bg, Color::Blue);
+        assert!(selected_newline.modifier.contains(Modifier::REVERSED));
+
+        let empty_line_newline = buf.cell((2, 1)).expect("empty-line newline");
+        assert_eq!(empty_line_newline.bg, Color::Blue);
+        assert!(!empty_line_newline.modifier.contains(Modifier::REVERSED));
+        assert_eq!(buf.cell((2, 2)).expect("range end row").bg, Color::Blue);
+        assert_eq!(buf.cell((3, 2)).expect("range end row").bg, Color::Blue);
+        assert_eq!(buf.cell((4, 2)).expect("past range end").bg, Color::Black);
+        assert_ne!(buf.cell((1, 0)).expect("gutter padding").bg, Color::Blue);
+    }
+
+    #[test]
+    fn clips_backgrounds_with_gutter_and_horizontal_viewport() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["a界bc".into()],
+            line_numbers: vec![Some(1)],
+            widest_line_number: 1,
+            text_style: Style::new().bg(Color::Black),
+            background_ranges: vec![BackgroundRange {
+                range: SelectionRange {
+                    start: Cursor { row: 0, column: 1 },
+                    end: Cursor { row: 0, column: 4 },
+                },
+                style: Style::new().bg(Color::Blue),
+            }],
+            viewport: Viewport {
+                top_row: 0,
+                left_column: 2,
+            },
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 5, 2);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        assert_eq!(buf.cell((2, 0)).expect("cut wide cell").symbol(), " ");
+        assert_eq!(buf.cell((2, 0)).expect("cut wide cell").bg, Color::Blue);
+        assert_eq!(buf.cell((3, 0)).expect("visible match cell").symbol(), "b");
+        assert_eq!(
+            buf.cell((3, 0)).expect("visible match cell").bg,
+            Color::Blue
+        );
+        assert_eq!(buf.cell((4, 0)).expect("past match").symbol(), "c");
+        assert_eq!(buf.cell((4, 0)).expect("past match").bg, Color::Black);
+        assert_ne!(buf.cell((0, 0)).expect("gutter").bg, Color::Blue);
+    }
+
+    #[test]
+    fn status_cursor_takes_priority_and_clamps_to_the_status_row() {
+        let mut snapshot = RenderSnapshot {
+            lines: vec![String::new(); 5],
+            cursor: Some(Cursor { row: 2, column: 2 }),
+            status_cursor_column: Some(3),
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(10, 5, 8, 4);
+
+        assert_eq!(
+            EditorWidget::new(&snapshot).cursor_position(area),
+            Some((13, 8).into())
+        );
+
+        snapshot.status_cursor_column = Some(usize::MAX);
+        assert_eq!(
+            EditorWidget::new(&snapshot).cursor_position(area),
+            Some((17, 8).into())
+        );
+        assert_eq!(
+            EditorWidget::new(&snapshot).cursor_position(Rect::new(2, 7, 4, 1)),
+            Some((5, 7).into())
+        );
+        assert_eq!(
+            EditorWidget::new(&snapshot).cursor_position(Rect::new(0, 0, 0, 1)),
+            None
+        );
+        assert_eq!(
+            EditorWidget::new(&snapshot).cursor_position(Rect::new(0, 0, 1, 0)),
+            None
+        );
+    }
+
+    #[test]
     fn clips_horizontally_in_terminal_cells() {
         let snapshot = RenderSnapshot {
             lines: vec!["ab界cd".into()],
@@ -593,11 +804,13 @@ mod tests {
             text_style: Style::default(),
             gutter_style: Style::default(),
             line_styles: Vec::new(),
+            background_ranges: Vec::new(),
             viewport: Viewport {
                 top_row: 2,
                 left_column: 4,
             },
             status: String::new(),
+            status_cursor_column: None,
         };
         let widget_area = Rect::new(10, 5, 8, 4);
 
