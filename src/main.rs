@@ -1,6 +1,6 @@
 mod input;
+mod prompt;
 mod render;
-mod search;
 mod terminal;
 
 use std::{
@@ -32,13 +32,13 @@ use project::{
     search::SearchQuery,
     worktree_store::{WorktreeIdCounter, WorktreeStore},
 };
+use prompt::{LinePrompt, PromptAction};
 use ratatui::style::{
     Color as TerminalColor, Modifier as TerminalModifier, Style as TerminalStyle,
 };
 use render::{
     BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
 };
-use search::{SearchPrompt, SearchPromptAction};
 use terminal::{InputReader, TerminalEvent, TerminalSession, ZecTerminal};
 use theme::ActiveTheme as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -56,17 +56,49 @@ enum Command {
 
 #[derive(Debug)]
 struct ActiveSearch {
-    prompt: SearchPrompt,
+    prompt: LinePrompt,
     matches: Vec<Range<Anchor>>,
     active_match: Option<usize>,
     token: SearchToken,
     error: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct SaveAsPrompt {
+    prompt: LinePrompt,
+    overwrite_path: Option<PathBuf>,
+    feedback: Option<String>,
+}
+
+impl SaveAsPrompt {
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Save as: ");
+        let cursor_column = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let mut status = format!("{prefix}{}  Enter save  Esc cancel", self.prompt.text());
+        if let Some(feedback) = &self.feedback {
+            status.push_str("  |  ");
+            status.push_str(feedback);
+        }
+        (status, cursor_column)
+    }
+
+    fn text_changed(&mut self) {
+        self.overwrite_path = None;
+        self.feedback = None;
+    }
+}
+
 impl Default for ActiveSearch {
     fn default() -> Self {
         Self {
-            prompt: SearchPrompt::new(),
+            prompt: LinePrompt::new(),
             matches: Vec::new(),
             active_match: None,
             token: SearchToken::default(),
@@ -82,14 +114,14 @@ impl ActiveSearch {
         let prompt_prefix = format!("{message_prefix}Find: ");
         let cursor_column = prompt_prefix.width().saturating_add(
             self.prompt
-                .query()
+                .text()
                 .get(..self.prompt.cursor())
                 .unwrap_or_default()
                 .width(),
         );
         let mut status = format!(
             "{prompt_prefix}{}  {position}/{}",
-            self.prompt.query(),
+            self.prompt.text(),
             self.matches.len()
         );
         if let Some(error) = &self.error {
@@ -175,7 +207,7 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
         let document = open_document(path, cx);
 
         cx.spawn(async move |cx| {
-            let document = match document.await {
+            let mut document = match document.await {
                 Ok(document) => document,
                 Err(error) => {
                     let _ = error_sender.try_send(format!("failed to open file: {error:#}"));
@@ -214,6 +246,7 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
             let mut message = None;
             let mut quit_armed = false;
             let mut active_search: Option<ActiveSearch> = None;
+            let mut save_as_prompt: Option<SaveAsPrompt> = None;
 
             loop {
                 let mut snapshot = match editor_window.update(cx, |editor, _window, cx| {
@@ -226,6 +259,7 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                         dirty,
                         message.as_deref(),
                         active_search.as_ref(),
+                        save_as_prompt.as_ref(),
                     )
                 }) {
                     Ok(snapshot) => snapshot,
@@ -260,15 +294,29 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                     }
                     TerminalEvent::Key(event) if input::is_save(&event) => {
                         quit_armed = false;
-                        match save_document(&document, cx).await {
-                            Ok(()) => message = Some("saved".to_owned()),
-                            Err(error) => message = Some(format!("save failed: {error:#}")),
+                        if save_as_prompt.is_none() {
+                            if document.path.is_some() {
+                                match save_document(&document, cx).await {
+                                    Ok(()) => message = Some("saved".to_owned()),
+                                    Err(error) => message = Some(format!("save failed: {error:#}")),
+                                }
+                            } else {
+                                if active_search.take().is_some()
+                                    && let Err(error) = close_search(&editor_window, cx)
+                                {
+                                    failure =
+                                        Some(format!("failed to close buffer search: {error:#}"));
+                                    break;
+                                }
+                                message = None;
+                                save_as_prompt = Some(SaveAsPrompt::default());
+                            }
                         }
                     }
                     TerminalEvent::Key(event) if input::is_find(&event) => {
                         quit_armed = false;
-                        message = None;
-                        if active_search.is_none() {
+                        if save_as_prompt.is_none() && active_search.is_none() {
+                            message = None;
                             if let Err(error) = editor_window.update(cx, |editor, window, cx| {
                                 editor.search_bar_visibility_changed(true, window, cx);
                             }) {
@@ -279,27 +327,110 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                         }
                     }
                     TerminalEvent::Key(event) if input::is_intercepted_shortcut(&event) => {}
+                    TerminalEvent::Key(event) if save_as_prompt.is_some() => {
+                        let action = save_as_prompt
+                            .as_mut()
+                            .expect("Save As prompt checked above")
+                            .prompt
+                            .handle_key(&event);
+                        if action != PromptAction::Ignored {
+                            quit_armed = false;
+                            message = None;
+                        }
+
+                        match action {
+                            PromptAction::Changed => save_as_prompt
+                                .as_mut()
+                                .expect("Save As prompt checked above")
+                                .text_changed(),
+                            PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                let (path, overwrite_path) = {
+                                    let save_as = save_as_prompt
+                                        .as_ref()
+                                        .expect("Save As prompt checked above");
+                                    (
+                                        save_as.prompt.text().to_owned(),
+                                        save_as.overwrite_path.clone(),
+                                    )
+                                };
+                                match save_document_as(
+                                    &document,
+                                    &path,
+                                    overwrite_path.as_deref(),
+                                    cx,
+                                )
+                                .await
+                                {
+                                    Ok(SaveAsOutcome::ConfirmationRequired(path)) => {
+                                        let save_as = save_as_prompt
+                                            .as_mut()
+                                            .expect("Save As prompt checked above");
+                                        save_as.overwrite_path = Some(path);
+                                        save_as.feedback = Some(
+                                            "file exists; press Enter again to overwrite"
+                                                .to_owned(),
+                                        );
+                                    }
+                                    Ok(SaveAsOutcome::Saved(path)) => {
+                                        document.path = Some(path.clone());
+                                        document.label = path.display().to_string();
+                                        save_as_prompt = None;
+                                        message = Some("saved".to_owned());
+                                        if let Err(error) = assign_file_language(
+                                            &path,
+                                            &document.buffer,
+                                            document.language_registry.clone(),
+                                            cx,
+                                        )
+                                        .await
+                                        {
+                                            message = Some(format!(
+                                                "saved; language detection failed: {error:#}"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let save_as = save_as_prompt
+                                            .as_mut()
+                                            .expect("Save As prompt checked above");
+                                        save_as.overwrite_path = None;
+                                        save_as.feedback = Some(format!("save failed: {error:#}"));
+                                    }
+                                }
+                            }
+                            PromptAction::Cancel => {
+                                save_as_prompt = None;
+                                message = Some("save cancelled".to_owned());
+                            }
+                            PromptAction::CursorMoved
+                            | PromptAction::Next
+                            | PromptAction::Previous
+                            | PromptAction::Ignored => {}
+                        }
+                    }
                     TerminalEvent::Key(event) if active_search.is_some() => {
                         let action = active_search
                             .as_mut()
                             .expect("search checked above")
                             .prompt
                             .handle_key(&event);
-                        if action != SearchPromptAction::Ignored {
+                        if action != PromptAction::Ignored {
                             quit_armed = false;
                         }
                         if matches!(
                             action,
-                            SearchPromptAction::QueryChanged
-                                | SearchPromptAction::NextMatch
-                                | SearchPromptAction::PreviousMatch
-                                | SearchPromptAction::Cancel
+                            PromptAction::Changed
+                                | PromptAction::Submit
+                                | PromptAction::AlternateSubmit
+                                | PromptAction::Next
+                                | PromptAction::Previous
+                                | PromptAction::Cancel
                         ) {
                             message = None;
                         }
 
                         let result = match action {
-                            SearchPromptAction::QueryChanged => {
+                            PromptAction::Changed => {
                                 refresh_search(
                                     active_search.as_mut().expect("search checked above"),
                                     &editor_window,
@@ -307,26 +438,26 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                                 )
                                 .await
                             }
-                            SearchPromptAction::NextMatch => step_search(
+                            PromptAction::Submit | PromptAction::Next => step_search(
                                 active_search.as_mut().expect("search checked above"),
                                 Direction::Next,
                                 &editor_window,
                                 cx,
                             ),
-                            SearchPromptAction::PreviousMatch => step_search(
+                            PromptAction::AlternateSubmit | PromptAction::Previous => step_search(
                                 active_search.as_mut().expect("search checked above"),
                                 Direction::Prev,
                                 &editor_window,
                                 cx,
                             ),
-                            SearchPromptAction::Cancel => close_search(&editor_window, cx),
-                            SearchPromptAction::CursorMoved | SearchPromptAction::Ignored => Ok(()),
+                            PromptAction::Cancel => close_search(&editor_window, cx),
+                            PromptAction::CursorMoved | PromptAction::Ignored => Ok(()),
                         };
                         if let Err(error) = result {
                             failure = Some(format!("buffer search failed: {error:#}"));
                             break;
                         }
-                        if action == SearchPromptAction::Cancel {
+                        if action == PromptAction::Cancel {
                             active_search = None;
                         }
                     }
@@ -342,13 +473,23 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
                             }
                         }
                     }
+                    TerminalEvent::Paste(text) if save_as_prompt.is_some() => {
+                        let save_as = save_as_prompt
+                            .as_mut()
+                            .expect("Save As prompt checked above");
+                        if save_as.prompt.handle_paste(&text) == PromptAction::Changed {
+                            quit_armed = false;
+                            message = None;
+                            save_as.text_changed();
+                        }
+                    }
                     TerminalEvent::Paste(text) if active_search.is_some() => {
                         let action = active_search
                             .as_mut()
                             .expect("search checked above")
                             .prompt
                             .handle_paste(&text);
-                        if action == SearchPromptAction::QueryChanged {
+                        if action == PromptAction::Changed {
                             quit_armed = false;
                             message = None;
                             if let Err(error) = refresh_search(
@@ -402,25 +543,39 @@ fn run_interactive(path: Option<PathBuf>) -> Result<()> {
 
 struct OpenDocument {
     buffer: Entity<Buffer>,
-    buffer_store: Option<Entity<BufferStore>>,
+    buffer_store: Entity<BufferStore>,
+    worktree_store: Entity<WorktreeStore>,
+    file_system: Arc<dyn Fs>,
+    language_registry: Arc<LanguageRegistry>,
+    path: Option<PathBuf>,
     label: String,
 }
 
 fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocument>> {
+    let language_registry = native_language_registry(cx);
+    let file_system: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
+    let worktree_store =
+        cx.new(|cx| WorktreeStore::local(true, file_system.clone(), WorktreeIdCounter::get(cx)));
+    let buffer_store = cx.new(|cx| BufferStore::local(worktree_store.clone(), cx));
+
     let Some(path) = path else {
-        let buffer = cx.new(|cx| Buffer::local(String::new(), cx));
+        let buffer = buffer_store.update(cx, |store, cx| {
+            store.create_local_buffer("", None, false, cx)
+        });
+        buffer
+            .read(cx)
+            .set_language_registry(language_registry.clone());
         return Task::ready(Ok(OpenDocument {
             buffer,
-            buffer_store: None,
+            buffer_store,
+            worktree_store,
+            file_system,
+            language_registry,
+            path: None,
             label: "[No Name]".to_owned(),
         }));
     };
 
-    let language_registry = native_language_registry(cx);
-    let file_system: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
-    let worktree_store =
-        cx.new(|cx| WorktreeStore::local(true, file_system, WorktreeIdCounter::get(cx)));
-    let buffer_store = cx.new(|cx| BufferStore::local(worktree_store.clone(), cx));
     let find_worktree = worktree_store.update(cx, |store, cx| {
         store.find_or_create_worktree(&path, false, cx)
     });
@@ -442,13 +597,17 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
             })
             .await
             .with_context(|| format!("could not load {}", path.display()))?;
-        assign_file_language(&path, &buffer, language_registry, cx)
+        assign_file_language(&path, &buffer, language_registry.clone(), cx)
             .await
             .with_context(|| format!("could not select a language for {}", path.display()))?;
 
         Ok(OpenDocument {
             buffer,
-            buffer_store: Some(buffer_store),
+            buffer_store,
+            worktree_store,
+            file_system,
+            language_registry,
+            path: Some(path.clone()),
             label: path.display().to_string(),
         })
     })
@@ -530,16 +689,79 @@ async fn assign_file_language(
 }
 
 async fn save_document(document: &OpenDocument, cx: &mut gpui::AsyncApp) -> Result<()> {
-    let buffer_store = document
+    let path = document.path.as_ref().context("buffer has no file path")?;
+    document
         .buffer_store
-        .as_ref()
-        .context("scratch buffer has no file path")?;
-    buffer_store
         .update(cx, |store, cx| {
             store.save_buffer(document.buffer.clone(), cx)
         })
         .await
-        .with_context(|| format!("could not save {}", document.label))
+        .with_context(|| format!("could not save {}", path.display()))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum SaveAsOutcome {
+    ConfirmationRequired(PathBuf),
+    Saved(PathBuf),
+}
+
+async fn save_document_as(
+    document: &OpenDocument,
+    input: &str,
+    overwrite_path: Option<&Path>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<SaveAsOutcome> {
+    let path = resolve_save_path(input)?;
+    if let Some(metadata) = document
+        .file_system
+        .metadata(&path)
+        .await
+        .with_context(|| format!("could not inspect {}", path.display()))?
+    {
+        if metadata.is_dir {
+            bail!("{} is a directory", path.display());
+        }
+        if metadata.is_fifo || !document.file_system.is_file(&path).await {
+            bail!("{} is not a regular file", path.display());
+        }
+        if overwrite_path != Some(path.as_path()) {
+            return Ok(SaveAsOutcome::ConfirmationRequired(path));
+        }
+    }
+
+    let (worktree, relative_path) = document
+        .worktree_store
+        .update(cx, |store, cx| {
+            store.find_or_create_worktree(&path, false, cx)
+        })
+        .await
+        .with_context(|| format!("could not create a worktree for {}", path.display()))?;
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    document
+        .buffer_store
+        .update(cx, |store, cx| {
+            store.save_buffer_as(
+                document.buffer.clone(),
+                ProjectPath {
+                    worktree_id,
+                    path: relative_path,
+                },
+                cx,
+            )
+        })
+        .await
+        .with_context(|| format!("could not save {}", path.display()))?;
+
+    Ok(SaveAsOutcome::Saved(path))
+}
+
+fn resolve_save_path(input: &str) -> Result<PathBuf> {
+    if input.is_empty() {
+        bail!("path is empty");
+    }
+    let input = PathBuf::from(input);
+    std::path::absolute(&input)
+        .with_context(|| format!("could not make {} absolute", input.display()))
 }
 
 async fn refresh_search(
@@ -548,7 +770,7 @@ async fn refresh_search(
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
     search.error = None;
-    if search.prompt.query().is_empty() {
+    if search.prompt.text().is_empty() {
         editor_window.update(cx, |editor, window, cx| {
             editor.clear_matches(window, cx);
         })?;
@@ -559,7 +781,7 @@ async fn refresh_search(
     }
 
     let query = match SearchQuery::text(
-        search.prompt.query(),
+        search.prompt.text(),
         false,
         false,
         false,
@@ -689,6 +911,7 @@ fn capture_editor(
     dirty: bool,
     message: Option<&str>,
     search: Option<&ActiveSearch>,
+    save_as: Option<&SaveAsPrompt>,
 ) -> RenderSnapshot {
     let editor_style = editor.style(cx).clone();
     let display = editor.display_snapshot(cx);
@@ -744,7 +967,10 @@ fn capture_editor(
         ))
         .bg(terminal_color(editor_style.background));
 
-    let (status, status_cursor_column) = if let Some(search) = search {
+    let (status, status_cursor_column) = if let Some(save_as) = save_as {
+        let (status, cursor) = save_as.status(message);
+        (status, Some(cursor))
+    } else if let Some(search) = search {
         let (status, cursor) = search.status(message);
         (status, Some(cursor))
     } else {
@@ -975,6 +1201,37 @@ mod tests {
         assert!(command(&["--wat"]).is_err());
         assert!(command(&["one", "two"]).is_err());
         assert!(command(&["--"]).is_err());
+    }
+
+    #[test]
+    fn resolves_nonempty_save_paths_without_shell_expansion() {
+        let relative = resolve_save_path("nested/file.rs").unwrap();
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("nested/file.rs"));
+
+        let absolute = PathBuf::from("/tmp/zec-save-as.rs");
+        assert_eq!(
+            resolve_save_path(absolute.to_str().unwrap()).unwrap(),
+            absolute
+        );
+        assert!(resolve_save_path("").is_err());
+    }
+
+    #[test]
+    fn save_as_status_tracks_unicode_cursor_and_clears_overwrite_state_on_edit() {
+        let mut save_as = SaveAsPrompt {
+            prompt: LinePrompt::with_text("日本.rs"),
+            overwrite_path: Some(PathBuf::from("/tmp/existing.rs")),
+            feedback: Some("file exists".to_owned()),
+        };
+
+        let (status, cursor) = save_as.status(Some("unsaved"));
+        assert!(status.starts_with("unsaved  |  Save as: 日本.rs"));
+        assert_eq!(cursor, "unsaved  |  Save as: 日本.rs".width());
+
+        save_as.text_changed();
+        assert_eq!(save_as.overwrite_path, None);
+        assert_eq!(save_as.feedback, None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
-実ファイルのopen/save、buffer search、dirty表示、終了時の端末復元まで実装済み。
+実ファイルのopen/save/save-as、buffer search、dirty表示、終了時の端末復元まで実装済み。
 
 ## Repository strategy
 
@@ -65,8 +65,19 @@ Ratatui は cell buffer、style、レイアウト、前後 frame の差分描画
 
 該当worktreeがなければ、ファイル自身を非表示のsingle-file worktreeとして扱う。
 未作成パスもfile付きの `DiskState::New` Bufferになるため、編集後の `save_buffer` で
-新規作成できる。引数なしのscratchはfileを持たないので、save-as UIを実装するまでは
-保存不可とする。
+新規作成できる。
+
+引数なしのscratchも裸の `Buffer::local` にはせず、最初から同じ `BufferStore` の
+`create_local_buffer` で生成する。`Ctrl-S` ではterminal-ownedな1行promptから絶対化した
+保存先を `find_or_create_worktree -> save_buffer_as` へ渡す。成功後は同じBuffer Entityに
+fileが付き、Editor、selection、undo履歴、dirty versionを作り直さず通常の `save_buffer`
+へ移行できる。LspStoreを初期化していないため、save-as後の拡張子に対するlanguage選択だけは
+zecが明示的に再実行する。
+
+Save Asの相対パスは起動時working directory基準で、shell expansionは行わない。既存の
+regular fileは1回目のEnterで警告し、同じ入力で2回目のEnterを押した時だけ上書きする。
+directory、FIFO、その他のspecial fileは拒否する。この確認は操作ミスを防ぐUI境界であり、
+確認から保存までの外部filesystem raceを排除するatomic no-clobber保証ではない。
 
 Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEditorなので
 保存handlerがない。そのため `Ctrl-S` だけCLI側で捕捉して `BufferStore::save_buffer`
@@ -122,7 +133,9 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 メイン編集領域には状態を持たない専用 Ratatui Widget を使い、
 `DisplaySnapshot -> terminal cells` の変換だけを実装する。
-`ratatui-textarea` は、必要なら検索欄など Zed 管理外の小さな入力欄に限定して使う。
+検索欄とSave AsはZed管理外の小さなsingle-line入力なので、共通の軽量prompt stateをzecが
+持つ。必要な操作が文字入力、cursor移動、削除、submit、cancelだけであるため、現時点では
+`ratatui-textarea`を追加せず、この境界を約1型に限定している。
 
 ## Boundaries
 
@@ -144,9 +157,9 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-save-as、tabs、LSP、検索option/history、native set外のgrammar、完全なlanguage injection、
+tabs、LSP、検索option/history、native set外のgrammar、完全なlanguage injection、
 terminal-aware soft wrapは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
-新規・既存ファイルの保存、dirtyな終了保護、raw mode / alternate screenの復元まで
-確認する。
+新規・既存ファイルの保存、scratchのsave-asと上書き確認、dirtyな終了保護、raw mode /
+alternate screenの復元まで確認する。

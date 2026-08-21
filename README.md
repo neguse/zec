@@ -17,6 +17,11 @@ cargo run -- path/to/file
 終了は `Ctrl-Q` です。未保存の変更がある場合だけ、破棄確認としてもう一度
 `Ctrl-Q` を押します。
 
+引数なしでは空のscratch bufferを開きます。`Ctrl-S` で1行のSave As promptに入り、
+相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、
+既存の通常ファイルはもう一度 `Enter` を押した場合だけ上書きします。`Esc` でcancelできます。
+promptはshellを通らないため、`~` はhome directoryへ展開しません。
+
 `Shift` + 矢印や `Ctrl-A` のselectionもZedのkeymapで動き、選択範囲を端末上に
 反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを
 追加した後も表示行を単純に数え直しません。
@@ -30,9 +35,6 @@ Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsynt
 します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な
 parser/queryを遅延loadします。現在は実行時にLSPやNode runtimeを初期化しません。
 `NO_COLOR` が設定された環境ではCrosstermの規約どおり色を出しません。
-
-引数なしでは空のscratch bufferを開きます。現時点では保存先を選ぶUIがないため、
-scratch bufferの `Ctrl-S` は保存せずstatusにエラーを表示します。
 
 端末を使わず、最初の挿入・undo PoCだけを実行する場合:
 
