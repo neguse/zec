@@ -87,6 +87,12 @@ injection用のhidden languageである。
 言語を選ぶため、拡張子のないscriptをshebangだけで判定する処理と、native set外のgrammar、
 未登録言語へのinjectionは後続課題とする。
 
+全languageを `Language::new` で起動時に構築すると、使わないqueryまでcompileして初画面が
+数秒遅れる。Zed本体と同じくnative grammarを先に登録し、各configは
+`LanguageRegistry::register_language` のloaderとして登録する。queryはroot languageまたは
+injectionが実際に要求した時だけload/compileする。このcheckoutのdebug buildでは、
+Rustファイルの初画面が約5.6秒から約0.6秒、JavaScriptが約5.4秒から約1.0秒になった。
+
 表示時は `DisplaySnapshot::highlighted_chunks` にtree-sitter stylingを要求し、Zedの
 themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。Ratatuiではbase/syntaxを
 描いた後にselectionを重ねる。24-bit color、bold、italic、underline、strikethroughは

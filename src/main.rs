@@ -21,7 +21,7 @@ use gpui::{
     WindowHandle, WindowOptions,
 };
 use language::{
-    Buffer, BufferEvent, Language, LanguageAwareStyling, LanguageNotFound, LanguageRegistry,
+    Buffer, BufferEvent, LanguageAwareStyling, LanguageNotFound, LanguageRegistry, LoadedLanguage,
     language_settings::SoftWrap,
 };
 use project::{
@@ -277,10 +277,7 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
         }));
     };
 
-    let language_registry = match native_language_registry(cx) {
-        Ok(registry) => registry,
-        Err(error) => return Task::ready(Err(error)),
-    };
+    let language_registry = native_language_registry(cx);
     let file_system: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
     let worktree_store =
         cx.new(|cx| WorktreeStore::local(true, file_system, WorktreeIdCounter::get(cx)));
@@ -318,31 +315,59 @@ fn open_document(path: Option<PathBuf>, cx: &mut App) -> Task<Result<OpenDocumen
     })
 }
 
-fn native_language_registry(cx: &mut App) -> Result<Arc<LanguageRegistry>> {
+fn native_language_registry(cx: &mut App) -> Arc<LanguageRegistry> {
     let registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
     registry.set_theme(cx.theme().clone());
-    let native_grammars = grammars::native_grammars();
-    let tsx_grammar = native_grammars
-        .iter()
-        .find(|(name, _)| *name == "tsx")
-        .map(|(_, grammar)| grammar.clone())
-        .context("bundled TSX grammar is missing")?;
-    let rust_grammar = native_grammars
-        .iter()
-        .find(|(name, _)| *name == "rust")
-        .map(|(_, grammar)| grammar.clone())
-        .context("bundled Rust grammar is missing")?;
+    registry.register_native_grammars(grammars::native_grammars());
 
-    for (name, grammar) in native_grammars.into_iter().chain([
-        ("javascript", tsx_grammar),
-        ("zed-keybind-context", rust_grammar),
-    ]) {
-        let language = Language::new(grammars::load_config(name), Some(grammar))
-            .with_queries(grammars::load_queries(name))
-            .with_context(|| format!("could not initialize the bundled {name} grammar"))?;
-        registry.add(Arc::new(language));
+    for name in [
+        "bash",
+        "c",
+        "cpp",
+        "css",
+        "diff",
+        "go",
+        "gomod",
+        "gowork",
+        "json",
+        "jsonc",
+        "markdown",
+        "markdown-inline",
+        "python",
+        "rust",
+        "tsx",
+        "typescript",
+        "javascript",
+        "jsdoc",
+        "regex",
+        "yaml",
+        "gitcommit",
+        "zed-keybind-context",
+    ] {
+        let config = grammars::load_config(name);
+        registry.register_language(
+            config.name.clone(),
+            config.grammar.clone(),
+            config.matcher.clone(),
+            config.hidden,
+            None,
+            Arc::new(move || {
+                let config = config.clone();
+                // Keep query compilation behind the registry loader. Eagerly constructing every
+                // Language adds several seconds to startup even though one file selects one root.
+                Box::pin(async move {
+                    Ok(LoadedLanguage {
+                        config,
+                        queries: grammars::load_queries(name),
+                        context_provider: None,
+                        toolchain_provider: None,
+                        manifest_name: None,
+                    })
+                })
+            }),
+        );
     }
-    Ok(registry)
+    registry
 }
 
 async fn assign_file_language(

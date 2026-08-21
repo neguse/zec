@@ -23,8 +23,9 @@ cargo run -- path/to/file
 
 Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
 Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight
-します。現在は実行時にLSPやNode runtimeを初期化しません。`NO_COLOR` が設定された
-環境ではCrosstermの規約どおり色を出しません。
+します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な
+parser/queryを遅延loadします。現在は実行時にLSPやNode runtimeを初期化しません。
+`NO_COLOR` が設定された環境ではCrosstermの規約どおり色を出しません。
 
 引数なしでは空のscratch bufferを開きます。現時点では保存先を選ぶUIがないため、
 scratch bufferの `Ctrl-S` は保存せずstatusにエラーを表示します。
