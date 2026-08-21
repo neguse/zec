@@ -44,13 +44,13 @@ use render::{
     BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, Viewport,
 };
 use tabs::{Direction as TabDirection, TabLabel};
-use terminal::{InputReader, TerminalEvent, TerminalSession, ZecTerminal};
+use terminal::{InputReader, ScrollDirection, TerminalEvent, TerminalSession, ZecTerminal};
 use theme::ActiveTheme as _;
 use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G go to line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G go to line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -421,14 +421,26 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                 };
 
-                if let Err(error) = draw(
+                let follow_vertical_cursor = {
+                    let tab = &mut tabs[active_index];
+                    update_vertical_follow(
+                        &mut tab.manual_vertical_scroll,
+                        &mut tab.last_cursor,
+                        snapshot.cursor,
+                    )
+                };
+                let body_height = match draw(
                     &mut terminal,
                     &mut snapshot,
                     &mut tabs[active_index].viewport,
+                    follow_vertical_cursor,
                 ) {
-                    failure = Some(format!("failed to draw terminal: {error}"));
-                    break;
-                }
+                    Ok(body_height) => body_height,
+                    Err(error) => {
+                        failure = Some(format!("failed to draw terminal: {error}"));
+                        break;
+                    }
+                };
 
                 let event = match event_receiver.recv().await {
                     Ok(event) => event,
@@ -545,6 +557,33 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             go_to_line_prompt = None;
                             active_index = next_index;
                             quit_armed = false;
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_scroll_page_up(&event)
+                            || input::is_scroll_page_down(&event) =>
+                    {
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && active_search.is_none()
+                        {
+                            let direction = if input::is_scroll_page_up(&event) {
+                                ScrollDirection::Up
+                            } else {
+                                ScrollDirection::Down
+                            };
+                            let tab = &mut tabs[active_index];
+                            if scroll_viewport(
+                                &mut tab.viewport,
+                                snapshot.lines.len(),
+                                body_height,
+                                direction,
+                                body_height.saturating_sub(1).max(1),
+                            ) {
+                                tab.manual_vertical_scroll = true;
+                            }
                             message = None;
                         }
                     }
@@ -1265,6 +1304,25 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             break;
                         }
                     }
+                    TerminalEvent::MouseScroll(direction) => {
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && active_search.is_none()
+                        {
+                            let tab = &mut tabs[active_index];
+                            if scroll_viewport(
+                                &mut tab.viewport,
+                                snapshot.lines.len(),
+                                body_height,
+                                direction,
+                                3,
+                            ) {
+                                tab.manual_vertical_scroll = true;
+                            }
+                            message = None;
+                        }
+                    }
                     TerminalEvent::ReloadFinished { buffer_id, result } => {
                         let Some(reloaded_index) = tabs.iter().position(|tab| {
                             tab.document
@@ -1353,7 +1411,10 @@ fn resets_confirmation(
         TerminalEvent::Key(event)
             if event.kind == crossterm::event::KeyEventKind::Press
                 && !confirmation_key(event)
-    ) || matches!(event, TerminalEvent::Paste(_))
+    ) || matches!(
+        event,
+        TerminalEvent::Paste(_) | TerminalEvent::MouseScroll(_)
+    )
 }
 
 fn search_field_for_key(event: &crossterm::event::KeyEvent) -> Option<SearchField> {
@@ -1395,6 +1456,8 @@ struct DocumentTab {
     document: OpenDocument,
     editor_window: WindowHandle<Editor>,
     viewport: Viewport,
+    manual_vertical_scroll: bool,
+    last_cursor: Option<Cursor>,
 }
 
 fn file_services(cx: &mut App) -> FileServices {
@@ -1931,6 +1994,8 @@ fn create_document_tab(
         document,
         editor_window,
         viewport: Viewport::default(),
+        manual_vertical_scroll: false,
+        last_cursor: None,
     })
 }
 
@@ -2042,7 +2107,7 @@ fn capture_editor(
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Alt-PgUp/PgDn scroll  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -2174,31 +2239,85 @@ fn draw(
     terminal: &mut ZecTerminal,
     snapshot: &mut RenderSnapshot,
     viewport: &mut Viewport,
-) -> io::Result<()> {
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            let text_width = EditorWidget::new(snapshot).text_width(area);
-            keep_cursor_visible(viewport, snapshot.cursor, text_width, area.height);
-            snapshot.viewport = *viewport;
+    follow_vertical_cursor: bool,
+) -> io::Result<usize> {
+    let mut body_height = 0;
+    terminal.draw(|frame| {
+        let area = frame.area();
+        body_height = usize::from(area.height.saturating_sub(1));
+        let text_width = EditorWidget::new(snapshot).text_width(area);
+        keep_cursor_visible(
+            viewport,
+            snapshot.cursor,
+            text_width,
+            area.height,
+            follow_vertical_cursor,
+        );
+        viewport.top_row = viewport
+            .top_row
+            .min(max_viewport_top(snapshot.lines.len(), body_height));
+        snapshot.viewport = *viewport;
 
-            let widget = EditorWidget::new(snapshot);
-            let cursor_position = widget.cursor_position(area);
-            frame.render_widget(widget, area);
-            if let Some(cursor_position) = cursor_position {
-                frame.set_cursor_position(cursor_position);
-            }
-        })
-        .map(|_| ())
+        let widget = EditorWidget::new(snapshot);
+        let cursor_position = widget.cursor_position(area);
+        frame.render_widget(widget, area);
+        if let Some(cursor_position) = cursor_position {
+            frame.set_cursor_position(cursor_position);
+        }
+    })?;
+    Ok(body_height)
 }
 
-fn keep_cursor_visible(viewport: &mut Viewport, cursor: Option<Cursor>, width: u16, height: u16) {
+fn max_viewport_top(line_count: usize, body_height: usize) -> usize {
+    line_count.saturating_sub(body_height.max(1))
+}
+
+fn update_vertical_follow(
+    manual_vertical_scroll: &mut bool,
+    last_cursor: &mut Option<Cursor>,
+    cursor: Option<Cursor>,
+) -> bool {
+    if *last_cursor != cursor {
+        *manual_vertical_scroll = false;
+    }
+    *last_cursor = cursor;
+    !*manual_vertical_scroll
+}
+
+fn scroll_viewport(
+    viewport: &mut Viewport,
+    line_count: usize,
+    body_height: usize,
+    direction: ScrollDirection,
+    amount: usize,
+) -> bool {
+    if body_height == 0 || amount == 0 {
+        return false;
+    }
+    let max_top = max_viewport_top(line_count, body_height);
+    let previous = viewport.top_row;
+    let current = viewport.top_row.min(max_top);
+    let next = match direction {
+        ScrollDirection::Up => current.saturating_sub(amount),
+        ScrollDirection::Down => current.saturating_add(amount).min(max_top),
+    };
+    viewport.top_row = next;
+    next != previous
+}
+
+fn keep_cursor_visible(
+    viewport: &mut Viewport,
+    cursor: Option<Cursor>,
+    width: u16,
+    height: u16,
+    follow_vertical_cursor: bool,
+) {
     let Some(cursor) = cursor else {
         return;
     };
 
     let body_height = usize::from(height.saturating_sub(1));
-    if body_height > 0 {
+    if follow_vertical_cursor && body_height > 0 {
         if cursor.row < viewport.top_row {
             viewport.top_row = cursor.row;
         } else if cursor.row >= viewport.top_row.saturating_add(body_height) {
@@ -2830,7 +2949,7 @@ mod tests {
     }
 
     #[test]
-    fn only_another_press_or_paste_resets_discard_confirmation() {
+    fn another_input_action_resets_discard_confirmation() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
         let quit = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
@@ -2847,6 +2966,10 @@ mod tests {
         assert!(!resets_confirmation(&other_repeat, input::is_quit));
         assert!(resets_confirmation(
             &TerminalEvent::Paste("text".to_owned()),
+            input::is_quit
+        ));
+        assert!(resets_confirmation(
+            &TerminalEvent::MouseScroll(ScrollDirection::Down),
             input::is_quit
         ));
         assert!(!resets_confirmation(&TerminalEvent::Redraw, input::is_quit));
@@ -2881,10 +3004,22 @@ mod tests {
     fn scrolls_only_when_cursor_leaves_viewport() {
         let mut viewport = Viewport::default();
 
-        keep_cursor_visible(&mut viewport, Some(Cursor { row: 4, column: 9 }), 10, 6);
+        keep_cursor_visible(
+            &mut viewport,
+            Some(Cursor { row: 4, column: 9 }),
+            10,
+            6,
+            true,
+        );
         assert_eq!(viewport, Viewport::default());
 
-        keep_cursor_visible(&mut viewport, Some(Cursor { row: 5, column: 10 }), 10, 6);
+        keep_cursor_visible(
+            &mut viewport,
+            Some(Cursor { row: 5, column: 10 }),
+            10,
+            6,
+            true,
+        );
         assert_eq!(
             viewport,
             Viewport {
@@ -2911,9 +3046,127 @@ mod tests {
             Some(Cursor { row: 0, column: 4 }),
             text_width,
             area.height,
+            true,
         );
 
         assert_eq!(text_width, 4);
         assert_eq!(viewport.left_column, 1);
+    }
+
+    #[test]
+    fn manual_vertical_scroll_clamps_and_moves_in_display_rows() {
+        let mut viewport = Viewport::default();
+
+        let page_height = 9usize;
+        assert!(scroll_viewport(
+            &mut viewport,
+            40,
+            page_height,
+            ScrollDirection::Down,
+            page_height.saturating_sub(1),
+        ));
+        assert_eq!(viewport.top_row, 8);
+
+        viewport.top_row = 0;
+        assert!(scroll_viewport(
+            &mut viewport,
+            40,
+            1,
+            ScrollDirection::Down,
+            1,
+        ));
+        assert_eq!(viewport.top_row, 1);
+
+        viewport.top_row = 0;
+        assert!(scroll_viewport(
+            &mut viewport,
+            20,
+            5,
+            ScrollDirection::Down,
+            3,
+        ));
+        assert_eq!(viewport.top_row, 3);
+        assert!(scroll_viewport(
+            &mut viewport,
+            20,
+            5,
+            ScrollDirection::Down,
+            usize::MAX,
+        ));
+        assert_eq!(viewport.top_row, 15);
+        assert!(scroll_viewport(
+            &mut viewport,
+            20,
+            5,
+            ScrollDirection::Up,
+            4,
+        ));
+        assert_eq!(viewport.top_row, 11);
+
+        viewport.top_row = 8;
+        assert!(scroll_viewport(
+            &mut viewport,
+            3,
+            5,
+            ScrollDirection::Down,
+            3,
+        ));
+        assert_eq!(viewport.top_row, 0);
+        assert!(!scroll_viewport(
+            &mut viewport,
+            3,
+            5,
+            ScrollDirection::Up,
+            3,
+        ));
+        assert!(!scroll_viewport(
+            &mut viewport,
+            20,
+            0,
+            ScrollDirection::Down,
+            3,
+        ));
+        assert!(!scroll_viewport(
+            &mut viewport,
+            20,
+            5,
+            ScrollDirection::Down,
+            0,
+        ));
+    }
+
+    #[test]
+    fn cursor_motion_resumes_vertical_follow_and_horizontal_follow_stays_active() {
+        let cursor = Some(Cursor {
+            row: 10,
+            column: 10,
+        });
+        let mut manual_vertical_scroll = true;
+        let mut last_cursor = cursor;
+
+        assert!(!update_vertical_follow(
+            &mut manual_vertical_scroll,
+            &mut last_cursor,
+            cursor,
+        ));
+
+        let moved_cursor = Some(Cursor {
+            row: 11,
+            column: 10,
+        });
+        assert!(update_vertical_follow(
+            &mut manual_vertical_scroll,
+            &mut last_cursor,
+            moved_cursor,
+        ));
+        assert!(!manual_vertical_scroll);
+
+        let mut viewport = Viewport {
+            top_row: 3,
+            left_column: 0,
+        };
+        keep_cursor_visible(&mut viewport, moved_cursor, 5, 6, false);
+        assert_eq!(viewport.top_row, 3);
+        assert_eq!(viewport.left_column, 6);
     }
 }

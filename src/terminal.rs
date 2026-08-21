@@ -11,7 +11,10 @@ use std::{
 use async_channel::Sender;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEvent, MouseEventKind,
+    },
     execute,
     terminal::{
         self as crossterm_terminal, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
@@ -22,10 +25,17 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub type ZecTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollDirection {
+    Up,
+    Down,
+}
+
 #[derive(Debug)]
 pub enum TerminalEvent {
     Key(KeyEvent),
     Paste(String),
+    MouseScroll(ScrollDirection),
     Resize,
     Redraw,
     ReloadFinished {
@@ -46,9 +56,10 @@ impl TerminalSession {
             EnterAlternateScreen,
             Clear(ClearType::All),
             EnableBracketedPaste,
+            EnableMouseCapture,
             Hide
         ) {
-            let _ = disable_raw_mode();
+            restore_terminal();
             return Err(error);
         }
 
@@ -62,9 +73,19 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = execute!(stdout(), Show, DisableBracketedPaste, LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        restore_terminal();
     }
+}
+
+fn restore_terminal() {
+    let _ = execute!(
+        stdout(),
+        Show,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
 }
 
 pub struct InputReader {
@@ -131,18 +152,90 @@ fn read_events(sender: Sender<TerminalEvent>, stop: Arc<AtomicBool>) {
             }
         };
 
-        let event = match event {
-            Event::Key(key) => TerminalEvent::Key(key),
-            Event::Paste(text) => TerminalEvent::Paste(text),
-            Event::Resize(columns, rows) => {
-                known_size = Some((columns, rows));
-                TerminalEvent::Resize
-            }
-            Event::FocusGained | Event::FocusLost | Event::Mouse(_) => continue,
+        if let Event::Resize(columns, rows) = &event {
+            known_size = Some((*columns, *rows));
+        };
+        let Some(event) = map_event(event) else {
+            continue;
         };
 
         if sender.send_blocking(event).is_err() {
             break;
         }
+    }
+}
+
+fn map_event(event: Event) -> Option<TerminalEvent> {
+    match event {
+        Event::Key(key) => Some(TerminalEvent::Key(key)),
+        Event::Paste(text) => Some(TerminalEvent::Paste(text)),
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => Some(TerminalEvent::MouseScroll(ScrollDirection::Up)),
+            MouseEventKind::ScrollDown => Some(TerminalEvent::MouseScroll(ScrollDirection::Down)),
+            _ => None,
+        },
+        Event::Resize(_, _) => Some(TerminalEvent::Resize),
+        Event::FocusGained | Event::FocusLost => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent};
+
+    use super::*;
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 7,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn maps_vertical_mouse_wheel_events() {
+        assert!(matches!(
+            map_event(mouse(MouseEventKind::ScrollUp)),
+            Some(TerminalEvent::MouseScroll(ScrollDirection::Up))
+        ));
+        assert!(matches!(
+            map_event(mouse(MouseEventKind::ScrollDown)),
+            Some(TerminalEvent::MouseScroll(ScrollDirection::Down))
+        ));
+    }
+
+    #[test]
+    fn drops_mouse_events_other_than_vertical_scroll() {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert!(map_event(mouse(kind)).is_none(), "mapped {kind:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_existing_non_mouse_event_mapping() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            map_event(Event::Key(key)),
+            Some(TerminalEvent::Key(mapped)) if mapped == key
+        ));
+        assert!(matches!(
+            map_event(Event::Paste("text".to_owned())),
+            Some(TerminalEvent::Paste(text)) if text == "text"
+        ));
+        assert!(matches!(
+            map_event(Event::Resize(80, 24)),
+            Some(TerminalEvent::Resize)
+        ));
+        assert!(map_event(Event::FocusGained).is_none());
+        assert!(map_event(Event::FocusLost).is_none());
     }
 }

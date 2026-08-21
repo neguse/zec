@@ -79,14 +79,28 @@ pub fn is_next_tab(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_scroll_page_up(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::PageUp
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_scroll_page_down(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::PageDown
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
 pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
-    event.modifiers == CrosstermModifiers::CONTROL
+    (event.modifiers == CrosstermModifiers::CONTROL
         && matches!(
             event.code,
             KeyCode::Char('c' | 'f' | 'g' | 'h' | 'n' | 'o' | 'q' | 'r' | 's' | 'w' | 'x')
                 | KeyCode::PageUp
                 | KeyCode::PageDown
-        )
+        ))
+        || (event.modifiers == CrosstermModifiers::ALT
+            && matches!(event.code, KeyCode::PageUp | KeyCode::PageDown))
 }
 
 pub fn to_gpui_keystroke(event: KeyEvent) -> Option<Keystroke> {
@@ -329,6 +343,24 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn recognizes_only_plain_alt_page_up_press_as_page_scroll_up() {
+        assert_plain_alt_key_press_only(is_scroll_page_up, KeyCode::PageUp);
+        assert!(!is_scroll_page_up(&KeyEvent::new(
+            KeyCode::PageDown,
+            CrosstermModifiers::ALT,
+        )));
+    }
+
+    #[test]
+    fn recognizes_only_plain_alt_page_down_press_as_page_scroll_down() {
+        assert_plain_alt_key_press_only(is_scroll_page_down, KeyCode::PageDown);
+        assert!(!is_scroll_page_down(&KeyEvent::new(
+            KeyCode::PageUp,
+            CrosstermModifiers::ALT,
+        )));
+    }
+
     fn assert_plain_control_press_only(recognizer: fn(&KeyEvent) -> bool, character: char) {
         assert_plain_control_key_press_only(recognizer, KeyCode::Char(character));
     }
@@ -358,6 +390,35 @@ mod tests {
         assert!(!recognizer(&KeyEvent::new_with_kind(
             code,
             CrosstermModifiers::CONTROL,
+            KeyEventKind::Release,
+        )));
+    }
+
+    fn assert_plain_alt_key_press_only(recognizer: fn(&KeyEvent) -> bool, code: KeyCode) {
+        assert!(recognizer(&KeyEvent::new(
+            code.clone(),
+            CrosstermModifiers::ALT,
+        )));
+        assert!(!recognizer(&KeyEvent::new(
+            code.clone(),
+            CrosstermModifiers::ALT | CrosstermModifiers::SHIFT,
+        )));
+        assert!(!recognizer(&KeyEvent::new(
+            code.clone(),
+            CrosstermModifiers::ALT | CrosstermModifiers::CONTROL,
+        )));
+        assert!(!recognizer(&KeyEvent::new(
+            code.clone(),
+            CrosstermModifiers::NONE,
+        )));
+        assert!(!recognizer(&KeyEvent::new_with_kind(
+            code.clone(),
+            CrosstermModifiers::ALT,
+            KeyEventKind::Repeat,
+        )));
+        assert!(!recognizer(&KeyEvent::new_with_kind(
+            code,
+            CrosstermModifiers::ALT,
             KeyEventKind::Release,
         )));
     }
@@ -405,6 +466,31 @@ mod tests {
             assert!(!is_intercepted_shortcut(&KeyEvent::new(
                 code,
                 CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+            )));
+        }
+        for code in [KeyCode::PageUp, KeyCode::PageDown] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
+                assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+                    code,
+                    CrosstermModifiers::ALT,
+                    kind,
+                )));
+            }
+            assert!(!is_intercepted_shortcut(&KeyEvent::new(
+                code,
+                CrosstermModifiers::NONE,
+            )));
+            assert!(!is_intercepted_shortcut(&KeyEvent::new(
+                code,
+                CrosstermModifiers::SHIFT,
+            )));
+            assert!(!is_intercepted_shortcut(&KeyEvent::new(
+                code,
+                CrosstermModifiers::ALT | CrosstermModifiers::SHIFT,
             )));
         }
         assert!(!is_intercepted_shortcut(&KeyEvent::new(

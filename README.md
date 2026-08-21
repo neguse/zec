@@ -36,6 +36,11 @@ Save Asと`Ctrl-O`のpath promptはshellを通らないため、`~` はhome dire
 反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを
 追加した後も表示行を単純に数え直しません。
 
+mouse wheelは3 display rowずつ、`Alt-PageUp` / `Alt-PageDown`は原則terminal本文の高さから
+1行引いた量（本文が1行だけなら1行）ずつ、active tabの表示だけをscrollします。Zedのcursor、selection、undoは
+変更せず、cursorが移動すれば自動追従へ戻ります。mouse capture中にterminal自身の文字選択を
+使う場合、多くのterminalでは`Shift`を押しながらdragします。
+
 `Ctrl-C` はselection（空なら現在行）をterminal clipboardへcopyし、`Ctrl-X` はcopyに
 成功してからZedのCut actionで削除します。端末との受け渡しはOSC 52なので、対応端末の
 設定やtmuxのclipboard設定が必要な場合があります。端末から成功応答は返らないため、

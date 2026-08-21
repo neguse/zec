@@ -9,6 +9,7 @@ Editor、Buffer、selection、undo、keymap は再実装しない。
 
 headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
+terminal viewportのscroll、
 実ファイルのopen/save/save-as、buffer search、go to line/column、terminal clipboard、dirty表示、
 複数tab、実行中のtab open/close、終了時の端末復元まで実装済み。
 
@@ -176,11 +177,27 @@ hidden GPUI Editorのscroll位置はterminal viewportのsource of truthではな
 `keep_cursor_visible`が移動先を最小scrollで表示する。Zed GUIと同じ厳密な中央寄せ、相対指定、
 入力中のpreview highlightは後続課題とする。
 
+## Terminal scrolling
+
+mouse wheelはactive tabのterminal viewportを3 display rowずつ動かす。
+`Alt-PageUp` / `Alt-PageDown`はstatusを除くterminal本文の高さから1行引いた量（最小1行）を使い、
+前後の画面を原則1行重ねる。どちらもZedへkeystrokeを送らず、selection、cursor、undo transactionは
+変更しない。
+
+manual scroll中はvertical cursor followだけを止める。Zed側のcursor位置が変わった時点で
+自動追従へ戻し、horizontal cursor followは常に維持する。単なるRedrawやResizeではmanual
+状態を解除せず、viewportが文書末尾を越えた場合だけ有効範囲へclipする。
+
+modifierなし、または`Shift`付きの`PageUp` / `PageDown`は引き続きZedのkeymapへ渡す。
+hidden GPUI windowのpage sizeはterminal本文の高さと一致しないため、この経路の移動量は既知の
+境界とする。またmouse capture中にterminal自身の文字選択を使う場合、多くのterminalでは
+`Shift`付きdragが必要になる。
+
 ## Tabs
 
 1 tabにつき `Editor::for_buffer` をrootにした非表示GPUI windowを1つ持つ。Zedのfocus、
 key context、action dispatch、selection、cursor、undo、DisplayMapはwindowごとそのまま使い、
-zecが持つ可変状態はactive indexとterminal viewportだけにする。公開 `replace_root` では既存の
+zecが持つ可変状態はactive indexとterminal viewport、そのfollow状態だけにする。公開 `replace_root` では既存の
 Editor Entityをrootへ付け替えられず、1 window内でchildを交換すると専用hostとfocus treeの
 同期が必要になるため採用しない。
 
