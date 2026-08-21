@@ -90,6 +90,22 @@ Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEd
 を呼ぶ。編集・undo・移動などは引き続きZedのkey dispatchへ渡す。dirtyな状態での
 `Ctrl-Q` は初回に警告し、直後の2回目だけ破棄終了にする。
 
+## External file changes
+
+`RealFs`のwatcherから`WorktreeStore`、`BufferStore`、`Buffer::file_updated`までの変更検知は
+Zedの既存経路を使う。cleanなBufferの`BufferEvent::ReloadNeeded`だけ、通常のZedでは
+`Project`が担う処理をtabのsubscriptionから`BufferStore::reload_buffers`へ渡す。
+zecは`Project`を生成せず、この薄いglue以外にreloadや差分適用を再実装しない。
+
+dirtyなBufferは自動reloadせず`has_conflict`をstatusの`!`で示す。競合中の`Ctrl-S`は初回に
+警告し、再押下した場合だけdiskを上書きする。`Ctrl-R`はactive fileを明示的にreloadし、dirty
+なら同じキーの再押下を要求する。reloadにはhistoryを残すZedのtransactionを使うため、直後の
+`Ctrl-Z`でreload前の本文へ戻せる。
+
+reload完了はterminal eventで描画loopを起こし、active tabで検索中ならmatchを再計算する。
+完了eventはBuffer IDでtabを引き直すため、処理中にtabが閉じられても古いhandleやlabelを参照しない。
+外部rename後のtab label/path同期と、外部delete専用のstatus・再作成UIは後続課題とする。
+
 ## Syntax highlighting
 
 Zedの `grammars` crateが同梱するnative parserを直接 `LanguageRegistry` に登録する。
@@ -233,10 +249,10 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 ## Deferred
 
 tabのreorder UI、LSP、検索option/history、Go to lineの相対指定/live preview、clipboard metadata/read、native set外の
-grammar、完全なlanguage injection、terminal-aware soft wrapは後続で追加する。
+grammar、完全なlanguage injection、terminal-aware soft wrap、外部rename/deleteの専用UIは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
 tabごとの編集・undo・active save・全tab dirty終了保護、実行中のopen・dedupe・未作成path保存・
-scratch tab追加とSave As、dirty close後のdisk reload・最後のwindow終了、raw mode / alternate
-screenの復元まで確認する。
+scratch tab追加とSave As、cleanな外部変更の自動reload、dirtyな外部変更のreload/overwrite確認、
+dirty close後のdisk reload・最後のwindow終了、raw mode / alternate screenの復元まで確認する。

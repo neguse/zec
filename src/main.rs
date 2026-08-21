@@ -50,7 +50,7 @@ use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G go to line, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G go to line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -367,7 +367,12 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     document.label = untitled_label(next_untitled_id);
                     next_untitled_id = next_untitled_id.saturating_add(1);
                 }
-                let tab = match create_document_tab(document, redraw_sender.clone(), cx) {
+                let tab = match create_document_tab(
+                    document,
+                    services.buffer_store.clone(),
+                    redraw_sender.clone(),
+                    cx,
+                ) {
                     Ok(tab) => tab,
                     Err(error) => {
                         let _ = error_sender
@@ -384,6 +389,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
             let mut message = None;
             let mut quit_armed = false;
             let mut close_armed = false;
+            let mut reload_armed = false;
+            let mut save_conflict_armed = false;
             let mut active_search: Option<ActiveSearch> = None;
             let mut save_as_prompt: Option<SaveAsPrompt> = None;
             let mut open_prompt: Option<OpenPrompt> = None;
@@ -433,7 +440,13 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
 
                 let reset_close = resets_confirmation(&event, input::is_close_tab);
                 let reset_quit = resets_confirmation(&event, input::is_quit);
-                if (reset_close && close_armed) || (reset_quit && quit_armed) {
+                let reset_reload = resets_confirmation(&event, input::is_reload);
+                let reset_save_conflict = resets_confirmation(&event, input::is_save);
+                if (reset_close && close_armed)
+                    || (reset_quit && quit_armed)
+                    || (reset_reload && reload_armed)
+                    || (reset_save_conflict && save_conflict_armed)
+                {
                     message = None;
                 }
                 if reset_close {
@@ -441,6 +454,12 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                 }
                 if reset_quit {
                     quit_armed = false;
+                }
+                if reset_reload {
+                    reload_armed = false;
+                }
+                if reset_save_conflict {
+                    save_conflict_armed = false;
                 }
 
                 match event {
@@ -529,6 +548,64 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             message = None;
                         }
                     }
+                    TerminalEvent::Key(event) if input::is_reload(&event) => {
+                        quit_armed = false;
+                        if save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                        {
+                            if tabs[active_index].document.path.is_none() {
+                                reload_armed = false;
+                                message = Some("reload failed: buffer has no file path".to_owned());
+                                continue;
+                            }
+
+                            let dirty = tabs[active_index]
+                                .document
+                                .buffer
+                                .read_with(cx, |buffer, _| buffer.is_dirty());
+                            if dirty && !reload_armed {
+                                reload_armed = true;
+                                message = Some(
+                                    "unsaved changes; press Ctrl-R again to reload from disk"
+                                        .to_owned(),
+                                );
+                                continue;
+                            }
+
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                            match reload_document(&tabs[active_index].document, &services, cx).await
+                            {
+                                Ok(()) => {
+                                    let conflict = tabs[active_index]
+                                        .document
+                                        .buffer
+                                        .read_with(cx, |buffer, _| buffer.has_conflict());
+                                    if conflict {
+                                        message = Some(
+                                            "file changed again while reloading; local edits were kept"
+                                                .to_owned(),
+                                        );
+                                    } else {
+                                        if let Some(search) = active_search.as_mut()
+                                            && let Err(error) =
+                                                refresh_search(search, &editor_window, cx).await
+                                        {
+                                            failure = Some(format!(
+                                                "buffer search failed after reload: {error:#}"
+                                            ));
+                                            break;
+                                        }
+                                        message = Some("reloaded from disk".to_owned());
+                                    }
+                                }
+                                Err(error) => {
+                                    message = Some(format!("reload failed: {error:#}"));
+                                }
+                            }
+                        }
+                    }
                     TerminalEvent::Key(event) if input::is_save(&event) => {
                         quit_armed = false;
                         if save_as_prompt.is_none()
@@ -536,6 +613,19 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             && go_to_line_prompt.is_none()
                         {
                             if tabs[active_index].document.path.is_some() {
+                                let conflict = tabs[active_index]
+                                    .document
+                                    .buffer
+                                    .read_with(cx, |buffer, _| buffer.has_conflict());
+                                if conflict && !save_conflict_armed {
+                                    save_conflict_armed = true;
+                                    message = Some(
+                                        "changed on disk; press Ctrl-S again to overwrite, or Ctrl-R to reload"
+                                            .to_owned(),
+                                    );
+                                    continue;
+                                }
+                                save_conflict_armed = false;
                                 match save_document(&tabs[active_index].document, &services, cx)
                                     .await
                                 {
@@ -662,7 +752,12 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             }
                         };
                         document.label = untitled_label(next_untitled_id);
-                        match create_document_tab(document, redraw_sender.clone(), cx) {
+                        match create_document_tab(
+                            document,
+                            services.buffer_store.clone(),
+                            redraw_sender.clone(),
+                            cx,
+                        ) {
                             Ok(tab) => {
                                 tabs.push(tab);
                                 active_index = tabs.len() - 1;
@@ -875,6 +970,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                         } else {
                                             match create_document_tab(
                                                 document,
+                                                services.buffer_store.clone(),
                                                 redraw_sender.clone(),
                                                 cx,
                                             ) {
@@ -1169,6 +1265,58 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             break;
                         }
                     }
+                    TerminalEvent::ReloadFinished { buffer_id, result } => {
+                        let Some(reloaded_index) = tabs.iter().position(|tab| {
+                            tab.document
+                                .buffer
+                                .read_with(cx, |buffer, _| buffer.remote_id().to_proto())
+                                == buffer_id
+                        }) else {
+                            continue;
+                        };
+
+                        // An asynchronous status update must never leave a hidden
+                        // destructive-action confirmation armed behind its message.
+                        quit_armed = false;
+                        close_armed = false;
+                        reload_armed = false;
+                        save_conflict_armed = false;
+                        let label = tabs[reloaded_index]
+                            .document
+                            .path
+                            .as_deref()
+                            .and_then(Path::file_name)
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| tabs[reloaded_index].document.label.clone());
+                        let conflict = tabs[reloaded_index]
+                            .document
+                            .buffer
+                            .read_with(cx, |buffer, _| buffer.has_conflict());
+
+                        match result {
+                            Ok(()) if conflict => {
+                                message = Some(format!(
+                                    "{label} changed on disk; local edits were kept"
+                                ));
+                            }
+                            Ok(()) => {
+                                if reloaded_index == active_index
+                                    && let Some(search) = active_search.as_mut()
+                                    && let Err(error) =
+                                        refresh_search(search, &editor_window, cx).await
+                                {
+                                    failure = Some(format!(
+                                        "buffer search failed after automatic reload: {error:#}"
+                                    ));
+                                    break;
+                                }
+                                message = Some(format!("reloaded {label}"));
+                            }
+                            Err(error) => {
+                                message = Some(format!("reload failed for {label}: {error}"));
+                            }
+                        }
+                    }
                     TerminalEvent::Resize | TerminalEvent::Redraw => {}
                     TerminalEvent::Error(error) => {
                         failure = Some(format!("failed to read terminal input: {error}"));
@@ -1404,6 +1552,22 @@ async fn save_document(
         })
         .await
         .with_context(|| format!("could not save {}", path.display()))
+}
+
+async fn reload_document(
+    document: &OpenDocument,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let path = document.path.as_ref().context("buffer has no file path")?;
+    services
+        .buffer_store
+        .update(cx, |store, cx| {
+            store.reload_buffers([document.buffer.clone()].into_iter().collect(), true, cx)
+        })
+        .await
+        .with_context(|| format!("could not reload {}", path.display()))?;
+    Ok(())
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1721,24 +1885,46 @@ fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Edit
 
 fn create_document_tab(
     document: OpenDocument,
+    buffer_store: Entity<BufferStore>,
     redraw_sender: async_channel::Sender<TerminalEvent>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<DocumentTab> {
     let editor_window = cx.update(|cx| open_editor(document.buffer.clone(), cx))?;
     let buffer = document.buffer.clone();
+    let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id().to_proto());
     if let Err(error) = editor_window.update(cx, |_editor, _window, cx| {
-        cx.subscribe(&buffer, move |_, _, event, _| {
-            if matches!(
-                event,
-                BufferEvent::LanguageChanged(_) | BufferEvent::Reparsed
-            ) {
+        cx.subscribe(&buffer, move |_, reload_buffer, event, cx| match event {
+            BufferEvent::ReloadNeeded => {
+                let reload = buffer_store.update(cx, |store, cx| {
+                    store.reload_buffers([reload_buffer.clone()].into_iter().collect(), true, cx)
+                });
+                let sender = redraw_sender.clone();
+                cx.spawn(async move |_, _| {
+                    let result = match reload.await {
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(format!("{error:#}")),
+                    };
+                    let _ = sender
+                        .send(TerminalEvent::ReloadFinished { buffer_id, result })
+                        .await;
+                })
+                .detach();
+            }
+            BufferEvent::LanguageChanged(_)
+            | BufferEvent::Reparsed
+            | BufferEvent::FileHandleChanged
+            | BufferEvent::Reloaded
+            | BufferEvent::DirtyChanged
+            | BufferEvent::Saved
+            | BufferEvent::CapabilityChanged => {
                 let _ = redraw_sender.try_send(TerminalEvent::Redraw);
             }
+            _ => {}
         })
         .detach();
     }) {
         let _ = editor_window.update(cx, |_editor, window, _cx| window.remove_window());
-        return Err(error).context("failed to observe syntax updates");
+        return Err(error).context("failed to observe buffer updates");
     }
 
     Ok(DocumentTab {
@@ -1763,11 +1949,15 @@ fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> Strin
             } else {
                 tab.document.label.clone()
             };
-            let dirty = tab
+            let (dirty, conflict) = tab
                 .document
                 .buffer
-                .read_with(cx, |buffer, _| buffer.is_dirty());
-            TabLabel { name, dirty }
+                .read_with(cx, |buffer, _| (buffer.is_dirty(), buffer.has_conflict()));
+            TabLabel {
+                name,
+                dirty,
+                conflict,
+            }
         })
         .collect::<Vec<_>>();
     tabs::format_status(&labels, active)
@@ -1852,7 +2042,7 @@ fn capture_editor(
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -2053,6 +2243,35 @@ fn run_smoke() {
 mod tests {
     use super::*;
 
+    struct TemporaryTestFile {
+        path: PathBuf,
+        directory: PathBuf,
+    }
+
+    impl TemporaryTestFile {
+        fn new(contents: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after the Unix epoch")
+                .as_nanos();
+            let directory = std::env::temp_dir().join(format!(
+                "zec-external-reload-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&directory).expect("create external reload test directory");
+            let path = directory.join("watched.txt");
+            std::fs::write(&path, contents).expect("write initial external reload fixture");
+            Self { path, directory }
+        }
+    }
+
+    impl Drop for TemporaryTestFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+
     fn command(arguments: &[&str]) -> Result<Command> {
         parse_command(arguments.iter().map(|argument| OsString::from(*argument)))
     }
@@ -2138,6 +2357,112 @@ mod tests {
         for invalid in ["", "abc", "-1", "1:", "1:nope", "1:2:3", "4294967296"] {
             assert!(parse_go_to_location(invalid).is_err(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn clean_file_auto_reloads_without_project_and_reload_is_undoable() {
+        use std::time::{Duration, Instant};
+
+        const INITIAL: &str = "v1\n";
+        const EXTERNAL: &str = "v2 changed externally\n";
+
+        let file = TemporaryTestFile::new(INITIAL);
+        let path = file.path.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let services = file_services(cx);
+            let document = open_document(Some(path.clone()), services.clone(), cx);
+
+            cx.spawn(async move |cx| {
+                let result: Result<_> = async {
+                    let document = document.await?;
+                    let (event_sender, _event_receiver) = async_channel::unbounded();
+                    let tab = create_document_tab(
+                        document,
+                        services.buffer_store.clone(),
+                        event_sender,
+                        cx,
+                    )?;
+
+                    let (project_is_none, initial_text) = tab.editor_window.update(
+                        cx,
+                        |editor, _window, cx| (editor.project().is_none(), editor.text(cx)),
+                    )?;
+                    anyhow::ensure!(initial_text == INITIAL, "initial text was {initial_text:?}");
+
+                    std::fs::write(&path, EXTERNAL)
+                        .with_context(|| format!("could not externally write {}", path.display()))?;
+
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let (reloaded_text, reloaded_dirty, reloaded_conflict) = loop {
+                        let text = tab
+                            .editor_window
+                            .update(cx, |editor, _window, cx| editor.text(cx))?;
+                        let (dirty, conflict) = tab.document.buffer.read_with(cx, |buffer, _| {
+                            (buffer.is_dirty(), buffer.has_conflict())
+                        });
+                        if text == EXTERNAL {
+                            break (text, dirty, conflict);
+                        }
+                        anyhow::ensure!(
+                            Instant::now() < deadline,
+                            "automatic reload timed out; last text was {text:?}, dirty={dirty}, conflict={conflict}"
+                        );
+                        cx.background_executor()
+                            .timer(Duration::from_millis(25))
+                            .await;
+                    };
+
+                    tab.editor_window
+                        .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))?;
+                    let text_after_undo = tab
+                        .editor_window
+                        .update(cx, |editor, _window, cx| editor.text(cx))?;
+                    let (dirty_after_undo, conflict_after_undo) = tab
+                        .document
+                        .buffer
+                        .read_with(cx, |buffer, _| (buffer.is_dirty(), buffer.has_conflict()));
+
+                    Ok((
+                        project_is_none,
+                        reloaded_text,
+                        reloaded_dirty,
+                        reloaded_conflict,
+                        text_after_undo,
+                        dirty_after_undo,
+                        conflict_after_undo,
+                    ))
+                }
+                .await;
+
+                sender.send(result).expect("send external reload result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (
+            project_is_none,
+            reloaded_text,
+            reloaded_dirty,
+            reloaded_conflict,
+            text_after_undo,
+            dirty_after_undo,
+            conflict_after_undo,
+        ) = receiver
+            .recv()
+            .expect("receive external reload result")
+            .expect("external reload should succeed");
+
+        assert!(project_is_none);
+        assert_eq!(reloaded_text, EXTERNAL);
+        assert!(!reloaded_dirty);
+        assert!(!reloaded_conflict);
+        assert_eq!(text_after_undo, INITIAL);
+        assert!(dirty_after_undo);
+        assert!(!conflict_after_undo);
     }
 
     #[test]

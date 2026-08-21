@@ -26,12 +26,15 @@ pub fn adjacent_index(current: usize, len: usize, direction: Direction) -> Optio
 pub struct TabLabel {
     pub name: String,
     pub dirty: bool,
+    pub conflict: bool,
 }
 
 /// Formats the tab portion of the editor status line.
 ///
 /// A single tab is shown without navigation decoration. With multiple tabs,
-/// every name and dirty marker remains visible and the active tab is bracketed.
+/// every name and state marker remains visible and the active tab is bracketed.
+/// Conflicts use `!`, dirty tabs use `+`, and conflicts take precedence when
+/// both states are present.
 /// An invalid active index is represented by `?` rather than attributing the
 /// active state to the wrong tab.
 pub fn format_status(labels: &[TabLabel], active: usize) -> String {
@@ -41,7 +44,9 @@ pub fn format_status(labels: &[TabLabel], active: usize) -> String {
 
     if labels.len() == 1 {
         let mut status = first.name.clone();
-        if first.dirty {
+        if first.conflict {
+            status.push('!');
+        } else if first.dirty {
             status.push('+');
         }
         return status;
@@ -60,7 +65,9 @@ pub fn format_status(labels: &[TabLabel], active: usize) -> String {
             status.push('[');
         }
         status.push_str(&label.name);
-        if label.dirty {
+        if label.conflict {
+            status.push('!');
+        } else if label.dirty {
             status.push('+');
         }
         if is_active {
@@ -75,10 +82,11 @@ pub fn format_status(labels: &[TabLabel], active: usize) -> String {
 mod tests {
     use super::*;
 
-    fn label(name: &str, dirty: bool) -> TabLabel {
+    fn label(name: &str, dirty: bool, conflict: bool) -> TabLabel {
         TabLabel {
             name: name.to_owned(),
             dirty,
+            conflict,
         }
     }
 
@@ -103,38 +111,50 @@ mod tests {
     #[test]
     fn single_tab_uses_its_full_name_and_dirty_marker() {
         assert_eq!(
-            format_status(&[label("src/nested/main.rs", false)], 0),
+            format_status(&[label("src/nested/main.rs", false, false)], 0),
             "src/nested/main.rs"
         );
         assert_eq!(
-            format_status(&[label("src/nested/main.rs", true)], 0),
+            format_status(&[label("src/nested/main.rs", true, false)], 0),
             "src/nested/main.rs+"
         );
     }
 
     #[test]
-    fn multiple_tabs_show_position_active_tab_and_every_dirty_marker() {
+    fn conflict_marker_takes_priority_over_dirty_marker() {
+        assert_eq!(
+            format_status(&[label("main.rs", false, true)], 0),
+            "main.rs!"
+        );
+        assert_eq!(
+            format_status(&[label("main.rs", true, true)], 0),
+            "main.rs!"
+        );
+    }
+
+    #[test]
+    fn multiple_tabs_show_position_active_tab_and_every_state_marker() {
         let labels = [
-            label("main.rs", false),
-            label("README.md", true),
-            label("notes.txt", true),
+            label("main.rs", false, false),
+            label("README.md", true, false),
+            label("notes.txt", true, true),
         ];
 
         assert_eq!(
             format_status(&labels, 1),
-            "2/3 main.rs [README.md+] notes.txt+"
+            "2/3 main.rs [README.md+] notes.txt!"
         );
     }
 
     #[test]
     fn status_preserves_unicode_and_empty_names() {
         let labels = [
-            label("日本語.rs", true),
-            label("", false),
-            label("🦀.md", false),
+            label("日本語.rs", true, false),
+            label("", false, true),
+            label("🦀.md", false, false),
         ];
 
-        assert_eq!(format_status(&labels, 1), "2/3 日本語.rs+ [] 🦀.md");
+        assert_eq!(format_status(&labels, 1), "2/3 日本語.rs+ [!] 🦀.md");
     }
 
     #[test]
@@ -142,8 +162,11 @@ mod tests {
         assert_eq!(format_status(&[], 0), "");
         assert_eq!(format_status(&[], usize::MAX), "");
 
-        let labels = [label("main.rs", false), label("README.md", true)];
-        assert_eq!(format_status(&labels, 2), "?/2 main.rs README.md+");
-        assert_eq!(format_status(&labels, usize::MAX), "?/2 main.rs README.md+");
+        let labels = [
+            label("main.rs", false, false),
+            label("README.md", true, true),
+        ];
+        assert_eq!(format_status(&labels, 2), "?/2 main.rs README.md!");
+        assert_eq!(format_status(&labels, usize::MAX), "?/2 main.rs README.md!");
     }
 }

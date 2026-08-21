@@ -28,6 +28,10 @@ pub enum TerminalEvent {
     Paste(String),
     Resize,
     Redraw,
+    ReloadFinished {
+        buffer_id: u64,
+        result: Result<(), String>,
+    },
     Error(String),
 }
 

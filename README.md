@@ -20,7 +20,12 @@ cargo run -- path/to/file another/file
 各tabの本文、cursor、selection、undoは独立したZed Editorが保持し、viewportだけを端末側で
 保持します。`Ctrl-S` はactive tabだけをZedの `BufferStore` 経由で保存します。
 終了は `Ctrl-Q` です。どれか1つでも未保存なら、破棄確認としてもう一度`Ctrl-Q`を押します。
-statusには全tabのdirty markerを表示します。
+statusには全tabのdirtyを`+`、外部変更との競合を`!`で表示します。
+
+cleanなfileがdisk上で変更されると自動でreloadします。local edit中は本文を上書きせず`!`を
+表示し、`Ctrl-S`は再押下した場合だけdiskを上書きします。`Ctrl-R`はactive fileをdiskから
+reloadし、dirtyなら同じキーの再押下を要求します。reloadもZedのtransactionとして扱うため、
+直後の`Ctrl-Z`でreload前の本文へ戻せます。
 
 引数なし、または`Ctrl-N`では空のscratch bufferを開きます。`Ctrl-S`で1行のSave As promptに入り、
 相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、
