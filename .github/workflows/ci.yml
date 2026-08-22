@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+  CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+  RUSTUP_TOOLCHAIN: "1.97.1"
+
+jobs:
+  linux:
+    name: Linux graduation gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Record disk baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CI_DISK_BASELINE_KIB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $3 }')" >> "$GITHUB_ENV"
+
+      - name: Install Linux build dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            curl \
+            elfutils \
+            g++ \
+            gcc \
+            gettext-base \
+            git \
+            jq \
+            libasound2-dev \
+            libfontconfig-dev \
+            libgit2-dev \
+            libglib2.0-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            libstdc++-14-dev \
+            libva-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
+            lld \
+            llvm \
+            make \
+            musl-dev \
+            musl-tools \
+            pipewire \
+            xdg-desktop-portal
+          sudo apt-get clean
+
+      - name: Install pinned Rust toolchain
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          rustc --version --verbose
+          cargo --version
+          rustfmt --version
+
+      - name: Verify lockfile and formatting
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo fmt --all -- --check
+
+      - name: Build zec
+        timeout-minutes: 60
+        run: cargo build --locked --bin zec
+
+      - name: Run unit and headless tests
+        timeout-minutes: 30
+        run: cargo test --locked --bin zec
+
+      - name: Run PTY acceptance tests
+        timeout-minutes: 10
+        run: cargo test --locked --test pty_acceptance -- --test-threads=1
+
+      - name: Run headless smoke
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_output="$(./target/debug/zec --smoke)"
+          printf '%s\n' "$smoke_output"
+          grep -Fq 'initial: ""' <<< "$smoke_output"
+          grep -Fq 'after insert: "hello from zec"' <<< "$smoke_output"
+          grep -Fq 'after undo: ""' <<< "$smoke_output"
+
+      - name: Enforce CI disk budget
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE"
+          du -sh target "$HOME/.cargo/git" "$HOME/.cargo/registry" 2>/dev/null || true
+          used_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $3 }')"
+          generated_kib="$((used_kib - CI_DISK_BASELINE_KIB))"
+          budget_kib="$((14 * 1024 * 1024))"
+          echo "CI-generated disk: $((generated_kib / 1024)) MiB (budget: $((budget_kib / 1024)) MiB)"
+          test "$generated_kib" -lt "$budget_kib"
