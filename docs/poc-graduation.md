@@ -15,13 +15,18 @@ mouseの高度なselection、検索optionなどの機能完備は卒業条件に
 
 ### G1. Zed is the sole editing authority
 
-Pass.
+Fail.
 
 - text、cursor、selection、transaction、undo、dirty stateはZedの`Editor` / `Buffer`が所有する。
 - file open/save/save-as/reloadはZedの`RealFs -> WorktreeStore -> BufferStore`を通す。
 - zecはterminal event、viewport、status/promptと、UTF-8 byte座標からterminal cell座標への
   変換だけを所有する。
 - この境界を越えてEditorの振る舞いを複製する機能は、Zed側の公開APIを作るまで入れない。
+
+本文や編集stateの境界は守れているが、`OpenDocument` がfile path/labelをcacheし、
+save/reload/quit判定にも使っている。Save As成功時以外に同期しないため、外部rename/delete後に
+ZedのBuffer file identityと不一致になる。pathとdisk stateをBufferからderiveし、キャッシュを
+source of truthにしない構成へ直すまでPassにしない。
 
 ### G2. Data and terminal lifecycle are safe
 
@@ -73,7 +78,7 @@ Pass条件:
 
 - integration testが実際の`zec` binaryをPTY内で起動する。
 - 最低限、insert/selection replacement/undo/saveのfile bytes、Unicode入力、resize後の継続操作、
-  dirty exit保護、save failure後のdirty保持、normal exitと`SIGTERM` / `SIGHUP`後のterminal mode復元を
+dirty exit保護、save failure後のdirty保持、normal exitと`SIGTERM` / `SIGHUP`後のterminal mode復元を
   black-boxで確認する。
 - 各waitはdeadline付きで、固定sleepや無限blockを使わない。
 - test失敗時はchild processを確実に終了し、開発者のterminalを変更しない。
@@ -99,9 +104,10 @@ Pass条件:
 ## Execution order
 
 1. G3: viewport-bounded captureとbounded redrawへ変更し、100,000行の構造的な回帰testを追加する。
-2. G2/G4: catch可能signalを通常終了へ渡し、actual binaryのPTY integration harnessと
-   core acceptance matrixを追加する。
-3. G5: 同じmatrixをclean Linux CIに接続する。
-4. 全gateを1回の検証で通し、statusを`Graduated`へ変更する。
+2. G1/G2: file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定する。
+   catch可能signalもevent loopの通常終了へ渡す。
+3. G4: actual binaryのPTY integration harnessとcore acceptance matrixを追加する。
+4. G5: 同じmatrixをclean Linux CIに接続する。
+5. 全gateを1回の検証で通し、statusを`Graduated`へ変更する。
 
 この間、卒業gateを直接進めない機能追加は行わない。
