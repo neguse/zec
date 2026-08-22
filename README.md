@@ -6,7 +6,8 @@ Zed の編集コアを使う CUI エディタの実現可能性を検証する�
 Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを
 描画します。
 
-設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に記録します。
+設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に、
+PoC卒業の客観的な条件と進捗は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
 
 ```sh
 cargo run -- path/to/file another/file
