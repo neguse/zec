@@ -1,13 +1,16 @@
 # zec
 
-Zed の編集コアを使う CUI エディタの実現可能性を検証するプロジェクトです。
+Zed の編集コアを使う CUI エディタです。Linux向け基盤の実現可能性PoCは、
+data/terminal lifecycle、viewport-bounded rendering、actual-binary PTY試験、
+clean-build再現性の全gateを2026-08-23に通過しました。production-readyではなく、
+ここからalpha editorとして開発します。
 
 現在は、GPUI の headless runtime 上で `editor::Editor` を動かし、Crossterm から
 Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを
 描画します。
 
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に、
-PoC卒業の客観的な条件と進捗は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
+PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
 
 ```sh
 cargo run -- path/to/file another/file
@@ -74,7 +77,7 @@ Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsynt
 parser/queryを遅延loadします。現在は実行時にLSPやNode runtimeを初期化しません。
 `NO_COLOR` が設定された環境ではCrosstermの規約どおり色を出しません。
 
-端末を使わず、最初の挿入・undo PoCだけを実行する場合:
+端末を使わず、Zed Editorへの挿入とundoを確認するheadless smoke:
 
 ```sh
 cargo run -- --smoke

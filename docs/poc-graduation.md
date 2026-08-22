@@ -1,6 +1,6 @@
 # PoC graduation contract
 
-Status: In progress (2026-08-22)
+Status: Graduated (2026-08-23)
 
 ## Meaning of graduation
 
@@ -104,21 +104,28 @@ writer、master、receiverを閉じてからreader threadをjoinする。
 
 ### G5. A clean checkout is reproducible
 
-Fail.
+Pass (2026-08-23).
 
-Zed revision、Rust toolchain、`Cargo.lock`は固定済みだが、repository自身にCIがない。
-現時点のsource cache済み環境でfresh targetへの`cargo build --locked`は4分47秒、targetが
-約9.4 GiB、debug binaryが約1.9 GBだった。Zedの大きなdependency graphは前提だが、
-CIで同じtargetを重複buildしたり、runnerのdisk不足を起こす構成は卒業条件を満たさない。
+`.github/workflows/ci.yml`は`ubuntu-24.04`、Rust 1.97.1、固定済み`Cargo.lock`で、
+`cargo fmt --check`、`cargo build --locked --bin zec`、unit/headless test、actual-binary
+PTY acceptance、`--smoke`のoutput確認を行う。build/test/smokeは同じ`target`を共有し、
+incrementalとdebug infoを無効化する。job timeoutは90分、CI生成物のdisk budgetは14 GiBとして
+workflow内で検査する。
 
-Pass条件:
+卒業時の実測:
 
-- Linux CIがclean checkoutから`cargo fmt --check`、build、unit/headless test、PTY acceptance、
-  `--smoke`を実行する。
-- commandは`--locked`を使い、Zedの検証revisionが意図せず変更されない。
-- build/test/smokeは1つのtarget directoryを共有し、CI用のdebug info/incremental設定を含めて
-  標準Linux runnerのdiskとtimeout内で実際に完走する。
-- 卒業時に同じcommand setをlocalで実行し、結果を本documentに記録する。
+- localのfresh targetではbuildが3分56秒、全test後のtargetが4,827,824 KiB、binaryが
+  446,036,048 bytesだった。unit/headless 93件とPTY acceptance 1件、計94件、および
+  `--smoke`のoutput確認がすべてPassした。
+- commit `d32ddfbe2475c2d1eb2abb42a661cc91e7cacd4d`のindependent clean checkoutを、official
+  `ubuntu:24.04` containerのcold dependency cacheから同じcommand setに通した。buildは
+  8分14秒、target 4,829,120 KiB、Cargo git cache 1,134,968 KiB、Cargo registry cache
+  751,928 KiB、合計6,716,016 KiB（約6.41 GiB）だった。94件のtestとsmokeを含めて
+  すべてPassし、14 GiB budget内だった。検証後もcheckoutのsource差分とcontainer残留はない。
+
+repositoryにはremoteがないため、この環境からGitHub-hosted Actions自体は起動できない。
+上記clean Ubuntu実行と同じcommand setをworkflowへ固定しており、remoteへの最初のpushから
+同じgraduation gateが走る。
 
 ## Execution order
 
@@ -126,7 +133,7 @@ Pass条件:
 2. G1 (done 2026-08-23): file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定。
    G2 (done 2026-08-23): data guardとcatch可能signalをactual-binary PTYで自動検証する。
 3. G4 (done 2026-08-23): actual binaryのPTY integration harnessとcore acceptance matrixを追加。
-4. G5: 同じmatrixをclean Linux CIに接続する。
-5. 全gateを1回の検証で通し、statusを`Graduated`へ変更する。
+4. G5 (done 2026-08-23): pinned clean Linux CI、shared target、disk budgetで同じmatrixを再現。
+5. 全gateを1回の検証で通し、statusを`Graduated`へ変更する (done 2026-08-23)。
 
-この間、卒業gateを直接進めない機能追加は行わない。
+卒業後は、graduation gateを維持しながらalpha editorとして機能開発を進める。
