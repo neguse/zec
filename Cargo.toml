@@ -25,5 +25,11 @@ theme_settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef
 unicode-width = "0.2"
 workspace = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 
+[dev-dependencies]
+nix = { version = "0.28", features = ["signal", "term"] }
+portable-pty = "0.9"
+tempfile = "3"
+vt100 = "0.16"
+
 [patch.crates-io]
 tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "dff1fd868c750dbbae179fcd5c43ce987e4e0528" }

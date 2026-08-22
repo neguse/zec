@@ -37,7 +37,7 @@ headless回帰試験はrename後のpath/dedupe、編集・新pathへのsave、�
 
 ### G2. Data and terminal lifecycle are safe
 
-Fail.
+Pass (2026-08-23).
 
 - existing/new/scratch fileのopen/save/save-as、dirty tabのclose/quit保護、disk外部変更の
   auto reloadとconflict保護を持つ。
@@ -47,14 +47,18 @@ Fail.
 
 catch可能な`SIGTERM` / `SIGHUP`はsignal handlerからatomic flagだけを更新し、terminal readerが
 通常のevent loop終了へ渡す。reader停止後、raw mode等を復元してからhandlerを解除する。両signalで
-起動前後の`stty -g`完全一致を手動PTY確認済みだが、G4のactual-binary自動PTY試験へ移すまで
-このgateはPassにしない。`SIGKILL`やmachine crashはprocess側でcleanup不可能なので対象外とする。
+起動前後のtermios完全一致をG4のactual-binary PTY試験で固定した。normal exit、dirty discard、
+`SIGTERM`、`SIGHUP`の全経路でalternate screen、mouse capture、bracketed paste、cursor stateも
+復元する。`SIGKILL`やmachine crashはprocess側でcleanup不可能なので対象外とする。
+
+actual-binary試験はZed `BufferStore`によるexact file bytesの保存、dirty quit保護、途中componentを
+通常fileにした`ENOTDIR` save failure後の本文・dirty・disk原本保持もblack-boxで確認する。
 
 また、固定中のZed revisionの`RealFs::save`はexisting fileをtruncateしてからRopeをstreamし、
 atomic renameや`fsync`は行わない。zecが作った回帰ではないが、power lossやwrite途中errorで
 disk原本がpartialになるproduction riskとして残る。Zedの保存先をdirectoryへ置換した
 headless failure試験で、error後もBuffer本文とdirty、退避したdisk原本が保持されることは固定した。
-G4ではactual binaryでも同じ保護を確認する。PoC卒業ではZedの保存経路を迂回しない。
+G4のactual-binary試験でも同じ保護を固定した。PoC卒業ではZedの保存経路を迂回しない。
 atomic/durable saveは
 production-readyの別blockerとし、Zed upstream修正または明示的なforkなしにzec側へ保存を
 再実装しない。
@@ -81,19 +85,22 @@ backgroundはglobal rowからrow-local vectorへ変換する。cursorが画面�
 
 ### G4. The real binary has automated PTY acceptance tests
 
-Fail.
+Pass (2026-08-23).
 
-現在のunit/headless testはZed APIとrendererを検証しているが、Crossterm入力から実binary、
-filesystem、terminal cleanupまでの確認は手動PTYに依存している。
+`tests/pty_acceptance.rs`は`CARGO_BIN_EXE_zec`をcontrolling PTY内で直接起動し、raw ANSI outputを
+`vt100`でsemantic screenへ復元して次の4 subprocessを逐次検証する。
 
-Pass条件:
+- Unicode insert、`Ctrl-A` selection replacement、Zed undo、PTY resize後の継続編集、Zed
+  `BufferStore` save、exact file bytes、dirty quit保護、normal exit。
+- 通常fileをpath途中へ置くことで決定的に発生させた`ENOTDIR` save failure、本文・dirty・disk原本保持、
+  dirty discard保護。
+- direct child PIDへの`SIGTERM`と`SIGHUP`がsignalによる即死ではなくzecの通常error exitを通ること。
+- 全経路で起動前後のtermios完全一致と、alternate screen、mouse、bracketed paste、cursor、application
+  modeの解除。
 
-- integration testが実際の`zec` binaryをPTY内で起動する。
-- 最低限、insert/selection replacement/undo/saveのfile bytes、Unicode入力、resize後の継続操作、
-dirty exit保護、save failure後のdirty保持、normal exitと`SIGTERM` / `SIGHUP`後のterminal mode復元を
-  black-boxで確認する。
-- 各waitはdeadline付きで、固定sleepや無限blockを使わない。
-- test失敗時はchild processを確実に終了し、開発者のterminalを変更しない。
+各waitは画面またはraw outputのpredicateとdeadlineで進み、固定sleepを使わない。親側slave FDはspawn後
+すぐ閉じ、EOFはcleanup bytesと競合しない状態として扱う。timeoutやpanic時はRAIIでchildをkill/reapし、
+writer、master、receiverを閉じてからreader threadをjoinする。
 
 ### G5. A clean checkout is reproducible
 
@@ -117,9 +124,8 @@ Pass条件:
 
 1. G3 (done 2026-08-23): viewport-bounded capture、bounded redraw、100,000行の構造test。
 2. G1 (done 2026-08-23): file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定。
-   G2 implementation: catch可能signalを通常終了へ接続済み。自動PTYとsave failure試験はG4で
-   完了させる。
-3. G4: actual binaryのPTY integration harnessとcore acceptance matrixを追加する。
+   G2 (done 2026-08-23): data guardとcatch可能signalをactual-binary PTYで自動検証する。
+3. G4 (done 2026-08-23): actual binaryのPTY integration harnessとcore acceptance matrixを追加。
 4. G5: 同じmatrixをclean Linux CIに接続する。
 5. 全gateを1回の検証で通し、statusを`Graduated`へ変更する。
 
