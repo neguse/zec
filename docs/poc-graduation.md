@@ -10,6 +10,10 @@ PoC卒業は、エディタの機能数が増えたことではなく、Zedの�
 
 当面の対象はLinuxの対応terminal上でのsingle-process実行とする。LSP、プラグイン、
 mouseの高度なselection、検索optionなどの機能完備は卒業条件に含めない。
+性能gateの対象は、個々のdisplay lineが通常のsource code程度の長さで、行数が大きい文書とする。
+数MBが1行に入るpathologicalな文書は、現在のZed公開APIではvisible columnだけを取得できず、
+1行全体のmaterializeとgrapheme走査が残るため別の既知制約とする。この制約は黙ってPass扱いせず、
+下記G3に残す。
 
 ## Gates
 
@@ -52,20 +56,23 @@ production-readyの別blockerとし、Zed upstream修正または明示的なfor
 
 ### G3. Per-frame work is bounded by the viewport
 
-Fail.
+Pass (2026-08-23).
 
-現在の`capture_editor`は毎frame、全display rowのtext、row info、syntax chunk、
-background highlightを取り直す。これは入力1回のコストをdocument全体のサイズに比例させるため、
-卒業のblockerとする。
+Ratatuiの`try_draw` callback内で実際のframe areaを取得し、cursor followとviewport clampを
+先に確定してから、そのframeで必要なdisplay rowだけをZedから取得する。text、row info、
+syntax chunkは`[top_row, top_row + body_height)`に限定し、background highlightも同じ範囲の
+Anchorだけを問い合わせる。resize直後も古い高さでcaptureしたsnapshotを新しいframeへ描かない。
 
-Pass条件:
+`RenderSnapshot`はglobalな`first_row` / `total_rows` / cursor位置と、可視行だけの
+`lines` / `line_numbers` / `line_styles`を持つ。renderer、mouse hit test、selection、
+backgroundはglobal rowからrow-local vectorへ変換する。cursorが画面外でもstatus用のrow infoは保持する。
 
-- 通常のrepaintでZedから取得するline/row info/highlightはterminal本文の表示範囲と
-  固定overscan以内に限る。
-- `RenderSnapshot`はdocument全行の`String`やstyle vectorを保持しない。
-- 100,000行fixtureでもcapture行数がterminal高で上限づけられることを自動testで固定する。
-- wall-clockの参考計測は残すが、CIの合否はマシン速度ではなく処理行数で決める。
-- redraw notificationはbounded/coalescedにし、解析eventの連打で無限にmemoryを増やさない。
+80x24 terminalと100,000行fixtureのheadless testで、先頭・中央・末尾のいずれも本文23行だけを
+保持し、`total_rows`は全文を表すことを固定した。terminal event channelはcapacity 1とし、
+重複Redrawは`try_send`でcoalesceし、入力はreader thread側でbackpressureする。
+
+既知制約は、巨大な単一display lineと、query変更時の全文検索、match数に比例するZed検索navigation
+である。必要ならvisible-column APIまたは検索用hookをZed側へ提案する。
 
 ### G4. The real binary has automated PTY acceptance tests
 
@@ -103,7 +110,7 @@ Pass条件:
 
 ## Execution order
 
-1. G3: viewport-bounded captureとbounded redrawへ変更し、100,000行の構造的な回帰testを追加する。
+1. G3 (done 2026-08-23): viewport-bounded capture、bounded redraw、100,000行の構造test。
 2. G1/G2: file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定する。
    catch可能signalもevent loopの通常終了へ渡す。
 3. G4: actual binaryのPTY integration harnessとcore acceptance matrixを追加する。

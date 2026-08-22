@@ -65,8 +65,13 @@ pub struct Viewport {
 /// Immutable, Zed-independent input to the terminal renderer.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderSnapshot {
+    /// Global display row represented by the first entry in the row-local vectors.
+    pub first_row: usize,
+    /// Total number of display rows in the document.
+    pub total_rows: usize,
+    /// Display-ready rows starting at [`Self::first_row`].
     pub lines: Vec<String>,
-    /// One-based buffer line number for each display row.
+    /// One-based buffer line number for each captured display row.
     ///
     /// Rows inserted by the display map, such as block rows, have no number.
     pub line_numbers: Vec<Option<u32>>,
@@ -76,6 +81,8 @@ pub struct RenderSnapshot {
     /// from changing while scrolling or folding.
     pub widest_line_number: u32,
     pub cursor: Option<Cursor>,
+    /// One-based buffer line number containing the cursor, even when offscreen.
+    pub cursor_line_number: Option<u32>,
     pub selections: Vec<SelectionRange>,
     pub text_style: Style,
     pub gutter_style: Style,
@@ -85,6 +92,26 @@ pub struct RenderSnapshot {
     pub status: String,
     /// Terminal-cell column for an input cursor on the status row.
     pub status_cursor_column: Option<usize>,
+}
+
+impl RenderSnapshot {
+    fn local_row_index(&self, document_row: usize) -> Option<usize> {
+        let local_row = document_row.checked_sub(self.first_row)?;
+        (local_row < self.lines.len()).then_some(local_row)
+    }
+
+    fn line(&self, document_row: usize) -> Option<&str> {
+        self.lines
+            .get(self.local_row_index(document_row)?)
+            .map(String::as_str)
+    }
+
+    fn line_number(&self, document_row: usize) -> Option<u32> {
+        self.line_numbers
+            .get(self.local_row_index(document_row)?)
+            .copied()
+            .flatten()
+    }
 }
 
 /// A stateless editor widget.
@@ -102,8 +129,23 @@ impl<'a> EditorWidget<'a> {
     }
 
     /// Width available for document text after reserving the line-number gutter.
+    #[cfg(test)]
     pub fn text_width(&self, area: Rect) -> u16 {
         area.width.saturating_sub(self.gutter_width(area))
+    }
+
+    /// Width available for document text for a known largest line number.
+    ///
+    /// This permits callers to calculate the viewport width before capturing
+    /// the visible rows. A value of zero disables the gutter.
+    pub fn text_width_for_widest_line_number(area: Rect, widest_line_number: u32) -> u16 {
+        let digits = if widest_line_number == 0 {
+            0
+        } else {
+            widest_line_number.to_string().len()
+        };
+        area.width
+            .saturating_sub(Self::gutter_width_for_digits(area, digits))
     }
 
     /// Maps a terminal body cell to a UTF-8 byte position in a captured display line.
@@ -127,7 +169,7 @@ impl<'a> EditorWidget<'a> {
 
         let screen_row = usize::from(position.y - area.y);
         let row = self.snapshot.viewport.top_row.checked_add(screen_row)?;
-        let line = self.snapshot.lines.get(row)?;
+        let line = self.snapshot.line(row)?;
         let screen_column = usize::from(position.x - text_area.x);
         let target_column = self
             .snapshot
@@ -183,8 +225,7 @@ impl<'a> EditorWidget<'a> {
             .map_or(0, |number| number.to_string().len())
     }
 
-    fn desired_gutter_width(&self) -> u16 {
-        let digits = self.line_number_digits();
+    fn desired_gutter_width_for_digits(digits: usize) -> u16 {
         if digits == 0 {
             0
         } else {
@@ -192,10 +233,14 @@ impl<'a> EditorWidget<'a> {
         }
     }
 
-    fn gutter_width(&self, area: Rect) -> u16 {
-        let desired = self.desired_gutter_width();
+    fn gutter_width_for_digits(area: Rect, digits: usize) -> u16 {
+        let desired = Self::desired_gutter_width_for_digits(digits);
         // Keep at least one cell for editable text on very narrow terminals.
         if desired < area.width { desired } else { 0 }
+    }
+
+    fn gutter_width(&self, area: Rect) -> u16 {
+        Self::gutter_width_for_digits(area, self.line_number_digits())
     }
 
     fn text_area(&self, area: Rect) -> Rect {
@@ -231,7 +276,7 @@ impl<'a> EditorWidget<'a> {
         }
 
         let cursor = self.snapshot.cursor?;
-        self.snapshot.lines.get(cursor.row)?;
+        self.snapshot.line(cursor.row)?;
 
         let row = cursor.row.checked_sub(self.snapshot.viewport.top_row)?;
         let column = cursor
@@ -251,10 +296,8 @@ impl<'a> EditorWidget<'a> {
         let cursor = self.snapshot.cursor.map(|cursor| {
             let line = self
                 .snapshot
-                .line_numbers
-                .get(cursor.row)
-                .copied()
-                .flatten()
+                .cursor_line_number
+                .or_else(|| self.snapshot.line_number(cursor.row))
                 .map(|line| line.to_string())
                 .unwrap_or_else(|| cursor.row.saturating_add(1).to_string());
             format!("Ln {line}, Col {}", cursor.column.saturating_add(1))
@@ -303,12 +346,15 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
     for y in body_area.y..body_area.bottom() {
         let screen_row = usize::from(y.saturating_sub(area.y));
         let document_row = snapshot.viewport.top_row.saturating_add(screen_row);
-        let Some(line) = snapshot.lines.get(document_row) else {
+        let Some(local_row) = snapshot.local_row_index(document_row) else {
+            continue;
+        };
+        let Some(line) = snapshot.lines.get(local_row) else {
             continue;
         };
 
         if gutter_width > 0
-            && let Some(number) = snapshot.line_numbers.get(document_row).copied().flatten()
+            && let Some(number) = snapshot.line_numbers.get(local_row).copied().flatten()
         {
             render_line(
                 &format!("{number:>line_number_digits$} "),
@@ -327,7 +373,7 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
             snapshot.text_style,
             snapshot
                 .line_styles
-                .get(document_row)
+                .get(local_row)
                 .map(Vec::as_slice)
                 .unwrap_or_default(),
             y,
@@ -565,10 +611,13 @@ mod tests {
     #[test]
     fn renders_scrolled_body_and_status() {
         let snapshot = RenderSnapshot {
+            first_row: 0,
+            total_rows: 3,
             lines: vec!["zero".into(), "one".into(), "two".into()],
             line_numbers: Vec::new(),
             widest_line_number: 0,
             cursor: Some(Cursor { row: 2, column: 1 }),
+            cursor_line_number: None,
             selections: Vec::new(),
             text_style: Style::default(),
             gutter_style: Style::default(),
@@ -968,10 +1017,13 @@ mod tests {
     #[test]
     fn maps_only_visible_cursor_positions() {
         let mut snapshot = RenderSnapshot {
+            first_row: 0,
+            total_rows: 5,
             lines: vec![String::new(); 5],
             line_numbers: Vec::new(),
             widest_line_number: 0,
             cursor: Some(Cursor { row: 3, column: 7 }),
+            cursor_line_number: None,
             selections: Vec::new(),
             text_style: Style::default(),
             gutter_style: Style::default(),
@@ -1149,6 +1201,107 @@ mod tests {
                 .expect("unselected cell")
                 .modifier
                 .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn renders_a_local_row_slice_at_global_document_positions() {
+        let snapshot = RenderSnapshot {
+            first_row: 40,
+            total_rows: 100,
+            lines: vec!["forty".into(), "forty-one".into()],
+            line_numbers: vec![Some(41), Some(42)],
+            widest_line_number: 100,
+            cursor: Some(Cursor { row: 41, column: 1 }),
+            cursor_line_number: Some(42),
+            selections: vec![SelectionRange {
+                start: Cursor { row: 40, column: 1 },
+                end: Cursor { row: 41, column: 2 },
+            }],
+            text_style: Style::new().fg(Color::White).bg(Color::Black),
+            gutter_style: Style::new().fg(Color::Yellow).bg(Color::Black),
+            line_styles: vec![Vec::new(), Vec::new()],
+            background_ranges: vec![BackgroundRange {
+                range: SelectionRange {
+                    start: Cursor { row: 41, column: 0 },
+                    end: Cursor { row: 41, column: 1 },
+                },
+                style: Style::new().bg(Color::Blue),
+            }],
+            viewport: Viewport {
+                top_row: 40,
+                left_column: 0,
+            },
+            status: "NORMAL".into(),
+            status_cursor_column: None,
+        };
+        let area = Rect::new(0, 0, 24, 3);
+        let mut buf = Buffer::empty(area);
+        let widget = EditorWidget::new(&snapshot);
+
+        assert_eq!(widget.cursor_position(area), Some(Position::new(5, 1)));
+        widget.render(area, &mut buf);
+
+        assert!(row(&buf, 0).starts_with(" 41 forty"));
+        assert!(row(&buf, 1).starts_with(" 42 forty-one"));
+        assert!(row(&buf, 2).starts_with("NORMAL  Ln 42, Col 2"));
+        assert!(
+            buf.cell((5, 0))
+                .expect("selected first visible row")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(
+            buf.cell((4, 1)).expect("visible background range").bg,
+            Color::Blue
+        );
+    }
+
+    #[test]
+    fn reports_the_global_cursor_line_while_cursor_is_offscreen() {
+        let snapshot = RenderSnapshot {
+            first_row: 50,
+            total_rows: 100,
+            lines: vec!["fifty".into(), "fifty-one".into()],
+            cursor: Some(Cursor { row: 7, column: 2 }),
+            cursor_line_number: Some(8),
+            viewport: Viewport {
+                top_row: 50,
+                left_column: 0,
+            },
+            status: "NORMAL".into(),
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 24, 3);
+
+        assert_eq!(EditorWidget::new(&snapshot).cursor_position(area), None);
+        assert_eq!(
+            EditorWidget::new(&snapshot).status_text(),
+            "NORMAL  Ln 8, Col 3"
+        );
+    }
+
+    #[test]
+    fn hit_testing_maps_local_rows_back_to_global_display_rows() {
+        let snapshot = RenderSnapshot {
+            first_row: 20,
+            total_rows: 100,
+            lines: vec!["aa".into(), "a界".into()],
+            viewport: Viewport {
+                top_row: 20,
+                left_column: 0,
+            },
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(10, 5, 8, 3);
+        let widget = EditorWidget::new(&snapshot);
+
+        assert_eq!(
+            widget.text_position_at(area, Position::new(12, 6)),
+            Some(TextPosition {
+                row: 21,
+                byte_column: 4,
+            })
         );
     }
 }

@@ -17,7 +17,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use editor::{
-    Anchor, Bias, Editor, EditorStyle, MultiBufferOffset, SelectionEffects,
+    Anchor, Bias, Editor, EditorStyle, SelectionEffects,
     actions::{Cut, Undo},
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
     scroll::Autoscroll,
@@ -46,7 +46,7 @@ use render::{
     Viewport,
 };
 use tabs::{Direction as TabDirection, TabLabel};
-use terminal::{InputReader, ScrollDirection, TerminalEvent, TerminalSession, ZecTerminal};
+use terminal::{InputReader, ScrollDirection, TerminalEvent, TerminalSession};
 use theme::ActiveTheme as _;
 use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
@@ -332,7 +332,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
     let terminal_session = TerminalSession::enter()?;
     let mut terminal = terminal_session.terminal()?;
 
-    let (event_sender, event_receiver) = async_channel::unbounded();
+    // One pending event is enough: every event is followed by a fresh snapshot,
+    // and redundant redraw notifications can be dropped safely. Input applies
+    // backpressure to the reader thread instead of growing memory without bound.
+    let (event_sender, event_receiver) = async_channel::bounded(1);
     let redraw_sender = event_sender.clone();
     let input_reader = InputReader::spawn(event_sender);
     let (error_sender, error_receiver) = mpsc::sync_channel(1);
@@ -403,46 +406,58 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                 let input_window: AnyWindowHandle = editor_window.into();
                 let status_label = tab_status(&tabs, active_index, cx);
                 let viewport = tabs[active_index].viewport;
-                let mut snapshot = match editor_window.update(cx, |editor, _window, cx| {
-                    capture_editor(
-                        editor,
-                        cx,
-                        viewport,
-                        &status_label,
-                        message.as_deref(),
-                        active_search.as_ref(),
-                        save_as_prompt.as_ref(),
-                        open_prompt.as_ref(),
-                        go_to_line_prompt.as_ref(),
-                    )
-                }) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        failure = Some(format!("failed to read editor state: {error}"));
-                        break;
-                    }
-                };
+                let manual_vertical_scroll = tabs[active_index].manual_vertical_scroll;
+                let last_cursor = tabs[active_index].last_cursor;
+                let mut captured = None;
+                let mut frame_area = Rect::default();
+                let draw_result = terminal
+                    .try_draw(|frame| -> io::Result<()> {
+                        frame_area = frame.area();
+                        let frame_capture = editor_window
+                            .update(cx, |editor, _window, cx| {
+                                capture_editor(
+                                    editor,
+                                    cx,
+                                    viewport,
+                                    manual_vertical_scroll,
+                                    last_cursor,
+                                    frame_area,
+                                    &status_label,
+                                    message.as_deref(),
+                                    active_search.as_ref(),
+                                    save_as_prompt.as_ref(),
+                                    open_prompt.as_ref(),
+                                    go_to_line_prompt.as_ref(),
+                                )
+                            })
+                            .map_err(|error| {
+                                io::Error::other(format!(
+                                    "failed to read editor state: {error}"
+                                ))
+                            })?;
 
-                let follow_vertical_cursor = {
-                    let tab = &mut tabs[active_index];
-                    update_vertical_follow(
-                        &mut tab.manual_vertical_scroll,
-                        &mut tab.last_cursor,
-                        snapshot.cursor,
-                    )
+                        let widget = EditorWidget::new(&frame_capture.snapshot);
+                        let cursor_position = widget.cursor_position(frame_area);
+                        frame.render_widget(widget, frame_area);
+                        if let Some(cursor_position) = cursor_position {
+                            frame.set_cursor_position(cursor_position);
+                        }
+                        captured = Some(frame_capture);
+                        Ok(())
+                    })
+                    .map(|_| ());
+                if let Err(error) = draw_result {
+                    failure = Some(format!("failed to draw terminal: {error}"));
+                    break;
+                }
+                let Some(captured) = captured else {
+                    failure = Some("terminal draw completed without an editor snapshot".to_owned());
+                    break;
                 };
-                let frame_area = match draw(
-                    &mut terminal,
-                    &mut snapshot,
-                    &mut tabs[active_index].viewport,
-                    follow_vertical_cursor,
-                ) {
-                    Ok(frame_area) => frame_area,
-                    Err(error) => {
-                        failure = Some(format!("failed to draw terminal: {error}"));
-                        break;
-                    }
-                };
+                tabs[active_index].viewport = captured.snapshot.viewport;
+                tabs[active_index].manual_vertical_scroll = captured.manual_vertical_scroll;
+                tabs[active_index].last_cursor = captured.last_cursor;
+                let snapshot = captured.snapshot;
                 let body_height = usize::from(frame_area.height.saturating_sub(1));
 
                 let event = match event_receiver.recv().await {
@@ -580,7 +595,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             let tab = &mut tabs[active_index];
                             if scroll_viewport(
                                 &mut tab.viewport,
-                                snapshot.lines.len(),
+                                snapshot.total_rows,
                                 body_height,
                                 direction,
                                 body_height.saturating_sub(1).max(1),
@@ -1316,7 +1331,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             let tab = &mut tabs[active_index];
                             if scroll_viewport(
                                 &mut tab.viewport,
-                                snapshot.lines.len(),
+                                snapshot.total_rows,
                                 body_height,
                                 direction,
                                 3,
@@ -1488,6 +1503,12 @@ struct DocumentTab {
     document: OpenDocument,
     editor_window: WindowHandle<Editor>,
     viewport: Viewport,
+    manual_vertical_scroll: bool,
+    last_cursor: Option<Cursor>,
+}
+
+struct CapturedEditorFrame {
+    snapshot: RenderSnapshot,
     manual_vertical_scroll: bool,
     last_cursor: Option<Cursor>,
 }
@@ -2099,42 +2120,98 @@ fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> Strin
 fn capture_editor(
     editor: &mut Editor,
     cx: &mut gpui::Context<Editor>,
-    viewport: Viewport,
+    mut viewport: Viewport,
+    mut manual_vertical_scroll: bool,
+    mut last_cursor: Option<Cursor>,
+    area: Rect,
     status_label: &str,
     message: Option<&str>,
     search: Option<&ActiveSearch>,
     save_as: Option<&SaveAsPrompt>,
     open: Option<&OpenPrompt>,
     go_to_line: Option<&GoToLinePrompt>,
-) -> RenderSnapshot {
+) -> CapturedEditorFrame {
     let editor_style = editor.style(cx).clone();
     let display = editor.display_snapshot(cx);
-    let lines = (0..=display.max_point().row().0)
+    let total_rows = display.max_point().row().0 as usize + 1;
+    let widest_line_number = display.widest_line_number();
+    let cursor_point = editor.selections.newest_display(&display).head();
+    let cursor = display_cursor_at(&display, cursor_point);
+    let follow_vertical_cursor =
+        update_vertical_follow(&mut manual_vertical_scroll, &mut last_cursor, Some(cursor));
+    let body_height = usize::from(area.height.saturating_sub(1));
+    let text_width = EditorWidget::text_width_for_widest_line_number(area, widest_line_number);
+    keep_cursor_visible(
+        &mut viewport,
+        Some(cursor),
+        text_width,
+        area.height,
+        follow_vertical_cursor,
+    );
+    viewport.top_row = viewport
+        .top_row
+        .min(max_viewport_top(total_rows, body_height));
+
+    let first_row = viewport.top_row;
+    let end_row = first_row.saturating_add(body_height).min(total_rows);
+    let first_display_row = DisplayRow(u32::try_from(first_row).unwrap_or(u32::MAX));
+    let end_display_row = DisplayRow(u32::try_from(end_row).unwrap_or(u32::MAX));
+    let lines = (first_display_row.0..end_display_row.0)
         .map(|row| display.line(DisplayRow(row)))
         .collect::<Vec<_>>();
     let line_numbers = display
-        .row_infos(DisplayRow(0))
+        .row_infos(first_display_row)
         .take(lines.len())
         .map(|row| row.buffer_row.map(|row| row.saturating_add(1)))
         .collect();
-    let widest_line_number = display.widest_line_number();
-    let cursor = display_cursor(&lines, editor.selections.newest_display(&display).head());
+    let cursor_line_number = display
+        .row_infos(cursor_point.row())
+        .next()
+        .and_then(|row| row.buffer_row.or(row.wrapped_buffer_row))
+        .map(|row| row.saturating_add(1));
+    let visible_start = DisplayPoint::new(first_display_row, 0);
+    let visible_end = (end_row < total_rows).then_some(DisplayPoint::new(end_display_row, 0));
     let selections = editor
         .selections
         .all_adjusted_display(&display)
         .into_iter()
-        .filter(|selection| !selection.is_empty())
+        .filter(|selection| {
+            !selection.is_empty()
+                && selection.end > visible_start
+                && visible_end.is_none_or(|end| selection.start < end)
+        })
         .map(|selection| SelectionRange {
-            start: display_cursor(&lines, selection.start),
-            end: display_cursor(&lines, selection.end),
+            start: display_cursor_in_rows(&lines, first_row, selection.start),
+            end: display_cursor_in_rows(&lines, first_row, selection.end),
         })
         .collect();
-    let line_styles = terminal_line_styles(&display, &editor_style, lines.len());
-    let buffer = display.buffer_snapshot();
-    let whole_buffer =
-        buffer.anchor_before(MultiBufferOffset(0))..buffer.anchor_after(buffer.len());
-    let mut background_highlights =
-        editor.background_highlights_in_range(whole_buffer, &display, cx.theme());
+    let line_styles = terminal_line_styles(
+        &display,
+        &editor_style,
+        first_display_row,
+        end_display_row,
+        lines.len(),
+    );
+    let mut background_highlights = if first_row < end_row {
+        let buffer = display.buffer_snapshot();
+        let start_anchor = if first_row == 0 {
+            Anchor::Min
+        } else {
+            buffer.anchor_before(visible_start.to_offset(&display, Bias::Left))
+        };
+        let end_anchor = if end_row >= total_rows {
+            Anchor::Max
+        } else {
+            buffer.anchor_before(
+                visible_end
+                    .expect("a non-final visible range has an end point")
+                    .to_offset(&display, Bias::Right),
+            )
+        };
+        editor.background_highlights_in_range(start_anchor..end_anchor, &display, cx.theme())
+    } else {
+        Vec::new()
+    };
     background_highlights.sort_by(|left, right| {
         left.0
             .start
@@ -2146,8 +2223,8 @@ fn capture_editor(
         .into_iter()
         .map(|(range, color)| BackgroundRange {
             range: SelectionRange {
-                start: display_cursor(&lines, range.start),
-                end: display_cursor(&lines, range.end),
+                start: display_cursor_in_rows(&lines, first_row, range.start),
+                end: display_cursor_in_rows(&lines, first_row, range.end),
             },
             style: TerminalStyle::new().bg(terminal_color(editor_style.background.blend(color))),
         })
@@ -2183,34 +2260,45 @@ fn capture_editor(
         (status, None)
     };
 
-    RenderSnapshot {
-        lines,
-        line_numbers,
-        widest_line_number,
-        cursor: Some(cursor),
-        selections,
-        text_style,
-        gutter_style,
-        line_styles,
-        background_ranges,
-        viewport,
-        status,
-        status_cursor_column,
+    CapturedEditorFrame {
+        snapshot: RenderSnapshot {
+            first_row,
+            total_rows,
+            lines,
+            line_numbers,
+            widest_line_number,
+            cursor: Some(cursor),
+            cursor_line_number,
+            selections,
+            text_style,
+            gutter_style,
+            line_styles,
+            background_ranges,
+            viewport,
+            status,
+            status_cursor_column,
+        },
+        manual_vertical_scroll,
+        last_cursor,
     }
 }
 
 fn terminal_line_styles(
     display: &DisplaySnapshot,
     editor_style: &EditorStyle,
+    start_row: DisplayRow,
+    end_row: DisplayRow,
     line_count: usize,
 ) -> Vec<Vec<StyleSpan>> {
     let mut lines = vec![Vec::new(); line_count];
+    if line_count == 0 {
+        return lines;
+    }
     let mut row = 0usize;
     let mut column = 0usize;
-    let end_row = display.max_point().row().0.saturating_add(1);
 
     for chunk in display.highlighted_chunks(
-        DisplayRow(0)..DisplayRow(end_row),
+        start_row..end_row,
         LanguageAwareStyling {
             tree_sitter: true,
             diagnostics: false,
@@ -2286,10 +2374,18 @@ fn terminal_color(color: gpui::Hsla) -> TerminalColor {
     )
 }
 
-fn display_cursor(lines: &[String], point: DisplayPoint) -> Cursor {
+fn display_cursor_at(display: &DisplaySnapshot, point: DisplayPoint) -> Cursor {
     let row = point.row().0 as usize;
-    let column = lines
-        .get(row)
+    let line = display.line(point.row());
+    let column = terminal_column(&line, point.column() as usize);
+    Cursor { row, column }
+}
+
+fn display_cursor_in_rows(lines: &[String], first_row: usize, point: DisplayPoint) -> Cursor {
+    let row = point.row().0 as usize;
+    let column = row
+        .checked_sub(first_row)
+        .and_then(|row| lines.get(row))
         .map(|line| terminal_column(line, point.column() as usize))
         .unwrap_or_default();
     Cursor { row, column }
@@ -2301,40 +2397,6 @@ fn terminal_column(line: &str, byte_column: usize) -> usize {
         byte_column -= 1;
     }
     line[..byte_column].width()
-}
-
-fn draw(
-    terminal: &mut ZecTerminal,
-    snapshot: &mut RenderSnapshot,
-    viewport: &mut Viewport,
-    follow_vertical_cursor: bool,
-) -> io::Result<Rect> {
-    let mut frame_area = Rect::default();
-    terminal.draw(|frame| {
-        let area = frame.area();
-        frame_area = area;
-        let body_height = usize::from(area.height.saturating_sub(1));
-        let text_width = EditorWidget::new(snapshot).text_width(area);
-        keep_cursor_visible(
-            viewport,
-            snapshot.cursor,
-            text_width,
-            area.height,
-            follow_vertical_cursor,
-        );
-        viewport.top_row = viewport
-            .top_row
-            .min(max_viewport_top(snapshot.lines.len(), body_height));
-        snapshot.viewport = *viewport;
-
-        let widget = EditorWidget::new(snapshot);
-        let cursor_position = widget.cursor_position(area);
-        frame.render_widget(widget, area);
-        if let Some(cursor_position) = cursor_position {
-            frame.set_cursor_position(cursor_position);
-        }
-    })?;
-    Ok(frame_area)
 }
 
 fn max_viewport_top(line_count: usize, body_height: usize) -> usize {
@@ -2430,6 +2492,7 @@ fn run_smoke() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor::MultiBufferOffset;
 
     struct TemporaryTestFile {
         path: PathBuf,
@@ -2523,6 +2586,101 @@ mod tests {
                 .ends_with("~/notes.txt")
         );
         assert!(resolve_path("").is_err());
+    }
+
+    #[test]
+    fn captures_only_the_terminal_viewport_from_a_hundred_thousand_lines() {
+        use std::fmt::Write as _;
+
+        const DOCUMENT_ROWS: usize = 100_000;
+        const BODY_ROWS: usize = 23;
+
+        let mut text = String::with_capacity(DOCUMENT_ROWS * 12);
+        for row in 0..DOCUMENT_ROWS {
+            writeln!(&mut text, "row-{row:06}").expect("write large buffer fixture");
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let buffer = cx.new(|cx| Buffer::local(text, cx));
+            let window = open_editor(buffer, cx).expect("open large editor");
+
+            cx.spawn(async move |cx| {
+                let result = window.update(cx, |editor, _window, cx| {
+                    let area = Rect::new(0, 0, 80, 24);
+                    let top = capture_editor(
+                        editor,
+                        cx,
+                        Viewport::default(),
+                        false,
+                        None,
+                        area,
+                        "large",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                    let middle = capture_editor(
+                        editor,
+                        cx,
+                        Viewport {
+                            top_row: 50_000,
+                            left_column: 0,
+                        },
+                        true,
+                        top.last_cursor,
+                        area,
+                        "large",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                    let end = capture_editor(
+                        editor,
+                        cx,
+                        Viewport {
+                            top_row: usize::MAX,
+                            left_column: 0,
+                        },
+                        true,
+                        middle.last_cursor,
+                        area,
+                        "large",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                    (top.snapshot, middle.snapshot, end.snapshot)
+                });
+                sender.send(result).expect("send large capture result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (top, middle, end) = receiver
+            .recv()
+            .expect("receive large capture result")
+            .expect("capture large editor");
+        for snapshot in [&top, &middle, &end] {
+            assert_eq!(snapshot.total_rows, DOCUMENT_ROWS + 1);
+            assert_eq!(snapshot.lines.len(), BODY_ROWS);
+            assert_eq!(snapshot.line_numbers.len(), BODY_ROWS);
+            assert_eq!(snapshot.line_styles.len(), BODY_ROWS);
+        }
+        assert_eq!(top.first_row, 0);
+        assert_eq!(top.lines.first().map(String::as_str), Some("row-000000"));
+        assert_eq!(middle.first_row, 50_000);
+        assert_eq!(middle.lines.first().map(String::as_str), Some("row-050000"));
+        assert_eq!(end.first_row, DOCUMENT_ROWS + 1 - BODY_ROWS);
+        assert_eq!(end.lines.last().map(String::as_str), Some(""));
     }
 
     #[test]

@@ -61,6 +61,27 @@ Ratatui は cell buffer、style、レイアウト、前後 frame の差分描画
 採用する。入力 loop は所有しないので、Crossterm で読んだイベントを zec が Zed の
 入力へ変換する。
 
+## Frame capture and redraw
+
+通常のrepaintで文書全体をterminal snapshotへ複製しない。Ratatuiの`try_draw` callbackで
+そのframeのareaを取得し、cursor followとdocument末尾へのclipを済ませてから、確定した
+`[top_row, top_row + body_height)`だけを同じcallback内でZedの`DisplaySnapshot`から読む。
+これによりresizeとcaptureの間でviewportがずれず、最初のframeが空になるraceも避ける。
+
+`RenderSnapshot`のtext、line number、syntax styleは`first_row`から始まるrow-local vectorで、
+`total_rows`、cursor、selection、background rangeはglobal display rowを使う。rendererとmouse
+hit testだけがglobal rowをlocal indexへ変換する。全体の行数と最大行番号はZedのsummary API、
+可視syntaxは`highlighted_chunks`のrow range、検索等の背景は可視範囲のAnchorを
+`background_highlights_in_range`へ渡して取得する。terminal側でfoldやwrapを再計算しない。
+
+terminal event channelはcapacity 1にする。重複したRedrawはdropしても次frameが最新snapshotを
+読むため安全であり、key/paste/mouseはreader threadでbackpressureして順序を保つ。
+
+100,000行の構造testでは80x24の先頭・中央・末尾で保持行数が23に固定される。これは行数に対する
+repaintの上限であり、全文検索そのものを定数時間にする主張ではない。またZedの公開text APIは
+display row単位なので、数MBの単一行ではその行全体のmaterializeとterminal cell変換が残る。
+必要になった時点で独自text modelを作らず、Zed側のvisible-column iterator/hookを検討する。
+
 ## File I/O
 
 `zec FILE...` はCLI入力を絶対パス化し、Zedの `RealFs -> WorktreeStore -> BufferStore` で
@@ -199,7 +220,7 @@ hidden GPUI windowのpage sizeはterminal本文の高さと一致しないため
 modifierなしの左button Downだけをcaret移動として扱う。Ratatuiで描画したのと同じ
 grapheme/cell幅、ガター、viewportを使ってscreen cellをdisplay行のUTF-8 byte位置へ
 逆変換する。wide graphemeはcellの中心に最も近い境界へ寄せ、viewport境界で
-切れて描画されないgraphemeの空c白cellはclick不可とする。
+切れて描画されないgraphemeの空白cellはclick不可とする。
 
 逆変換の結果はclick処理時点の最新`DisplaySnapshot`でclipし、
 `display_point_to_anchor -> Editor::change_selections`へ渡す。zecはcaretやselection状態を所有せず、
