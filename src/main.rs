@@ -329,15 +329,14 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
         );
     }
 
-    let terminal_session = TerminalSession::enter()?;
-    let mut terminal = terminal_session.terminal()?;
-
     // One pending event is enough: every event is followed by a fresh snapshot,
     // and redundant redraw notifications can be dropped safely. Input applies
     // backpressure to the reader thread instead of growing memory without bound.
     let (event_sender, event_receiver) = async_channel::bounded(1);
     let redraw_sender = event_sender.clone();
-    let input_reader = InputReader::spawn(event_sender);
+    let mut input_reader = InputReader::spawn(event_sender)?;
+    let terminal_session = TerminalSession::enter()?;
+    let mut terminal = terminal_session.terminal()?;
     let (error_sender, error_receiver) = mpsc::sync_channel(1);
 
     gpui_platform::headless().run(move |cx| {
@@ -368,8 +367,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                 if !opened_buffer_ids.insert(document.buffer.entity_id()) {
                     continue;
                 }
-                if document.path.is_none() {
-                    document.label = untitled_label(next_untitled_id);
+                if document.untitled_label.is_some() {
+                    document.untitled_label = Some(untitled_label(next_untitled_id));
                     next_untitled_id = next_untitled_id.saturating_add(1);
                 }
                 let tab = match create_document_tab(
@@ -494,33 +493,30 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
 
                 match event {
                     TerminalEvent::Key(event) if input::is_quit(&event) => {
-                        let dirty_count = tabs
+                        let guarded_count = tabs
                             .iter()
                             .filter(|tab| {
-                                tab.document
-                                    .buffer
-                                    .read_with(cx, |buffer, _| buffer.is_dirty())
+                                document_state(&tab.document, cx).needs_discard_confirmation()
                             })
                             .count();
-                        if dirty_count == 0 || quit_armed {
+                        if guarded_count == 0 || quit_armed {
                             break;
                         }
 
                         quit_armed = true;
                         message = Some(format!(
-                            "{dirty_count} unsaved tab(s); press Ctrl-Q again to discard"
+                            "{guarded_count} unsaved or deleted tab(s); press Ctrl-Q again to discard"
                         ));
                     }
                     TerminalEvent::Key(event) if input::is_close_tab(&event) => {
                         quit_armed = false;
-                        let dirty = tabs[active_index]
-                            .document
-                            .buffer
-                            .read_with(cx, |buffer, _| buffer.is_dirty());
-                        if dirty && !close_armed {
+                        let needs_confirmation =
+                            document_state(&tabs[active_index].document, cx)
+                                .needs_discard_confirmation();
+                        if needs_confirmation && !close_armed {
                             close_armed = true;
                             message = Some(
-                                "unsaved changes; press Ctrl-W again to discard this tab"
+                                "unsaved changes or deleted file; press Ctrl-W again to discard this tab"
                                     .to_owned(),
                             );
                             continue;
@@ -611,17 +607,14 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
                         {
-                            if tabs[active_index].document.path.is_none() {
+                            let state = document_state(&tabs[active_index].document, cx);
+                            if !state.has_file() {
                                 reload_armed = false;
                                 message = Some("reload failed: buffer has no file path".to_owned());
                                 continue;
                             }
 
-                            let dirty = tabs[active_index]
-                                .document
-                                .buffer
-                                .read_with(cx, |buffer, _| buffer.is_dirty());
-                            if dirty && !reload_armed {
+                            if state.dirty && !reload_armed {
                                 reload_armed = true;
                                 message = Some(
                                     "unsaved changes; press Ctrl-R again to reload from disk"
@@ -669,17 +662,17 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
                         {
-                            if tabs[active_index].document.path.is_some() {
-                                let conflict = tabs[active_index]
-                                    .document
-                                    .buffer
-                                    .read_with(cx, |buffer, _| buffer.has_conflict());
-                                if conflict && !save_conflict_armed {
+                            let state = document_state(&tabs[active_index].document, cx);
+                            if state.has_file() {
+                                if state.has_external_change() && !save_conflict_armed {
                                     save_conflict_armed = true;
-                                    message = Some(
+                                    message = Some(if state.deleted {
+                                        "deleted on disk; press Ctrl-S again to recreate, or Ctrl-R to reload"
+                                            .to_owned()
+                                    } else {
                                         "changed on disk; press Ctrl-S again to overwrite, or Ctrl-R to reload"
-                                            .to_owned(),
-                                    );
+                                            .to_owned()
+                                    });
                                     continue;
                                 }
                                 save_conflict_armed = false;
@@ -808,7 +801,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 continue;
                             }
                         };
-                        document.label = untitled_label(next_untitled_id);
+                        document.untitled_label = Some(untitled_label(next_untitled_id));
                         match create_document_tab(
                             document,
                             services.buffer_store.clone(),
@@ -945,9 +938,6 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                         );
                                     }
                                     Ok(SaveAsOutcome::Saved(path)) => {
-                                        tabs[active_index].document.path = Some(path.clone());
-                                        tabs[active_index].document.label =
-                                            path.display().to_string();
                                         save_as_prompt = None;
                                         message = Some("saved".to_owned());
                                         if let Err(error) = assign_file_language(
@@ -1386,20 +1376,11 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         close_armed = false;
                         reload_armed = false;
                         save_conflict_armed = false;
-                        let label = tabs[reloaded_index]
-                            .document
-                            .path
-                            .as_deref()
-                            .and_then(Path::file_name)
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| tabs[reloaded_index].document.label.clone());
-                        let conflict = tabs[reloaded_index]
-                            .document
-                            .buffer
-                            .read_with(cx, |buffer, _| buffer.has_conflict());
+                        let label = document_label(&tabs[reloaded_index].document, true, cx);
+                        let state = document_state(&tabs[reloaded_index].document, cx);
 
                         match result {
-                            Ok(()) if conflict => {
+                            Ok(()) if state.has_external_change() => {
                                 message = Some(format!(
                                     "{label} changed on disk; local edits were kept"
                                 ));
@@ -1423,6 +1404,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         }
                     }
                     TerminalEvent::Resize | TerminalEvent::Redraw => {}
+                    TerminalEvent::Signal(signal) => {
+                        failure = Some(format!("terminated by signal {signal}"));
+                        break;
+                    }
                     TerminalEvent::Error(error) => {
                         failure = Some(format!("failed to read terminal input: {error}"));
                         break;
@@ -1438,9 +1423,11 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
         .detach();
     });
 
-    input_reader.stop();
+    input_reader.stop_and_join();
+    terminal_session
+        .restore()
+        .context("failed to restore terminal")?;
     drop(input_reader);
-    drop(terminal_session);
 
     if let Ok(error) = error_receiver.try_recv() {
         return Err(io::Error::other(error).into());
@@ -1495,8 +1482,29 @@ struct FileServices {
 
 struct OpenDocument {
     buffer: Entity<Buffer>,
+    untitled_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DocumentState {
     path: Option<PathBuf>,
-    label: String,
+    dirty: bool,
+    conflict: bool,
+    deleted: bool,
+}
+
+impl DocumentState {
+    fn has_file(&self) -> bool {
+        self.path.is_some()
+    }
+
+    fn needs_discard_confirmation(&self) -> bool {
+        self.dirty || self.deleted
+    }
+
+    fn has_external_change(&self) -> bool {
+        self.conflict || self.deleted
+    }
 }
 
 struct DocumentTab {
@@ -1541,31 +1549,15 @@ fn open_document(
             .set_language_registry(services.language_registry.clone());
         return Task::ready(Ok(OpenDocument {
             buffer,
-            path: None,
-            label: "[No Name]".to_owned(),
+            untitled_label: Some("[No Name]".to_owned()),
         }));
     };
 
-    let find_worktree = services.worktree_store.update(cx, |store, cx| {
-        store.find_or_create_worktree(&path, false, cx)
-    });
-
     cx.spawn(async move |cx| {
-        let (worktree, relative_path) = find_worktree
-            .await
-            .with_context(|| format!("could not create a worktree for {}", path.display()))?;
-        let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+        let project_path = project_path_for_file(&path, &services, cx).await?;
         let buffer = services
             .buffer_store
-            .update(cx, |store, cx| {
-                store.open_buffer(
-                    ProjectPath {
-                        worktree_id,
-                        path: relative_path,
-                    },
-                    cx,
-                )
-            })
+            .update(cx, |store, cx| store.open_buffer(project_path, cx))
             .await
             .with_context(|| format!("could not load {}", path.display()))?;
         assign_file_language(&path, &buffer, services.language_registry.clone(), cx)
@@ -1574,10 +1566,87 @@ fn open_document(
 
         Ok(OpenDocument {
             buffer,
-            path: Some(path.clone()),
-            label: path.display().to_string(),
+            untitled_label: None,
         })
     })
+}
+
+fn document_state(document: &OpenDocument, cx: &gpui::AsyncApp) -> DocumentState {
+    document.buffer.read_with(cx, |buffer, cx| {
+        let (path, deleted) = match buffer.file() {
+            Some(file) => {
+                let path = file
+                    .as_local()
+                    .map(|file| file.abs_path(cx))
+                    .unwrap_or_else(|| file.full_path(cx));
+                (Some(path), file.disk_state().is_deleted())
+            }
+            None => (None, false),
+        };
+        DocumentState {
+            path,
+            dirty: buffer.is_dirty(),
+            conflict: buffer.has_conflict(),
+            deleted,
+        }
+    })
+}
+
+fn document_label(document: &OpenDocument, abbreviated: bool, cx: &gpui::AsyncApp) -> String {
+    let state = document_state(document, cx);
+    if let Some(path) = state.path {
+        if abbreviated {
+            return path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+        }
+        return path.display().to_string();
+    }
+    document
+        .untitled_label
+        .clone()
+        .unwrap_or_else(|| "[No Name]".to_owned())
+}
+
+async fn project_path_for_file(
+    path: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<ProjectPath> {
+    // A single-file worktree cannot observe a rename to a sibling. Use the
+    // nearest existing directory, while never turning the filesystem root into
+    // a recursive worktree. This also covers nested Save As paths.
+    let mut candidate = path.parent();
+    let worktree_root = loop {
+        let Some(directory) = candidate.filter(|directory| directory.parent().is_some()) else {
+            break path.to_path_buf();
+        };
+        match services
+            .file_system
+            .metadata(directory)
+            .await
+            .with_context(|| format!("could not inspect {}", directory.display()))?
+        {
+            Some(metadata) if metadata.is_dir => break directory.to_path_buf(),
+            _ => candidate = directory.parent(),
+        }
+    };
+
+    services
+        .worktree_store
+        .update(cx, |store, cx| {
+            store.find_or_create_worktree(&worktree_root, false, cx)
+        })
+        .await
+        .with_context(|| format!("could not create a worktree for {}", path.display()))?;
+
+    services
+        .worktree_store
+        .read_with(cx, |store, cx| {
+            store.project_path_for_absolute_path(path, cx)
+        })
+        .with_context(|| format!("worktree does not contain {}", path.display()))
 }
 
 fn native_language_registry(cx: &mut App) -> Arc<LanguageRegistry> {
@@ -1660,7 +1729,9 @@ async fn save_document(
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
-    let path = document.path.as_ref().context("buffer has no file path")?;
+    let path = document_state(document, cx)
+        .path
+        .context("buffer has no file path")?;
     services
         .buffer_store
         .update(cx, |store, cx| {
@@ -1675,7 +1746,9 @@ async fn reload_document(
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
-    let path = document.path.as_ref().context("buffer has no file path")?;
+    let path = document_state(document, cx)
+        .path
+        .context("buffer has no file path")?;
     services
         .buffer_store
         .update(cx, |store, cx| {
@@ -1717,18 +1790,7 @@ async fn save_document_as(
         }
     }
 
-    let (worktree, relative_path) = services
-        .worktree_store
-        .update(cx, |store, cx| {
-            store.find_or_create_worktree(&path, false, cx)
-        })
-        .await
-        .with_context(|| format!("could not create a worktree for {}", path.display()))?;
-    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
-    let project_path = ProjectPath {
-        worktree_id,
-        path: relative_path,
-    };
+    let project_path = project_path_for_file(&path, services, cx).await?;
     let open_buffer = services
         .buffer_store
         .read_with(cx, |store, _| store.get_by_path(&project_path));
@@ -2093,24 +2155,12 @@ fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> Strin
     let labels = tabs
         .iter()
         .map(|tab| {
-            let name = if multiple {
-                tab.document
-                    .path
-                    .as_deref()
-                    .and_then(Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| tab.document.label.clone())
-            } else {
-                tab.document.label.clone()
-            };
-            let (dirty, conflict) = tab
-                .document
-                .buffer
-                .read_with(cx, |buffer, _| (buffer.is_dirty(), buffer.has_conflict()));
+            let name = document_label(&tab.document, multiple, cx);
+            let state = document_state(&tab.document, cx);
             TabLabel {
                 name,
-                dirty,
-                conflict,
+                dirty: state.dirty,
+                conflict: state.has_external_change(),
             }
         })
         .collect::<Vec<_>>();
@@ -2809,6 +2859,223 @@ mod tests {
         assert_eq!(text_after_undo, INITIAL);
         assert!(dirty_after_undo);
         assert!(!conflict_after_undo);
+    }
+    #[test]
+    fn file_identity_follows_external_rename_and_delete_requires_confirmation() {
+        use std::time::{Duration, Instant};
+
+        const CONTENTS: &str = "identity stays in Zed\n";
+
+        let file = TemporaryTestFile::new(CONTENTS);
+        let original_path = file.path.clone();
+        let renamed_path = file.directory.join("renamed.txt");
+        let expected_renamed_path = renamed_path.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let services = file_services(cx);
+            let document = open_document(Some(original_path.clone()), services.clone(), cx);
+
+            cx.spawn(async move |cx| {
+                let result: Result<_> = async {
+                    let document = document.await?;
+                    let (event_sender, _event_receiver) = async_channel::unbounded();
+                    let tab = create_document_tab(
+                        document,
+                        services.buffer_store.clone(),
+                        event_sender,
+                        cx,
+                    )?;
+
+                    std::fs::rename(&original_path, &renamed_path).with_context(|| {
+                        format!(
+                            "could not rename {} to {}",
+                            original_path.display(),
+                            renamed_path.display()
+                        )
+                    })?;
+
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let renamed_state = loop {
+                        let state = document_state(&tab.document, cx);
+                        if state.path.as_deref() == Some(renamed_path.as_path()) {
+                            break state;
+                        }
+                        anyhow::ensure!(
+                            Instant::now() < deadline,
+                            "rename was not reflected in Zed; last state was {state:?}"
+                        );
+                        cx.background_executor()
+                            .timer(Duration::from_millis(25))
+                            .await;
+                    };
+
+                    let reopened = cx
+                        .update(|cx| {
+                            open_document(Some(renamed_path.clone()), services.clone(), cx)
+                        })
+                        .await?;
+                    let reopened_same_buffer = reopened.buffer == tab.document.buffer;
+                    let text_after_rename = tab
+                        .editor_window
+                        .update(cx, |editor, _window, cx| editor.text(cx))?;
+
+                    tab.editor_window.update(cx, |editor, window, cx| {
+                        editor.insert("saved ", window, cx);
+                    })?;
+                    save_document(&tab.document, &services, cx).await?;
+                    let saved_contents =
+                        std::fs::read_to_string(&renamed_path).with_context(|| {
+                            format!("could not read saved file {}", renamed_path.display())
+                        })?;
+                    let original_path_recreated = original_path.exists();
+
+                    std::fs::remove_file(&renamed_path).with_context(|| {
+                        format!("could not externally delete {}", renamed_path.display())
+                    })?;
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let deleted_state = loop {
+                        let state = document_state(&tab.document, cx);
+                        if state.deleted {
+                            break state;
+                        }
+                        anyhow::ensure!(
+                            Instant::now() < deadline,
+                            "delete was not reflected in Zed; last state was {state:?}"
+                        );
+                        cx.background_executor()
+                            .timer(Duration::from_millis(25))
+                            .await;
+                    };
+                    let status = tab_status(std::slice::from_ref(&tab), 0, cx);
+
+                    Ok((
+                        renamed_state,
+                        reopened_same_buffer,
+                        text_after_rename,
+                        saved_contents,
+                        original_path_recreated,
+                        deleted_state,
+                        status,
+                    ))
+                }
+                .await;
+
+                sender.send(result).expect("send file identity result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (renamed, same_buffer, text, saved, old_path_exists, deleted, status) = receiver
+            .recv()
+            .expect("receive file identity result")
+            .expect("file identity scenario should succeed");
+        assert_eq!(
+            renamed.path.as_deref(),
+            Some(expected_renamed_path.as_path())
+        );
+        assert!(!renamed.dirty);
+        assert!(!renamed.deleted);
+        assert!(same_buffer);
+        assert_eq!(text, CONTENTS);
+        assert_eq!(
+            deleted.path.as_deref(),
+            Some(expected_renamed_path.as_path())
+        );
+        assert!(
+            !deleted.dirty,
+            "Zed intentionally keeps clean deleted buffers clean"
+        );
+        assert!(deleted.deleted);
+        assert!(deleted.needs_discard_confirmation());
+        assert_eq!(saved, "saved identity stays in Zed\n");
+        assert!(!old_path_exists);
+        assert!(status.contains("renamed.txt!"), "status was {status:?}");
+    }
+    #[test]
+    fn failed_zed_save_keeps_the_buffer_dirty_and_preserves_the_backup() {
+        const INITIAL: &str = "disk original\n";
+        const INSERTED: &str = "local ";
+
+        let file = TemporaryTestFile::new(INITIAL);
+        let path = file.path.clone();
+        let backup_path = file.directory.join("original.backup");
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let services = file_services(cx);
+            let document = open_document(Some(path.clone()), services.clone(), cx);
+
+            cx.spawn(async move |cx| {
+                let result: Result<_> = async {
+                    let document = document.await?;
+                    let window = cx.update(|cx| open_editor(document.buffer.clone(), cx))?;
+                    window.update(cx, |editor, window, cx| {
+                        editor.insert(INSERTED, window, cx);
+                    })?;
+
+                    std::fs::copy(&path, &backup_path).with_context(|| {
+                        format!(
+                            "could not back up {} to {}",
+                            path.display(),
+                            backup_path.display()
+                        )
+                    })?;
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("could not remove {}", path.display()))?;
+                    std::fs::create_dir(&path).with_context(|| {
+                        format!("could not replace {} with a directory", path.display())
+                    })?;
+
+                    let save_error = save_document(&document, &services, cx)
+                        .await
+                        .expect_err("saving over a directory must fail")
+                        .to_string();
+                    let text = window.update(cx, |editor, _window, cx| editor.text(cx))?;
+                    let state = document_state(&document, cx);
+                    let backup_contents =
+                        std::fs::read_to_string(&backup_path).with_context(|| {
+                            format!("could not read backup {}", backup_path.display())
+                        })?;
+
+                    std::fs::remove_dir(&path).with_context(|| {
+                        format!("could not remove directory {}", path.display())
+                    })?;
+                    std::fs::copy(&backup_path, &path).with_context(|| {
+                        format!(
+                            "could not restore {} from {}",
+                            path.display(),
+                            backup_path.display()
+                        )
+                    })?;
+                    std::fs::remove_file(&backup_path).with_context(|| {
+                        format!("could not remove backup {}", backup_path.display())
+                    })?;
+
+                    Ok((save_error, text, state, backup_contents))
+                }
+                .await;
+
+                sender.send(result).expect("send failed save result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (error, text, state, backup) = receiver
+            .recv()
+            .expect("receive failed save result")
+            .expect("failed save scenario should complete");
+        assert!(
+            error.contains("could not save"),
+            "unexpected save error: {error}"
+        );
+        assert_eq!(text, format!("{INSERTED}{INITIAL}"));
+        assert!(state.dirty);
+        assert_eq!(backup, INITIAL);
     }
 
     #[test]

@@ -19,7 +19,7 @@ mouseの高度なselection、検索optionなどの機能完備は卒業条件に
 
 ### G1. Zed is the sole editing authority
 
-Fail.
+Pass (2026-08-23).
 
 - text、cursor、selection、transaction、undo、dirty stateはZedの`Editor` / `Buffer`が所有する。
 - file open/save/save-as/reloadはZedの`RealFs -> WorktreeStore -> BufferStore`を通す。
@@ -27,10 +27,13 @@ Fail.
   変換だけを所有する。
 - この境界を越えてEditorの振る舞いを複製する機能は、Zed側の公開APIを作るまで入れない。
 
-本文や編集stateの境界は守れているが、`OpenDocument` がfile path/labelをcacheし、
-save/reload/quit判定にも使っている。Save As成功時以外に同期しないため、外部rename/delete後に
-ZedのBuffer file identityと不一致になる。pathとdisk stateをBufferからderiveし、キャッシュを
-source of truthにしない構成へ直すまでPassにしない。
+`OpenDocument`はBufferとscratch用labelだけを保持し、path、disk state、dirty、conflictは
+毎回Zedの`Buffer::file()`から導出する。既存の最寄りnon-root directoryをinvisible worktreeにし、
+外部rename後も同じBuffer Entityと新pathを追跡する。cleanな外部deleteはZed上`is_dirty=false`
+だが、`DiskState::Deleted`を明示的にclose/quit保護と`!`表示へ含める。
+
+headless回帰試験はrename後のpath/dedupe、編集・新pathへのsave、旧path非再作成、delete後の
+本文保持と破棄保護を実filesystem watcher込みで確認する。
 
 ### G2. Data and terminal lifecycle are safe
 
@@ -42,15 +45,17 @@ Fail.
 - normal exitとerror pathでraw mode、alternate screen、mouse capture、bracketed pasteを復元する。
 - 保護確認は別のinputが入った時点で解除し、古い確認状態を非表示で保持しない。
 
-未達はcatch可能な`SIGTERM` / `SIGHUP`である。現在はprocessがそのまま終了し、
-`TerminalSession::Drop`が走らないためterminal modeを残し得る。signalをevent loopの通常終了へ
-変換し、PTY上で復元を自動検証するまでPassにしない。`SIGKILL`やmachine crashはprocess側で
-cleanup不可能なので対象外とする。
+catch可能な`SIGTERM` / `SIGHUP`はsignal handlerからatomic flagだけを更新し、terminal readerが
+通常のevent loop終了へ渡す。reader停止後、raw mode等を復元してからhandlerを解除する。両signalで
+起動前後の`stty -g`完全一致を手動PTY確認済みだが、G4のactual-binary自動PTY試験へ移すまで
+このgateはPassにしない。`SIGKILL`やmachine crashはprocess側でcleanup不可能なので対象外とする。
 
 また、固定中のZed revisionの`RealFs::save`はexisting fileをtruncateしてからRopeをstreamし、
 atomic renameや`fsync`は行わない。zecが作った回帰ではないが、power lossやwrite途中errorで
-disk原本がpartialになるproduction riskとして残る。PoC卒業ではZedの保存経路を迂回せず、
-save failure後もBufferがdirtyのままであることを自動検証する。atomic/durable saveは
+disk原本がpartialになるproduction riskとして残る。Zedの保存先をdirectoryへ置換した
+headless failure試験で、error後もBuffer本文とdirty、退避したdisk原本が保持されることは固定した。
+G4ではactual binaryでも同じ保護を確認する。PoC卒業ではZedの保存経路を迂回しない。
+atomic/durable saveは
 production-readyの別blockerとし、Zed upstream修正または明示的なforkなしにzec側へ保存を
 再実装しない。
 
@@ -111,8 +116,9 @@ Pass条件:
 ## Execution order
 
 1. G3 (done 2026-08-23): viewport-bounded capture、bounded redraw、100,000行の構造test。
-2. G1/G2: file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定する。
-   catch可能signalもevent loopの通常終了へ渡す。
+2. G1 (done 2026-08-23): file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定。
+   G2 implementation: catch可能signalを通常終了へ接続済み。自動PTYとsave failure試験はG4で
+   完了させる。
 3. G4: actual binaryのPTY integration harnessとcore acceptance matrixを追加する。
 4. G5: 同じmatrixをclean Linux CIに接続する。
 5. 全gateを1回の検証で通し、statusを`Graduated`へ変更する。

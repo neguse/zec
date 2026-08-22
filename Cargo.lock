@@ -12130,6 +12130,7 @@ dependencies = [
  "release_channel",
  "semver",
  "settings",
+ "signal-hook 0.3.18",
  "theme",
  "theme_settings",
  "unicode-width",

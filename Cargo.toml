@@ -18,6 +18,7 @@ project = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351b
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 release_channel = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 semver = "1"
+signal-hook = "0.3.18"
 settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme_settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }

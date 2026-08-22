@@ -17,16 +17,21 @@ cargo run -- path/to/file another/file
 `Ctrl-N`では、`Untitled N`という保存先未定のscratch tabを追加できます。
 同じBufferがすでに開かれていればtabを重複させず、既存tabへ移動します。
 `Ctrl-PageUp` / `Ctrl-PageDown` でtabを切り替え、`Ctrl-W`でactive tabを閉じます。
-未保存tabは同じ`Ctrl-W`をもう一度押した場合だけ破棄し、最後のtabを閉じると終了します。
+未保存tabまたはdisk上で削除されたtabは、同じ`Ctrl-W`をもう一度押した場合だけ破棄し、
+最後のtabを閉じると終了します。
 各tabの本文、cursor、selection、undoは独立したZed Editorが保持し、viewportだけを端末側で
 保持します。`Ctrl-S` はactive tabだけをZedの `BufferStore` 経由で保存します。
-終了は `Ctrl-Q` です。どれか1つでも未保存なら、破棄確認としてもう一度`Ctrl-Q`を押します。
-statusには全tabのdirtyを`+`、外部変更との競合を`!`で表示します。
+終了は `Ctrl-Q` です。未保存または削除されたtabが1つでもあれば、破棄確認として
+もう一度`Ctrl-Q`を押します。statusには全tabのdirtyを`+`、外部変更との競合または
+disk上の削除を`!`で表示します。
 
 cleanなfileがdisk上で変更されると自動でreloadします。local edit中は本文を上書きせず`!`を
 表示し、`Ctrl-S`は再押下した場合だけdiskを上書きします。`Ctrl-R`はactive fileをdiskから
 reloadし、dirtyなら同じキーの再押下を要求します。reloadもZedのtransactionとして扱うため、
 直後の`Ctrl-Z`でreload前の本文へ戻せます。
+外部renameは同じZed Bufferのfile identityへ追従し、tab labelと以後の保存先も新pathになります。
+外部delete後も本文を保持して`!`を表示し、`Ctrl-S`の再押下で同じpathへ再作成できます。
+catch可能な`SIGTERM` / `SIGHUP`は通常の終了経路へ渡し、端末modeを復元してから終了します。
 
 引数なし、または`Ctrl-N`では空のscratch bufferを開きます。`Ctrl-S`で1行のSave As promptに入り、
 相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、

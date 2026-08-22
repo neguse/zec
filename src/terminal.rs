@@ -2,7 +2,7 @@ use std::{
     io::{self, Stdout, stdout},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -22,6 +22,11 @@ use crossterm::{
     },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+#[cfg(unix)]
+use signal_hook::{
+    SigId,
+    consts::{SIGHUP, SIGTERM},
+};
 
 pub type ZecTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -44,9 +49,12 @@ pub enum TerminalEvent {
         result: Result<(), String>,
     },
     Error(String),
+    Signal(i32),
 }
 
-pub struct TerminalSession;
+pub struct TerminalSession {
+    active: bool,
+}
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
@@ -60,11 +68,11 @@ impl TerminalSession {
             EnableMouseCapture,
             Hide
         ) {
-            restore_terminal();
+            let _ = restore_terminal();
             return Err(error);
         }
 
-        Ok(Self)
+        Ok(Self { active: true })
     }
 
     pub fn terminal(&self) -> io::Result<ZecTerminal> {
@@ -72,60 +80,164 @@ impl TerminalSession {
     }
 }
 
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        restore_terminal();
+impl TerminalSession {
+    pub fn restore(mut self) -> io::Result<()> {
+        let result = restore_terminal();
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
     }
 }
 
-fn restore_terminal() {
-    let _ = execute!(
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = restore_terminal();
+        }
+    }
+}
+
+fn restore_terminal() -> io::Result<()> {
+    let display_result = execute!(
         stdout(),
         Show,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
     );
-    let _ = disable_raw_mode();
+    let raw_result = disable_raw_mode();
+    match (display_result, raw_result) {
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+struct ShutdownSignals {
+    pending: Arc<AtomicUsize>,
+    #[cfg(unix)]
+    registrations: Vec<SigId>,
+}
+
+impl ShutdownSignals {
+    fn register() -> io::Result<Self> {
+        let pending = Arc::new(AtomicUsize::new(0));
+        #[cfg(unix)]
+        {
+            let mut registrations = Vec::with_capacity(2);
+            for signal in [SIGHUP, SIGTERM] {
+                match signal_hook::flag::register_usize(signal, pending.clone(), signal as usize) {
+                    Ok(registration) => registrations.push(registration),
+                    Err(error) => {
+                        for registration in registrations {
+                            signal_hook::low_level::unregister(registration);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(Self {
+                pending,
+                registrations,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self { pending })
+        }
+    }
+}
+
+impl Drop for ShutdownSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for registration in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
 }
 
 pub struct InputReader {
     stop: Arc<AtomicBool>,
+    sender: Sender<TerminalEvent>,
     thread: Option<JoinHandle<()>>,
+    _signals: ShutdownSignals,
 }
 
 impl InputReader {
-    pub fn spawn(sender: Sender<TerminalEvent>) -> Self {
+    pub fn spawn(sender: Sender<TerminalEvent>) -> io::Result<Self> {
+        let signals = ShutdownSignals::register()?;
         let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = stop.clone();
-        let thread = thread::spawn(move || read_events(sender, reader_stop));
+        let pending_signal = signals.pending.clone();
+        let reader_sender = sender.clone();
+        let thread = thread::Builder::new()
+            .name("zec-terminal-input".to_owned())
+            .spawn(move || read_events(reader_sender, reader_stop, pending_signal))?;
 
-        Self {
+        Ok(Self {
+            sender,
             stop,
             thread: Some(thread),
-        }
+            _signals: signals,
+        })
     }
 
     pub fn stop(&self) {
+        self.sender.close();
         self.stop.store(true, Ordering::Relaxed);
     }
-}
 
-impl Drop for InputReader {
-    fn drop(&mut self) {
+    pub fn stop_and_join(&mut self) {
         self.stop();
+        self.join();
+    }
+
+    fn join(&mut self) {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-fn read_events(sender: Sender<TerminalEvent>, stop: Arc<AtomicBool>) {
+impl Drop for InputReader {
+    fn drop(&mut self) {
+        self.stop();
+        self.join();
+    }
+}
+
+fn take_pending_signal(pending: &AtomicUsize) -> Option<i32> {
+    let signal = pending.swap(0, Ordering::SeqCst);
+    (signal != 0).then_some(signal as i32)
+}
+
+fn send_pending_signal(sender: &Sender<TerminalEvent>, pending: &AtomicUsize) -> bool {
+    let Some(signal) = take_pending_signal(pending) else {
+        return false;
+    };
+    let _ = sender.send_blocking(TerminalEvent::Signal(signal));
+    true
+}
+
+fn read_events(
+    sender: Sender<TerminalEvent>,
+    stop: Arc<AtomicBool>,
+    pending_signal: Arc<AtomicUsize>,
+) {
     let mut known_size = crossterm_terminal::size().ok();
     let mut last_size_check = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        match event::poll(Duration::from_millis(50)) {
+        if send_pending_signal(&sender, &pending_signal) {
+            break;
+        }
+
+        let polled = event::poll(Duration::from_millis(50));
+        if send_pending_signal(&sender, &pending_signal) {
+            break;
+        }
+        match polled {
             Ok(false) => {
                 if last_size_check.elapsed() >= Duration::from_millis(250) {
                     last_size_check = Instant::now();
@@ -140,7 +252,9 @@ fn read_events(sender: Sender<TerminalEvent>, stop: Arc<AtomicBool>) {
             }
             Ok(true) => {}
             Err(error) => {
-                let _ = sender.send_blocking(TerminalEvent::Error(error.to_string()));
+                if !send_pending_signal(&sender, &pending_signal) {
+                    let _ = sender.send_blocking(TerminalEvent::Error(error.to_string()));
+                }
                 break;
             }
         }
@@ -148,10 +262,15 @@ fn read_events(sender: Sender<TerminalEvent>, stop: Arc<AtomicBool>) {
         let event = match event::read() {
             Ok(event) => event,
             Err(error) => {
-                let _ = sender.send_blocking(TerminalEvent::Error(error.to_string()));
+                if !send_pending_signal(&sender, &pending_signal) {
+                    let _ = sender.send_blocking(TerminalEvent::Error(error.to_string()));
+                }
                 break;
             }
         };
+        if send_pending_signal(&sender, &pending_signal) {
+            break;
+        }
 
         if let Event::Resize(columns, rows) = &event {
             known_size = Some((*columns, *rows));
@@ -200,6 +319,32 @@ mod tests {
 
     fn mouse(kind: MouseEventKind) -> Event {
         Event::Mouse(mouse_event(kind))
+    }
+
+    #[test]
+    fn pending_signal_is_forwarded_once() {
+        let pending = AtomicUsize::new(15);
+        let (sender, receiver) = async_channel::bounded(1);
+
+        assert!(send_pending_signal(&sender, &pending));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(TerminalEvent::Signal(15))
+        ));
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        assert!(!send_pending_signal(&sender, &pending));
+    }
+    #[test]
+    fn closing_a_full_channel_unblocks_a_blocking_sender() {
+        let (sender, _receiver) = async_channel::bounded(1);
+        sender
+            .send_blocking(TerminalEvent::Redraw)
+            .expect("fill event channel");
+        let blocked_sender = sender.clone();
+        let blocked = thread::spawn(move || blocked_sender.send_blocking(TerminalEvent::Resize));
+
+        sender.close();
+        assert!(blocked.join().expect("join blocked sender").is_err());
     }
 
     #[test]

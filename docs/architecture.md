@@ -76,6 +76,12 @@ hit testだけがglobal rowをlocal indexへ変換する。全体の行数と最
 
 terminal event channelはcapacity 1にする。重複したRedrawはdropしても次frameが最新snapshotを
 読むため安全であり、key/paste/mouseはreader threadでbackpressureして順序を保つ。
+`SIGTERM` / `SIGHUP`のhandlerはasync-signal-safeなatomic flag更新だけを行う。terminal readerが
+その番号を通常の`TerminalEvent`へ変換し、GPUI loopを終了する。cleanupはreader threadをjoinし、
+`TerminalSession`がraw mode、alternate screen、mouse capture、bracketed pasteを復元してから
+signal handlerを解除する順に固定する。復元処理はescape出力とraw mode解除の片方が失敗しても
+もう片方を必ず試し、明示的なrestore失敗は呼び出し元へ返す。
+
 
 100,000行の構造testでは80x24の先頭・中央・末尾で保持行数が23に固定される。これは行数に対する
 repaintの上限であり、全文検索そのものを定数時間にする主張ではない。またZedの公開text APIは
@@ -88,9 +94,13 @@ display row単位なので、数MBの単一行ではその行全体のmaterializ
 開く。`Project` 全体や手書きの `std::fs::write` は使わない。これによりencoding、BOM、
 改行コード、保存version、外部ファイル状態をZed側の実装に任せられる。
 
-該当worktreeがなければ、ファイル自身を非表示のsingle-file worktreeとして扱う。
-未作成パスもfile付きの `DiskState::New` Bufferになるため、編集後の `save_buffer` で
-新規作成できる。
+該当worktreeがなければ、pathを含む既存の最寄りnon-root directoryを非表示worktreeとして扱う。
+これにより同じdirectory内の外部renameをZedのentry identityで追跡でき、未作成のnested Save As
+pathも作成後に追跡対象になる。該当するdirectoryがfilesystem rootしかない場合だけ、root全体を
+scan/watchせずファイル自身をsingle-file worktreeにする。directory worktreeは親配下を再帰的に
+scan/watchするため、rename追跡と初期I/Oの交換条件である。
+
+未作成パスもfile付きの `DiskState::New` Bufferになるため、編集後の `save_buffer` で新規作成できる。
 
 引数なしのscratchも裸の `Buffer::local` にはせず、最初から同じ `BufferStore` の
 `create_local_buffer` で生成する。`Ctrl-S` ではterminal-ownedな1行promptから絶対化した
@@ -110,8 +120,8 @@ ProjectPathのopenはBufferStoreが同じBuffer Entityへdedupeし、CLIの完�
 
 Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEditorなので
 保存handlerがない。そのため `Ctrl-S` だけCLI側で捕捉して `BufferStore::save_buffer`
-を呼ぶ。編集・undo・移動などは引き続きZedのkey dispatchへ渡す。dirtyな状態での
-`Ctrl-Q` は初回に警告し、直後の2回目だけ破棄終了にする。
+を呼ぶ。編集・undo・移動などは引き続きZedのkey dispatchへ渡す。dirtyまたは外部delete状態での
+`Ctrl-Q` / `Ctrl-W` は初回に警告し、直後の2回目だけ破棄終了・closeにする。
 
 ## External file changes
 
@@ -127,7 +137,10 @@ dirtyなBufferは自動reloadせず`has_conflict`をstatusの`!`で示す。競�
 
 reload完了はterminal eventで描画loopを起こし、active tabで検索中ならmatchを再計算する。
 完了eventはBuffer IDでtabを引き直すため、処理中にtabが閉じられても古いhandleやlabelを参照しない。
-外部rename後のtab label/path同期と、外部delete専用のstatus・再作成UIは後続課題とする。
+`OpenDocument`はfile path/labelをcacheしない。表示、save/reload可否、error context、終了保護は
+その時点の`Buffer::file()`と`DiskState`から導出するため、外部rename後は同じBufferの新pathと
+labelへ追従する。外部deleteはclean Bufferでも`!`を表示し、close/quitの破棄確認対象にする。
+`Ctrl-S`の再押下はZedの通常save経路で同じpathを再作成する。
 
 ## Syntax highlighting
 
@@ -306,7 +319,7 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 tabのreorder UI、LSP、検索option/history、Go to lineの相対指定/live preview、clipboard metadata/read、native set外の
 grammar、完全なlanguage injection、terminal-aware soft wrap、mouse drag/double/triple/modifier selection、
-外部rename/deleteの専用UIは後続で追加する。
+外部rename/deleteの詳細なrecovery UIは後続で追加する。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
