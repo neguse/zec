@@ -1,0 +1,181 @@
+name: Alpha 1
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: alpha-1-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+  CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  LC_ALL: C.UTF-8
+  LANG: C.UTF-8
+  TERM: xterm-256color
+
+jobs:
+  classify:
+    name: Classify candidate or promotion
+    runs-on: ubuntu-24.04
+    outputs:
+      promotion: ${{ steps.diff.outputs.promotion }}
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify the commit
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          promotion=false
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            change="$(git diff --name-status --no-renames HEAD^ HEAD)"
+            if [[ "$change" == $'A\tdocs/alpha-1-evidence.json' ]]; then
+              promotion=true
+            fi
+          fi
+          echo "promotion=$promotion" >> "$GITHUB_OUTPUT"
+
+  gate:
+    name: Alpha 1 gate
+    needs: classify
+    if: needs.classify.outputs.promotion != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential clang cmake curl elfutils g++ gcc gettext-base git jq \
+            libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev \
+            libsqlite3-dev libssl-dev libstdc++-14-dev libva-dev libvulkan1 \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev \
+            lld llvm make musl-dev musl-tools pipewire xdg-desktop-portal
+          sudo apt-get clean
+
+      - name: Install pinned Rust toolchain
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          rustc --version --verbose
+          cargo --version
+          rustfmt --version
+
+      - name: Verify lockfile, fixture oracles, and formatting
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          cargo fmt --all -- --check
+          cargo run --locked --bin alpha_1_fixture -- verify-oracles --repo .
+
+      - name: Build the release gate binaries
+        timeout-minutes: 60
+        run: cargo build --locked --release --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
+
+      - name: Run PoC regression tests
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --bin zec -- --test-threads=1
+          cargo test --locked --test pty_acceptance -- --test-threads=1
+
+      - name: Run Alpha 1 acceptance
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/alpha-1
+          timeout --signal=TERM --kill-after=5s 45m \
+            ./target/release/alpha_1_acceptance --zec ./target/release/zec \
+            --repo . --assert --report target/alpha-1/acceptance.json
+          ./target/release/alpha_1_acceptance \
+            --verify-report target/alpha-1/acceptance.json
+
+      - name: Run Alpha 1 benchmark
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=5s 20m \
+            ./target/release/alpha_1_bench --zec ./target/release/zec \
+            --assert --report target/alpha-1/benchmark.json
+          ./target/release/alpha_1_bench \
+            --verify-report target/alpha-1/benchmark.json
+
+      - name: Record artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target/alpha-1
+          sha256sum acceptance.json benchmark.json > SHA256SUMS
+
+      - name: Upload Alpha 1 evidence
+        id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: alpha-1-reports
+          path: target/alpha-1
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Print evidence coordinates
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          printf 'candidate_sha=%s\nrun_id=%s\nrun_attempt=%s\nartifact_id=%s\nartifact_digest=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$ARTIFACT_ID" "$ARTIFACT_DIGEST"
+
+  evidence:
+    name: Alpha 1 evidence
+    needs: classify
+    if: needs.classify.outputs.promotion == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout promotion
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify promoted evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./script/verify-alpha-1-evidence
