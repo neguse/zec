@@ -70,7 +70,12 @@
     "sentinel": "ALPHA1_EXCLUDED_SENTINEL",
     "excluded_paths": [".git/alpha1-excluded.txt","ignored/excluded.txt","target/excluded.txt","tests/binary-with-nul.dat","/tmp/zec-alpha-1-v1/outside-control.txt"],
     "in_scope_control_path": "src/control.txt",
-    "quick_open_expected_excluded_results": [],
+    "quick_open_exclusion_queries": [
+      {"query":".git/alpha1-excluded.txt","expected_results":[]},
+      {"query":"ignored/excluded.txt","expected_results":[]},
+      {"query":"target/excluded.txt","expected_results":[]},
+      {"query":"/tmp/zec-alpha-1-v1/outside-control.txt","expected_results":[]}
+    ],
     "project_search_expected_results": [
       {"path":"src/control.txt","line":1,"column":1,"preview":"ALPHA1_EXCLUDED_SENTINEL in-scope control"}
     ]
@@ -92,6 +97,14 @@
     "queries": [
       {"id":"edit_b","text":"ALPHA1_FIND_B_OLD","expected_results":[
         {"path":"src/crlf-edit.rs","line":2,"column":26,"preview":"pub const TOKEN: &str = \"ALPHA1_FIND_B_OLD\";"}
+      ]},
+      {"id":"case_variant","text":"alpha1_find_b_old","expected_results":[]},
+      {"id":"nfc_no_normalization","text":"é","expected_results":[]},
+      {"id":"nfd_scalar_column","text":"é","expected_results":[
+        {"path":"docs/組合せ-é.txt","line":1,"column":27,"preview":"Unicode path fixture: 日本語 é"}
+      ]},
+      {"id":"bom_scalar_column","text":"Alpha 1 UTF-8 BOM fixture","expected_results":[
+        {"path":"src/日本 語.rs","line":1,"column":4,"preview":"// Alpha 1 UTF-8 BOM fixture"}
       ]},
       {"id":"excluded","text":"ALPHA1_EXCLUDED_SENTINEL","expected_results":[
         {"path":"src/control.txt","line":1,"column":1,"preview":"ALPHA1_EXCLUDED_SENTINEL in-scope control"}
@@ -226,10 +239,10 @@
     "fresh_config_each_run": true,
     "fresh_process_each_run": true,
     "input_id_template": "A3_{RUN_2}_{SEQUENCE_4}",
-    "edit_a": {"path":"src/日本 語.rs","encoding":"UTF-8 BOM","replace":"ALPHA1_EDIT_A_OLD","with_template":"ALPHA1_EDIT_A_{RUN_2}"},
-    "edit_b": {"path":"src/crlf-edit.rs","line_endings":"CRLF","replace":"ALPHA1_FIND_B_OLD","with_template":"ALPHA1_EDIT_B_{RUN_2}"},
-    "edit_c": {"path":"src/no-final-newline.txt","final_newline_before":false,"append":" :: ALPHA1_EDIT_C_{RUN_2}"},
-    "edit_d": {"path":"scratch/新規 メモ.txt","contents_template":"Alpha 1 scratch 日本語\nworkflow token ALPHA1_EDIT_D_{RUN_2}\n"},
+    "edit_a": {"path":"src/日本 語.rs","encoding":"UTF-8 BOM","replace":"ALPHA1_EDIT_A_OLD","with_template":"ALPHA1_EDIT_A_{RUN_2} A3_{RUN_2}_0001"},
+    "edit_b": {"path":"src/crlf-edit.rs","line_endings":"CRLF","replace":"ALPHA1_FIND_B_OLD","with_template":"ALPHA1_EDIT_B_{RUN_2} A3_{RUN_2}_0002"},
+    "edit_c": {"path":"src/no-final-newline.txt","final_newline_before":false,"append":" :: ALPHA1_EDIT_C_{RUN_2} A3_{RUN_2}_0003"},
+    "edit_d": {"path":"scratch/新規 メモ.txt","contents_template":"Alpha 1 scratch 日本語\nworkflow token ALPHA1_EDIT_D_{RUN_2} A3_{RUN_2}_0004\n"},
     "reopen_paths": ["src/日本 語.rs","src/crlf-edit.rs","src/no-final-newline.txt","scratch/新規 メモ.txt"],
     "expected_dirty_conflict_deleted_markers": 0,
     "expected_exit_code": 0,

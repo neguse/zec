@@ -310,7 +310,7 @@ fn edit_a_after(run: u8) -> Vec<u8> {
             let mut bytes = EDIT_A_BEFORE.to_vec();
             bytes.splice(
                 position..position + b"ALPHA1_EDIT_A_OLD".len(),
-                format!("ALPHA1_EDIT_A_{run:02}").bytes(),
+                format!("ALPHA1_EDIT_A_{run:02} A3_{run:02}_0001").bytes(),
             );
             bytes
         })
@@ -325,7 +325,7 @@ fn edit_b_after(run: u8) -> Vec<u8> {
             let mut bytes = EDIT_B_BEFORE.to_vec();
             bytes.splice(
                 position..position + b"ALPHA1_FIND_B_OLD".len(),
-                format!("ALPHA1_EDIT_B_{run:02}").bytes(),
+                format!("ALPHA1_EDIT_B_{run:02} A3_{run:02}_0002").bytes(),
             );
             bytes
         })
@@ -334,12 +334,14 @@ fn edit_b_after(run: u8) -> Vec<u8> {
 
 fn edit_c_after(run: u8) -> Vec<u8> {
     let mut bytes = EDIT_C_BEFORE.to_vec();
-    write!(&mut bytes, " :: ALPHA1_EDIT_C_{run:02}").expect("write to Vec cannot fail");
+    write!(&mut bytes, " :: ALPHA1_EDIT_C_{run:02} A3_{run:02}_0003")
+        .expect("write to Vec cannot fail");
     bytes
 }
 
 fn edit_d_after(run: u8) -> Vec<u8> {
-    format!("Alpha 1 scratch 日本語\nworkflow token ALPHA1_EDIT_D_{run:02}\n").into_bytes()
+    format!("Alpha 1 scratch 日本語\nworkflow token ALPHA1_EDIT_D_{run:02} A3_{run:02}_0004\n")
+        .into_bytes()
 }
 
 fn deterministic_text(path: &str, size: usize, salt: u64) -> Vec<u8> {
@@ -777,7 +779,7 @@ pub fn spec_bytes() -> Vec<u8> {
     );
     output.push_str("  \"exclusions\": {\n");
     output.push_str(
-        "    \"sentinel\": \"ALPHA1_EXCLUDED_SENTINEL\",\n    \"excluded_paths\": [\".git/alpha1-excluded.txt\",\"ignored/excluded.txt\",\"target/excluded.txt\",\"tests/binary-with-nul.dat\",\"/tmp/zec-alpha-1-v1/outside-control.txt\"],\n    \"in_scope_control_path\": \"src/control.txt\",\n    \"quick_open_expected_excluded_results\": [],\n",
+        "    \"sentinel\": \"ALPHA1_EXCLUDED_SENTINEL\",\n    \"excluded_paths\": [\".git/alpha1-excluded.txt\",\"ignored/excluded.txt\",\"target/excluded.txt\",\"tests/binary-with-nul.dat\",\"/tmp/zec-alpha-1-v1/outside-control.txt\"],\n    \"in_scope_control_path\": \"src/control.txt\",\n    \"quick_open_exclusion_queries\": [\n      {\"query\":\".git/alpha1-excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"ignored/excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"target/excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"/tmp/zec-alpha-1-v1/outside-control.txt\",\"expected_results\":[]}\n    ],\n",
     );
     output.push_str("    \"project_search_expected_results\": [\n");
     write_search_result(
@@ -806,6 +808,34 @@ pub fn spec_bytes() -> Vec<u8> {
         2,
         26,
         "pub const TOKEN: &str = \"ALPHA1_FIND_B_OLD\";",
+        false,
+    );
+    output.push_str("      ]},\n");
+    output.push_str(
+        "      {\"id\":\"case_variant\",\"text\":\"alpha1_find_b_old\",\"expected_results\":[]},\n",
+    );
+    output.push_str(
+        "      {\"id\":\"nfc_no_normalization\",\"text\":\"é\",\"expected_results\":[]},\n",
+    );
+    output.push_str("      {\"id\":\"nfd_scalar_column\",\"text\":\"é\",\"expected_results\":[\n");
+    write_search_result(
+        &mut output,
+        "        ",
+        "docs/組合せ-é.txt",
+        1,
+        27,
+        "Unicode path fixture: 日本語 é",
+        false,
+    );
+    output.push_str("      ]},\n");
+    output.push_str("      {\"id\":\"bom_scalar_column\",\"text\":\"Alpha 1 UTF-8 BOM fixture\",\"expected_results\":[\n");
+    write_search_result(
+        &mut output,
+        "        ",
+        EDIT_A_PATH,
+        1,
+        4,
+        "// Alpha 1 UTF-8 BOM fixture",
         false,
     );
     output.push_str("      ]},\n");
@@ -863,7 +893,7 @@ pub fn spec_bytes() -> Vec<u8> {
         "  \"stale_result_schedule\": {\n    \"query_a\": \"ALPHA1_STALE_A\",\n    \"query_b\": \"ALPHA1_STALE_B\",\n    \"completion_order\": [\"B\",\"A\"],\n    \"expected_publish_log\": [\"B\"],\n    \"expected_final_query\": \"ALPHA1_STALE_B\",\n    \"expected_final_path\": \"src/stale-b.txt\"\n  },\n  \"in_flight_actions\": {\n    \"replace_query_expected\": \"new-query-results-only\",\n    \"escape_expected\": \"prompt-absent-and-no-stale-publish\",\n    \"ctrl_q_expected\": \"child-exited-and-no-stale-publish\"\n  },\n",
     );
     output.push_str(
-        "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"ALPHA1_EDIT_A_OLD\",\"with_template\":\"ALPHA1_EDIT_A_{RUN_2}\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"ALPHA1_FIND_B_OLD\",\"with_template\":\"ALPHA1_EDIT_B_{RUN_2}\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: ALPHA1_EDIT_C_{RUN_2}\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"Alpha 1 scratch 日本語\\nworkflow token ALPHA1_EDIT_D_{RUN_2}\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
+        "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"ALPHA1_EDIT_A_OLD\",\"with_template\":\"ALPHA1_EDIT_A_{RUN_2} A3_{RUN_2}_0001\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"ALPHA1_FIND_B_OLD\",\"with_template\":\"ALPHA1_EDIT_B_{RUN_2} A3_{RUN_2}_0002\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: ALPHA1_EDIT_C_{RUN_2} A3_{RUN_2}_0003\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"Alpha 1 scratch 日本語\\nworkflow token ALPHA1_EDIT_D_{RUN_2} A3_{RUN_2}_0004\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
     );
     output.push_str(
         "  \"benchmark\": {\n    \"report_schema_version\": 1,\n    \"startup\": {\"warmups\":2,\"samples\":20,\"p95_max_us\":3000000},\n    \"quick_open\": {\"warmups\":10,\"samples\":100,\"p95_max_us\":150000,\"max_us\":500000,\"queries\":[\n",
@@ -1393,6 +1423,14 @@ mod tests {
                     .expect("edit D UTF-8")
                     .contains("日本語")
             );
+            for (index, bytes) in [&edit_a, &edit_b, &edit_c, &edit_d].into_iter().enumerate() {
+                let input_id = format!("A3_{run:02}_{:04}", index + 1);
+                assert!(
+                    bytes
+                        .windows(input_id.len())
+                        .any(|window| window == input_id.as_bytes())
+                );
+            }
         }
     }
 

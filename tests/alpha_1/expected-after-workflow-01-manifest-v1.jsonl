@@ -1015,14 +1015,14 @@
 {"path":"links/dangling","kind":"symlink","mode":"0777","size":14,"content_sha256":null,"symlink_target":"../missing.txt"}
 {"path":"links/root-loop","kind":"symlink","mode":"0777","size":9,"content_sha256":null,"symlink_target":"root-loop"}
 {"path":"scratch","kind":"directory","mode":"0755","size":0,"content_sha256":null,"symlink_target":null}
-{"path":"scratch/新規 メモ.txt","kind":"file","mode":"0644","size":58,"content_sha256":"866386c603ced589b3223c92f2cdc5b8a053b7fbbeb8f5d45b095e5b0d75bc69","symlink_target":null}
+{"path":"scratch/新規 メモ.txt","kind":"file","mode":"0644","size":69,"content_sha256":"02a13f5128598799a829c5d377ed1569133fa64811bd70838691c8b44ab81cd4","symlink_target":null}
 {"path":"src","kind":"directory","mode":"0755","size":0,"content_sha256":null,"symlink_target":null}
 {"path":"src/control.txt","kind":"file","mode":"0644","size":42,"content_sha256":"dce30015c8a6fd94cefd549d021dd4a335a568d91a181e8ada545254fe413e17","symlink_target":null}
-{"path":"src/crlf-edit.rs","kind":"file","mode":"0644","size":70,"content_sha256":"8821c99af65fa7cb3f51e62fa150d58869ebad4d153d9cfab53d5e74eb351842","symlink_target":null}
-{"path":"src/no-final-newline.txt","kind":"file","mode":"0644","size":75,"content_sha256":"198f946d0ecf5cbc4d75923660c11962828e160396d87889cdc833205f711279","symlink_target":null}
+{"path":"src/crlf-edit.rs","kind":"file","mode":"0644","size":81,"content_sha256":"6630a8288e47cc29a248221940f77810a0e4cf64a6d6b94c8ca23a9157bcfb8b","symlink_target":null}
+{"path":"src/no-final-newline.txt","kind":"file","mode":"0644","size":86,"content_sha256":"1004b12b96f855bc910d2870f678aefb7d8dd52bfba1f97674c633a1172c13da","symlink_target":null}
 {"path":"src/stale-a.txt","kind":"file","mode":"0644","size":32,"content_sha256":"25814e56707e0695d94d834290029864c38da2c6df166ae8f0a9ab0384c62e0c","symlink_target":null}
 {"path":"src/stale-b.txt","kind":"file","mode":"0644","size":36,"content_sha256":"eef548b141c1980c5bafd3e30570c5e0ed7bd056a59f9fb950d74eed88cb34db","symlink_target":null}
-{"path":"src/日本 語.rs","kind":"file","mode":"0644","size":76,"content_sha256":"e63aa0ca81f9c8e50f49a5ccdc3598ccd222d89a4aec93302b568f875f705489","symlink_target":null}
+{"path":"src/日本 語.rs","kind":"file","mode":"0644","size":87,"content_sha256":"0aba23e514b6c333e74e18acc6416ef3f4def19579d5f94172e2e127ad765d2f","symlink_target":null}
 {"path":"target","kind":"directory","mode":"0755","size":0,"content_sha256":null,"symlink_target":null}
 {"path":"target/excluded.txt","kind":"file","mode":"0644","size":54,"content_sha256":"5e6b2b8b49f149c7cd8a16c1728000827a7eff218387aeb93c833d945e7b055a","symlink_target":null}
 {"path":"tests","kind":"directory","mode":"0755","size":0,"content_sha256":null,"symlink_target":null}
