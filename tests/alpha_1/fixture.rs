@@ -27,6 +27,7 @@ pub const LARGE_LOGICAL_LINES: usize = 100_000;
 pub const LARGE_LF_COUNT: usize = 99_999;
 pub const BENCH_SEARCH_HITS: usize = 1_000;
 pub const SEARCH_RESULT_LIMIT: usize = 100;
+pub const BENCH_QUICK_OPEN_QUERIES: usize = 100;
 pub const WORKFLOW_RUNS: u8 = 20;
 
 pub const FIXED_WORKSPACE: &str = "/tmp/zec-alpha-1-v1";
@@ -865,7 +866,25 @@ pub fn spec_bytes() -> Vec<u8> {
         "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"ALPHA1_EDIT_A_OLD\",\"with_template\":\"ALPHA1_EDIT_A_{RUN_2}\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"ALPHA1_FIND_B_OLD\",\"with_template\":\"ALPHA1_EDIT_B_{RUN_2}\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: ALPHA1_EDIT_C_{RUN_2}\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"Alpha 1 scratch 日本語\\nworkflow token ALPHA1_EDIT_D_{RUN_2}\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
     );
     output.push_str(
-        "  \"benchmark\": {\n    \"report_schema_version\": 1,\n    \"startup\": {\"warmups\":2,\"samples\":20,\"p95_max_us\":3000000},\n    \"quick_open\": {\"warmups\":10,\"samples\":100,\"p95_max_us\":150000,\"max_us\":500000},\n    \"project_search\": {\"warmups\":2,\"samples\":10,\"p95_max_us\":5000000,\"expected_hits\":1000,\"visible_results\":100},\n    \"in_flight_search\": {\"attempts_each\":20,\"max_us\":250000},\n    \"editing\": {\"path\":\"bench/large-100000-lines.txt\",\"warmups\":10,\"samples\":500,\"p95_max_us\":100000,\"max_us\":500000,\"input_id_template\":\"EDIT_{SEQUENCE_4}\"},\n    \"save\": {\"path\":\"bench/save-5mib.txt\",\"size\":5242880,\"warmups\":2,\"samples\":10,\"max_us\":2000000},\n    \"vm_hwm_max_bytes\": 1073741824,\n    \"descendant_process_count\": 0,\n    \"nearest_rank_p95\": \"sorted_samples[ceil(0.95*N)-1]\",\n    \"input_invariants\": {\"sent_equals_applied_equals_expected\":true,\"dropped_count\":0,\"reordered\":false}\n  },\n",
+        "  \"benchmark\": {\n    \"report_schema_version\": 1,\n    \"startup\": {\"warmups\":2,\"samples\":20,\"p95_max_us\":3000000},\n    \"quick_open\": {\"warmups\":10,\"samples\":100,\"p95_max_us\":150000,\"max_us\":500000,\"queries\":[\n",
+    );
+    for index in 0..BENCH_QUICK_OPEN_QUERIES {
+        let path = format!("bench/search-{index:04}.txt");
+        writeln!(
+            output,
+            "      {{\"query\":{},\"expected_selected_path\":{}}}{}",
+            json_string(&path),
+            json_string(&path),
+            if index + 1 == BENCH_QUICK_OPEN_QUERIES {
+                ""
+            } else {
+                ","
+            }
+        )
+        .expect("write to String cannot fail");
+    }
+    output.push_str(
+        "    ]},\n    \"project_search\": {\"warmups\":2,\"samples\":10,\"p95_max_us\":5000000,\"expected_hits\":1000,\"visible_results\":100},\n    \"in_flight_search\": {\"attempts_each\":20,\"max_us\":250000},\n    \"editing\": {\"path\":\"bench/large-100000-lines.txt\",\"warmups\":10,\"samples\":500,\"p95_max_us\":100000,\"max_us\":500000,\"input_id_template\":\"EDIT_{SEQUENCE_4}\"},\n    \"save\": {\"path\":\"bench/save-5mib.txt\",\"size\":5242880,\"warmups\":2,\"samples\":10,\"max_us\":2000000},\n    \"vm_hwm_max_bytes\": 1073741824,\n    \"descendant_process_count\": 0,\n    \"nearest_rank_p95\": \"sorted_samples[ceil(0.95*N)-1]\",\n    \"input_invariants\": {\"sent_equals_applied_equals_expected\":true,\"dropped_count\":0,\"reordered\":false}\n  },\n",
     );
     output.push_str(
         "  \"failures\": {\n    \"open_eloop_path\": \"links/root-loop\",\n    \"save_enotdir_parent_path\": \"src/control.txt\",\n    \"save_enotdir_child_path\": \"src/control.txt/child.txt\",\n    \"controlled_search_error\": \"EIO\",\n    \"signals\": [\"SIGINT\",\"SIGQUIT\",\"SIGTERM\",\"SIGHUP\",\"SIGTSTP/SIGCONT\"],\n    \"attempts_each\": 20,\n    \"normal_signal_exit_code\": 0,\n    \"stop_timeout_ms\": 5000,\n    \"resume_ready_timeout_ms\": 15000,\n    \"child_reap_timeout_ms\": 5000,\n    \"reader_join_timeout_ms\": 5000,\n    \"expected_descendant_pids_after_exit\": 0,\n    \"expected_fd_count_delta_after_exit\": 0\n  },\n  \"reports\": {\n    \"acceptance_schema_version\": 1,\n    \"benchmark_schema_version\": 1,\n    \"acceptance_failed\": 0,\n    \"acceptance_required_case_count\": 186,\n    \"required_hashes\": [\"generator_source_sha256\",\"spec_sha256\",\"before_manifest_sha256\",\"after_manifest_sha256\"],\n    \"required_runner_fields\": [\"cpu_model\",\"cpu_core_count\",\"ram_bytes\",\"kernel\",\"runner_image_version\"],\n    \"verify_recomputes_statistics\": true\n  },\n",
