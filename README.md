@@ -11,6 +11,7 @@ Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection
 
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に、
 PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
+次のマイルストーンは [docs/alpha-1.md](docs/alpha-1.md) の機械判定contractで管理します。
 
 ```sh
 cargo run -- path/to/file another/file
