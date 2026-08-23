@@ -2,7 +2,9 @@
 
 Contract status: Accepted (2026-08-23)
 
-Gate statusは保存せず、HEADに対する下記commandとevidence checkの結果から導出する。
+Gate statusは保存せず、A6のcandidate/promotion規則とevidence checkから導出する。
+promotion `P`がevidence-onlyのdirect childである場合に限り、親candidate `C`に対する
+Single decision ruleの結果を`P`が継承する。
 
 ## Outcome
 
@@ -209,16 +211,21 @@ reportの必須IDは`A1_ROOT_IDENTITY`、`A1_OUTSIDE_TRACE`、`A1_PARTIAL_STARTU
 
 Pass判定はcandidateとpromotionの2 commitで行い、self-referenceを作らない。
 
-1. candidate commit `C`で`Alpha 1 gate` run `R`をretry 0で完了させる。`R`は
-   acceptance/benchmark reportをartifactとしてuploadし、job conclusionを`success`にする。
+1. candidate commit `C`でpush eventの`Alpha 1 gate` run `R`をretry 0で完了させる。
+   `R`はacceptance/benchmark reportをartifactとしてuploadし、job conclusionを
+   `success`にする。
 2. `C`のdirect childとなるpromotion commit `P`は
    `docs/alpha-1-evidence.json`だけを追加する。そこへ`C`のfull SHA、`R`のrun/job URLとID、
    run attempt、generator/spec/before/after manifest SHA-256、report SHA-256、既存test count、
    acceptance case count 186を記録する。
 3. `P`の`Alpha 1 evidence` jobはGitHub APIから、`R.head_sha == C`、
-   `R.run_attempt == 1`、gate job conclusionが`success`、artifact digest一致を確認する。
-   さらに`P^ == C`、`C..P`の変更pathがevidence JSONだけ、acceptanceが186/186、
-   benchmarkの全assertがtrueであることを確認する。
+   `R.event == push`、`R.run_attempt == 1`、gate job conclusionが`success`、artifact digest一致を
+   確認する。同じ`workflow_id`、`event == push`、`head_sha == C`を満たすrun IDの集合が
+   `[R.id]`だけであることも確認し、別run IDによるやり直しを拒否する。
+4. 同じevidence jobは`P^ == C`、`C..P`の変更pathがevidence JSONだけ、
+   acceptanceが186/186、benchmarkの全assertがtrueであることを確認する。さらに自身の
+   `GITHUB_RUN_ATTEMPT == 1`と、同じ`workflow_id`、`event == push`、`head_sha == P`の
+   run ID集合が自身のIDだけであることを確認する。
 
 default branch上の`Alpha 1 evidence` jobが`success`であることだけをcanonicalなPassとする。
 文書status、issue checklist、実地dogfood報告、workflow全体の実行中URLは判定に使わない。
