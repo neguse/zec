@@ -123,9 +123,10 @@ workflow内で検査する。
   751,928 KiB、合計6,716,016 KiB（約6.41 GiB）だった。94件のtestとsmokeを含めて
   すべてPassし、14 GiB budget内だった。検証後もcheckoutのsource差分とcontainer残留はない。
 
-repositoryにはremoteがないため、この環境からGitHub-hosted Actions自体は起動できない。
-上記clean Ubuntu実行と同じcommand setをworkflowへ固定しており、remoteへの最初のpushから
-同じgraduation gateが走る。
+- private repositoryへの最初のpushで、GitHub-hosted `ubuntu-24.04`上の
+  [run 32623267464](https://github.com/neguse/zec/actions/runs/32623267464)を実行した。
+  Linux graduation gateは12分11秒で、build、94件のtest、smoke、disk budgetをすべてPassした。
+  CI生成diskは7,275 MiBで、14 GiB budget内だった。
 
 ## Execution order
 
