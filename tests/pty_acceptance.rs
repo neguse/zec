@@ -13,8 +13,9 @@ use std::{
 use anyhow::{Context as _, Result, bail, ensure};
 use nix::{
     sys::{
-        signal::{Signal, kill},
+        signal::{Signal, killpg},
         termios::{LocalFlags, Termios},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
     },
     unistd::Pid,
 };
@@ -43,6 +44,8 @@ const TRANSCRIPT_LIMIT: usize = 256 * 1024;
 const DIAGNOSTIC_TAIL: usize = 8 * 1024;
 
 const CTRL_A: &[u8] = b"\x01";
+const CTRL_N: &[u8] = b"\x0e";
+const CTRL_P: &[u8] = b"\x10";
 const CTRL_Q: &[u8] = b"\x11";
 const CTRL_S: &[u8] = b"\x13";
 const CTRL_Z: &[u8] = b"\x1a";
@@ -67,9 +70,13 @@ fn actual_binary_preserves_edits_and_restores_the_pty_on_every_exit_path() -> Re
     let temp = tempfile::tempdir().context("create PTY acceptance fixture")?;
 
     normal_edit_undo_resize_save_and_quit(temp.path())?;
+    directory_quick_open_deduplicates_symlink_alias(temp.path())?;
     failed_save_keeps_dirty_text_and_quit_guard(temp.path())?;
+    signal_exit_restores_terminal(temp.path(), Signal::SIGINT)?;
+    signal_exit_restores_terminal(temp.path(), Signal::SIGQUIT)?;
     signal_exit_restores_terminal(temp.path(), Signal::SIGTERM)?;
     signal_exit_restores_terminal(temp.path(), Signal::SIGHUP)?;
+    suspend_restores_and_resume_reenters_the_terminal(temp.path())?;
 
     Ok(())
 }
@@ -137,6 +144,66 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+fn directory_quick_open_deduplicates_symlink_alias(directory: &Path) -> Result<()> {
+    const READY: &str = "ALPHA1_READY_SENTINEL";
+    const OPENED: &str = "ALPHA1_QUICK_OPEN_BODY";
+
+    let root = directory.join("quick-open-repo");
+    fs::create_dir_all(root.join("src")).context("create quick-open src")?;
+    fs::create_dir_all(root.join("aliases")).context("create quick-open aliases")?;
+    fs::write(root.join("README.md"), format!("{READY}\n")).context("write quick-open README")?;
+    fs::write(root.join("src/日本 語.rs"), format!("{OPENED}\n"))
+        .context("write quick-open target")?;
+    std::os::unix::fs::symlink("../src/日本 語.rs", root.join("aliases/日本 語.rs"))
+        .context("create quick-open symlink alias")?;
+
+    let pair = open_pty()?;
+    let termios_before = pair
+        .master
+        .get_termios()
+        .context("PTY does not expose its initial termios")?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+    session.assert_raw_mode_enabled(&termios_before)?;
+    session.wait_for_screen("directory README ready", ACTION_TIMEOUT, |screen| {
+        screen.contains(READY) && screen.contains("quick-open-repo")
+    })?;
+
+    session.send(CTRL_P)?;
+    session.wait_for_screen("quick-open prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open:")
+    })?;
+    session.paste("日本 語.rs")?;
+    session.wait_for_screen("quick-open selected path", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: 日本 語.rs") && screen.contains("src/日本 語.rs")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("quick-open target opened", ACTION_TIMEOUT, |screen| {
+        screen.contains(OPENED)
+            && screen.contains("opened src/日本 語.rs")
+            && screen.contains("2/2")
+    })?;
+
+    session.send(CTRL_P)?;
+    session.paste("aliases/日本 語.rs")?;
+    session.wait_for_screen("quick-open alias selected", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: aliases/日本 語.rs") && screen.contains("src/日本 語.rs")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("quick-open alias deduplicated", ACTION_TIMEOUT, |screen| {
+        screen.contains(OPENED)
+            && screen.contains("already open src/日本 語.rs")
+            && screen.contains("2/2")
+            && !screen.contains("2/3")
+    })?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "quick-open zec exit failed: {status}");
+    session.assert_terminal_restored(&termios_before)?;
+    Ok(())
+}
+
 fn failed_save_keeps_dirty_text_and_quit_guard(directory: &Path) -> Result<()> {
     const MARKER: &str = "UNSAVED-失敗";
 
@@ -150,9 +217,13 @@ fn failed_save_keeps_dirty_text_and_quit_guard(directory: &Path) -> Result<()> {
         .master
         .get_termios()
         .context("PTY does not expose its initial termios")?;
-    let mut session = PtySession::spawn(pair, &[])?;
+    let mut session = PtySession::spawn(pair, &[directory.as_os_str()])?;
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&termios_before)?;
+    session.send(CTRL_N)?;
+    session.wait_for_screen("scratch tab", ACTION_TIMEOUT, |screen| {
+        screen.contains("Untitled 1")
+    })?;
 
     session.paste(MARKER)?;
     session.wait_for_screen("dirty scratch text", ACTION_TIMEOUT, |screen| {
@@ -199,8 +270,7 @@ fn failed_save_keeps_dirty_text_and_quit_guard(directory: &Path) -> Result<()> {
 }
 
 fn signal_exit_restores_terminal(directory: &Path, signal: Signal) -> Result<()> {
-    let signal_number = signal as i32;
-    let path = directory.join(format!("signal-{signal_number}.txt"));
+    let path = directory.join(format!("signal-{}.txt", signal as i32));
     fs::write(&path, "clean signal fixture\n").context("write signal fixture")?;
 
     let pair = open_pty()?;
@@ -215,17 +285,49 @@ fn signal_exit_restores_terminal(directory: &Path, signal: Signal) -> Result<()>
     session.send_signal(signal)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(
-        !status.success() && status.signal().is_none() && status.exit_code() == 1,
-        "{signal:?} bypassed zec's normal error exit: {status}"
+        status.success(),
+        "{signal:?} did not use a clean exit: {status}"
     );
-    session.wait_for_raw(
-        "handled signal diagnostic",
-        format!("terminated by signal {signal_number}").as_bytes(),
-        EXIT_TIMEOUT,
-    )?;
     session.assert_terminal_restored(&termios_before)?;
 
     Ok(())
+}
+
+fn suspend_restores_and_resume_reenters_the_terminal(directory: &Path) -> Result<()> {
+    const TOKEN: &str = "resumed-after-sigtstp";
+    let path = directory.join("suspend-resume.txt");
+    fs::write(&path, "before suspend\n").context("write suspend fixture")?;
+
+    let pair = open_pty()?;
+    let termios_before = pair
+        .master
+        .get_termios()
+        .context("PTY does not expose its initial termios")?;
+    let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
+    session.wait_ready()?;
+    session.assert_raw_mode_enabled(&termios_before)?;
+
+    session.send_signal(Signal::SIGTSTP)?;
+    session.wait_for_stop(EXIT_TIMEOUT)?;
+    session.assert_terminal_restored(&termios_before)?;
+
+    session.send_signal(Signal::SIGCONT)?;
+    session.wait_ready()?;
+    session.assert_raw_mode_enabled(&termios_before)?;
+    session.send(CTRL_A)?;
+    session.paste(TOKEN)?;
+    session.send(CTRL_S)?;
+    session.wait_for_screen("save after SIGCONT", ACTION_TIMEOUT, |screen| {
+        screen.contains("saved  |  zec")
+    })?;
+    ensure!(
+        fs::read(&path).context("read suspend fixture after save")? == TOKEN.as_bytes(),
+        "editing after SIGCONT did not reach disk"
+    );
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "post-SIGCONT exit failed: {status}");
+    session.assert_terminal_restored(&termios_before)
 }
 
 fn open_pty() -> Result<PtyPair> {
@@ -375,8 +477,36 @@ impl PtySession {
             .and_then(|child| child.process_id())
             .context("zec child has no process id")?;
         let pid = i32::try_from(pid).context("zec pid does not fit pid_t")?;
-        kill(Pid::from_raw(pid), signal)
-            .with_context(|| format!("send {signal:?} to zec pid {pid}"))
+        killpg(Pid::from_raw(pid), signal)
+            .with_context(|| format!("send {signal:?} to zec process group {pid}"))
+    }
+
+    fn wait_for_stop(&mut self, timeout: Duration) -> Result<()> {
+        let pid = self
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .context("zec child has no process id")?;
+        let pid = Pid::from_raw(i32::try_from(pid).context("zec pid does not fit pid_t")?);
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.drain_available()?;
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED))
+                .context("wait for zec to stop")?
+            {
+                WaitStatus::Stopped(_, Signal::SIGSTOP | Signal::SIGTSTP) => return Ok(()),
+                WaitStatus::StillAlive | WaitStatus::Continued(_) => {}
+                status => bail!(
+                    "zec exited instead of stopping: {status:?}\n{}",
+                    self.diagnostic()
+                ),
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                bail!("timed out waiting for zec to stop\n{}", self.diagnostic());
+            }
+            self.receive_one((deadline - now).min(EVENT_POLL))?;
+        }
     }
 
     fn ensure_running(&mut self, message: &str) -> Result<()> {

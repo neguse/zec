@@ -61,6 +61,18 @@ pub fn is_open(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_quick_open(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('p')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_project_search(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('f')
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
 pub fn is_close_tab(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('w')
@@ -95,12 +107,15 @@ pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
     (event.modifiers == CrosstermModifiers::CONTROL
         && matches!(
             event.code,
-            KeyCode::Char('c' | 'f' | 'g' | 'h' | 'n' | 'o' | 'q' | 'r' | 's' | 'w' | 'x')
+            KeyCode::Char('c' | 'f' | 'g' | 'h' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 'w' | 'x')
                 | KeyCode::PageUp
                 | KeyCode::PageDown
         ))
         || (event.modifiers == CrosstermModifiers::ALT
-            && matches!(event.code, KeyCode::PageUp | KeyCode::PageDown))
+            && matches!(
+                event.code,
+                KeyCode::Char('f') | KeyCode::PageUp | KeyCode::PageDown
+            ))
 }
 
 pub fn to_gpui_keystroke(event: KeyEvent) -> Option<Keystroke> {
@@ -321,6 +336,16 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_plain_control_p_press_as_quick_open() {
+        assert_plain_control_press_only(is_quick_open, 'p');
+    }
+
+    #[test]
+    fn recognizes_only_plain_alt_f_press_as_project_search() {
+        assert_plain_alt_key_press_only(is_project_search, KeyCode::Char('f'));
+    }
+
+    #[test]
     fn recognizes_only_plain_control_w_press_as_close_tab() {
         assert_plain_control_press_only(is_close_tab, 'w');
     }
@@ -440,7 +465,7 @@ mod tests {
             CrosstermModifiers::CONTROL,
             KeyEventKind::Repeat,
         )));
-        for character in ['c', 'g', 'h', 'n', 'o', 'r', 'w', 'x'] {
+        for character in ['c', 'g', 'h', 'n', 'o', 'p', 'r', 'w', 'x'] {
             assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
                 KeyCode::Char(character),
                 CrosstermModifiers::CONTROL,
@@ -450,6 +475,17 @@ mod tests {
                 KeyCode::Char(character),
                 CrosstermModifiers::CONTROL,
                 KeyEventKind::Release,
+            )));
+        }
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            assert!(is_intercepted_shortcut(&KeyEvent::new_with_kind(
+                KeyCode::Char('f'),
+                CrosstermModifiers::ALT,
+                kind,
             )));
         }
         for code in [KeyCode::PageUp, KeyCode::PageDown] {

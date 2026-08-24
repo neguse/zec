@@ -2,11 +2,13 @@ mod clipboard;
 mod input;
 mod prompt;
 mod render;
+mod repository;
 mod tabs;
 mod terminal;
+mod tracing_fs;
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     env,
     ffi::OsString,
     io::{self, IsTerminal as _},
@@ -15,10 +17,10 @@ use std::{
     sync::{Arc, mpsc},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use editor::{
     Anchor, Bias, Editor, EditorStyle, SelectionEffects,
-    actions::{Cut, Undo},
+    actions::{Cut, SelectAll, Undo},
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
     scroll::Autoscroll,
 };
@@ -45,20 +47,53 @@ use render::{
     BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, TextPosition,
     Viewport,
 };
+use repository::{
+    CompletionDisposition, LatestSearch, LatestSearchState, ProjectSearchOutput, QuickOpenMatch,
+    RepositoryIndex, RepositoryRoot, SearchGeneration, start_literal_project_search,
+};
+use serde::Deserialize;
+use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tabs::{Direction as TabDirection, TabLabel};
 use terminal::{InputReader, ScrollDirection, TerminalEvent, TerminalSession};
 use theme::ActiveTheme as _;
+use tracing_fs::{FsPathKind, RecordingFs, classify_single_file_accesses};
 use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G go to line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [DIRECTORY | FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-P quick open, Alt-F project search, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const QUICK_OPEN_LIMIT: usize = 100;
+const MAX_CONCURRENT_PROJECT_SEARCHES: usize = 2;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
     Edit(Vec<PathBuf>),
+    Alpha1Probe(Alpha1Probe),
     Smoke,
     Help,
+}
+#[derive(Debug, Eq, PartialEq)]
+enum Alpha1Probe {
+    RootIdentity {
+        root: PathBuf,
+        inputs: Vec<Alpha1RootInput>,
+    },
+    OutsideTrace(PathBuf),
+    ProjectSearch {
+        root: PathBuf,
+        query: String,
+    },
+    StaleResult(PathBuf),
+    SearchFailure(PathBuf),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Alpha1RootInput {
+    id: String,
+    cwd: PathBuf,
+    argument: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -97,6 +132,248 @@ struct OpenPrompt {
 struct GoToLinePrompt {
     prompt: LinePrompt,
     feedback: Option<String>,
+}
+
+#[derive(Debug)]
+struct QuickOpenPrompt {
+    prompt: LinePrompt,
+    matches: Vec<QuickOpenMatch>,
+    selected: usize,
+    feedback: Option<String>,
+}
+
+impl QuickOpenPrompt {
+    fn new(index: &RepositoryIndex) -> Self {
+        let mut prompt = Self {
+            prompt: LinePrompt::new(),
+            matches: Vec::new(),
+            selected: 0,
+            feedback: None,
+        };
+        prompt.refresh(index);
+        prompt
+    }
+
+    fn refresh(&mut self, index: &RepositoryIndex) {
+        self.matches = index.quick_open(self.prompt.text(), QUICK_OPEN_LIMIT);
+        self.selected = 0;
+        self.feedback = None;
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let Some(next) = tabs::adjacent_index(self.selected, self.matches.len(), direction) else {
+            return;
+        };
+        self.selected = next;
+    }
+
+    fn selected_file_index(&self) -> Option<usize> {
+        self.matches
+            .get(self.selected)
+            .map(|matched| matched.file_index())
+    }
+
+    fn status(&self, message: Option<&str>, index: &RepositoryIndex) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Quick open: ");
+        let cursor_column = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let position = self
+            .selected_file_index()
+            .map_or(0, |_| self.selected.saturating_add(1));
+        let selected_path = self
+            .selected_file_index()
+            .and_then(|file_index| index.file(file_index))
+            .map(|file| file.relative_path())
+            .unwrap_or("no matches");
+        let mut status = format!(
+            "{prefix}{}  {position}/{}  {selected_path}  Enter open  ↑/↓ select  Esc cancel",
+            self.prompt.text(),
+            self.matches.len()
+        );
+        if let Some(feedback) = &self.feedback {
+            status.push_str("  |  ");
+            status.push_str(feedback);
+        }
+        (status, cursor_column)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScheduledProjectSearch {
+    generation: SearchGeneration,
+    query: String,
+}
+
+struct ProjectSearchCompletion {
+    disposition: CompletionDisposition,
+    next: Option<ScheduledProjectSearch>,
+}
+
+/// Bounds expensive Zed full-search work while keeping prompt state on the
+/// newest generation. Two requests may run concurrently so a replacement
+/// query never waits for the request it superseded; additional edits coalesce
+/// into one latest-only queue entry.
+struct ProjectSearchScheduler<R, E> {
+    reducer: LatestSearch<String, R, E>,
+    active: BTreeSet<SearchGeneration>,
+    queued: Option<ScheduledProjectSearch>,
+}
+
+impl<R, E> Default for ProjectSearchScheduler<R, E> {
+    fn default() -> Self {
+        Self {
+            reducer: LatestSearch::default(),
+            active: BTreeSet::new(),
+            queued: None,
+        }
+    }
+}
+
+impl<R, E> ProjectSearchScheduler<R, E> {
+    fn state(&self) -> &LatestSearchState<String, R, E> {
+        self.reducer.state()
+    }
+
+    fn request(&mut self, query: String) -> Result<Option<ScheduledProjectSearch>> {
+        let generation = self.reducer.begin(query.clone())?;
+        let request = ScheduledProjectSearch { generation, query };
+        if self.active.len() < MAX_CONCURRENT_PROJECT_SEARCHES {
+            let inserted = self.active.insert(generation);
+            debug_assert!(inserted, "new search generation must be unique");
+            Ok(Some(request))
+        } else {
+            self.queued = Some(request);
+            Ok(None)
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.reducer.cancel();
+        self.queued = None;
+    }
+
+    fn complete(
+        &mut self,
+        generation: SearchGeneration,
+        result: std::result::Result<R, E>,
+    ) -> ProjectSearchCompletion {
+        if !self.active.remove(&generation) {
+            return ProjectSearchCompletion {
+                disposition: CompletionDisposition::DiscardedStale,
+                next: None,
+            };
+        }
+
+        let disposition = self.reducer.complete(generation, result);
+        let next = if self.active.len() < MAX_CONCURRENT_PROJECT_SEARCHES {
+            self.queued.take().inspect(|request| {
+                let inserted = self.active.insert(request.generation);
+                debug_assert!(inserted, "queued search generation must be unique");
+            })
+        } else {
+            None
+        };
+        ProjectSearchCompletion { disposition, next }
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.active.len()
+    }
+}
+
+struct ProjectSearchPrompt {
+    prompt: LinePrompt,
+    scheduler: ProjectSearchScheduler<ProjectSearchOutput, String>,
+    selected: usize,
+    tasks: BTreeMap<SearchGeneration, Task<()>>,
+}
+
+impl ProjectSearchPrompt {
+    fn new() -> Self {
+        Self {
+            prompt: LinePrompt::new(),
+            scheduler: ProjectSearchScheduler::default(),
+            selected: 0,
+            tasks: BTreeMap::new(),
+        }
+    }
+
+    fn output(&self) -> Option<&ProjectSearchOutput> {
+        match self.scheduler.state() {
+            LatestSearchState::Ready { result, .. } => Some(result),
+            _ => None,
+        }
+    }
+
+    fn selected_hit(&self) -> Option<&repository::ProjectSearchHit> {
+        self.output()
+            .and_then(|output| output.matches.get(self.selected))
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let len = self.output().map_or(0, |output| output.matches.len());
+        let Some(next) = tabs::adjacent_index(self.selected, len, direction) else {
+            return;
+        };
+        self.selected = next;
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Project search: ");
+        let cursor_column = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let detail = match self.scheduler.state() {
+            LatestSearchState::Idle => "type a case-sensitive literal query".to_owned(),
+            LatestSearchState::Running { .. } => "searching…".to_owned(),
+            LatestSearchState::Failed { error, .. } => format!("search failed: {error}"),
+            LatestSearchState::Ready { result, .. } => {
+                let position = if result.matches.is_empty() {
+                    0
+                } else {
+                    self.selected.saturating_add(1)
+                };
+                let total = if result.source_limit_reached {
+                    format!("{}+", result.total_hits)
+                } else {
+                    result.total_hits.to_string()
+                };
+                let selected = result
+                    .matches
+                    .get(self.selected)
+                    .map(|hit| {
+                        format!(
+                            "{}:{}:{}  {}",
+                            hit.summary.path,
+                            hit.summary.line,
+                            hit.summary.column,
+                            hit.summary.preview
+                        )
+                    })
+                    .unwrap_or_else(|| "no matches".to_owned());
+                format!("{position}/{total}  {selected}")
+            }
+        };
+        (
+            format!(
+                "{prefix}{}  {detail}  Enter open  ↑/↓ select  Esc cancel",
+                self.prompt.text()
+            ),
+            cursor_column,
+        )
+    }
 }
 
 impl GoToLinePrompt {
@@ -255,6 +532,7 @@ impl ActiveSearch {
 fn main() -> Result<()> {
     match parse_command(env::args_os().skip(1))? {
         Command::Edit(paths) => run_interactive(paths),
+        Command::Alpha1Probe(probe) => run_alpha_1_probe(probe),
         Command::Smoke => {
             run_smoke();
             Ok(())
@@ -284,6 +562,55 @@ fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
         }
         return Ok(Command::Smoke);
     }
+    if first == "--alpha-1-probe" {
+        let case = arguments
+            .get(1)
+            .and_then(|case| case.to_str())
+            .context("--alpha-1-probe requires a UTF-8 case name")?;
+        let one_path = |name: &str| -> Result<PathBuf> {
+            ensure!(
+                arguments.len() == 3,
+                "--alpha-1-probe {name} requires exactly one path"
+            );
+            Ok(arguments[2].clone().into())
+        };
+        let probe = match case {
+            "root-identity" => {
+                ensure!(
+                    arguments.len() == 4,
+                    "--alpha-1-probe root-identity requires ROOT INPUTS_JSON"
+                );
+                let encoded = arguments[3]
+                    .to_str()
+                    .context("root-identity inputs must be UTF-8 JSON")?;
+                let inputs =
+                    serde_json::from_str(encoded).context("parse root-identity inputs JSON")?;
+                Alpha1Probe::RootIdentity {
+                    root: arguments[2].clone().into(),
+                    inputs,
+                }
+            }
+            "outside-trace" => Alpha1Probe::OutsideTrace(one_path(case)?),
+            "stale-result" => Alpha1Probe::StaleResult(one_path(case)?),
+            "search-failure" => Alpha1Probe::SearchFailure(one_path(case)?),
+            "project-search" => {
+                ensure!(
+                    arguments.len() == 4,
+                    "--alpha-1-probe project-search requires ROOT QUERY"
+                );
+                let query = arguments[3]
+                    .clone()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("project-search query must be UTF-8"))?;
+                Alpha1Probe::ProjectSearch {
+                    root: arguments[2].clone().into(),
+                    query,
+                }
+            }
+            _ => bail!("unknown --alpha-1-probe case: {case}"),
+        };
+        return Ok(Command::Alpha1Probe(probe));
+    }
 
     let mut paths = Vec::new();
     let mut positional_only = false;
@@ -304,13 +631,28 @@ fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
     Ok(Command::Edit(paths))
 }
 
-fn absolute_unique_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+fn absolute_unique_paths_from(cwd: &Path, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    ensure!(
+        cwd.is_absolute(),
+        "startup cwd must be absolute: {}",
+        cwd.display()
+    );
     let mut unique_paths = HashSet::new();
     paths
         .into_iter()
-        .map(|path| {
-            std::path::absolute(&path)
-                .with_context(|| format!("failed to make {} absolute", path.display()))
+        .map(|input| {
+            let path = if input.is_absolute() {
+                input.clone()
+            } else {
+                cwd.join(&input)
+            };
+            std::path::absolute(&path).with_context(|| {
+                format!(
+                    "failed to make {} absolute from {}",
+                    input.display(),
+                    cwd.display()
+                )
+            })
         })
         .filter_map(|path| match path {
             Ok(path) if unique_paths.insert(path.clone()) => Some(Ok(path)),
@@ -320,8 +662,28 @@ fn absolute_unique_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         .collect()
 }
 
+#[cfg(test)]
+fn absolute_unique_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let cwd = env::current_dir().context("could not determine the current directory")?;
+    absolute_unique_paths_from(&cwd, paths)
+}
+
+fn resolve_startup_invocation(cwd: &Path, arguments: Vec<PathBuf>) -> Result<(Vec<PathBuf>, bool)> {
+    let implicit_root = arguments.is_empty();
+    let paths = if implicit_root {
+        vec![
+            std::path::absolute(cwd)
+                .with_context(|| format!("failed to make cwd {} absolute", cwd.display()))?,
+        ]
+    } else {
+        absolute_unique_paths_from(cwd, arguments)?
+    };
+    Ok((paths, implicit_root))
+}
+
 fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
-    let paths = absolute_unique_paths(paths)?;
+    let cwd = env::current_dir().context("could not determine the current directory")?;
+    let (paths, implicit_root) = resolve_startup_invocation(&cwd, paths)?;
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(
@@ -342,28 +704,37 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
     gpui_platform::headless().run(move |cx| {
         init_zed(cx);
         let services = file_services(cx);
-        let documents = if paths.is_empty() {
-            vec![open_document(None, services.clone(), cx)]
-        } else {
-            paths
-                .into_iter()
-                .map(|path| open_document(Some(path), services.clone(), cx))
-                .collect()
-        };
-
         cx.spawn(async move |cx| {
-            let mut tabs = Vec::with_capacity(documents.len());
-            let mut opened_buffer_ids = HashSet::new();
-            let mut next_untitled_id = 1usize;
-            for document in documents {
-                let mut document = match document.await {
-                    Ok(document) => document,
+            let startup = match prepare_startup(paths, implicit_root, &services, cx).await {
+                Ok(startup) => startup,
+                Err(error) => {
+                    let _ = error_sender.try_send(format!("failed to open repository: {error:#}"));
+                    let _ = cx.update(|cx| cx.quit());
+                    return;
+                }
+            };
+            let repository = startup.repository;
+            let mut startup_errors = startup.errors;
+            let mut documents = startup.documents;
+            if documents.is_empty() {
+                match cx
+                    .update(|cx| open_document(None, services.clone(), cx))
+                    .await
+                {
+                    Ok(document) => documents.push(document),
                     Err(error) => {
-                        let _ = error_sender.try_send(format!("failed to open file: {error:#}"));
+                        let _ = error_sender
+                            .try_send(format!("failed to create an empty buffer: {error:#}"));
                         let _ = cx.update(|cx| cx.quit());
                         return;
                     }
-                };
+                }
+            }
+
+            let mut tabs = Vec::with_capacity(documents.len());
+            let mut opened_buffer_ids = HashSet::new();
+            let mut next_untitled_id = 1usize;
+            for mut document in documents {
                 if !opened_buffer_ids.insert(document.buffer.entity_id()) {
                     continue;
                 }
@@ -371,26 +742,31 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     document.untitled_label = Some(untitled_label(next_untitled_id));
                     next_untitled_id = next_untitled_id.saturating_add(1);
                 }
-                let tab = match create_document_tab(
+                match create_document_tab(
                     document,
                     services.buffer_store.clone(),
                     redraw_sender.clone(),
                     cx,
                 ) {
-                    Ok(tab) => tab,
-                    Err(error) => {
-                        let _ = error_sender
-                            .try_send(format!("failed to open headless editor window: {error:#}"));
-                        let _ = cx.update(|cx| cx.quit());
-                        return;
-                    }
+                    Ok(tab) => tabs.push(tab),
+                    Err(error) => startup_errors
+                        .push(format!("failed to open headless editor window: {error:#}")),
+                }
+            }
+            if tabs.is_empty() {
+                let error = if startup_errors.is_empty() {
+                    "startup produced no editor tabs".to_owned()
+                } else {
+                    startup_errors.join("  |  ")
                 };
-                tabs.push(tab);
+                let _ = error_sender.try_send(error);
+                let _ = cx.update(|cx| cx.quit());
+                return;
             }
 
             let mut active_index = 0;
             let mut failure = None;
-            let mut message = None;
+            let mut message = (!startup_errors.is_empty()).then(|| startup_errors.join("  |  "));
             let mut quit_armed = false;
             let mut close_armed = false;
             let mut reload_armed = false;
@@ -399,11 +775,16 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
             let mut save_as_prompt: Option<SaveAsPrompt> = None;
             let mut open_prompt: Option<OpenPrompt> = None;
             let mut go_to_line_prompt: Option<GoToLinePrompt> = None;
+            let mut quick_open_prompt: Option<QuickOpenPrompt> = None;
+            let mut project_search_prompt: Option<ProjectSearchPrompt> = None;
 
             loop {
                 let editor_window = tabs[active_index].editor_window;
                 let input_window: AnyWindowHandle = editor_window.into();
-                let status_label = tab_status(&tabs, active_index, cx);
+                let mut status_label = tab_status(&tabs, active_index, cx);
+                if let Some(repository) = &repository {
+                    status_label = format!("{}  {status_label}", repository.root.label());
+                }
                 let viewport = tabs[active_index].viewport;
                 let manual_vertical_scroll = tabs[active_index].manual_vertical_scroll;
                 let last_cursor = tabs[active_index].last_cursor;
@@ -423,6 +804,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     frame_area,
                                     &status_label,
                                     message.as_deref(),
+                                    quick_open_prompt
+                                        .as_ref()
+                                        .zip(repository.as_ref().map(|repository| repository.index.as_ref())),
+                                    project_search_prompt.as_ref(),
                                     active_search.as_ref(),
                                     save_as_prompt.as_ref(),
                                     open_prompt.as_ref(),
@@ -543,6 +928,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         save_as_prompt = None;
                         open_prompt = None;
                         go_to_line_prompt = None;
+                        quick_open_prompt = None;
+                        project_search_prompt = None;
                         close_armed = false;
                         message = Some("tab closed".to_owned());
                     }
@@ -569,6 +956,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             save_as_prompt = None;
                             open_prompt = None;
                             go_to_line_prompt = None;
+                            quick_open_prompt = None;
+                            project_search_prompt = None;
                             active_index = next_index;
                             quit_armed = false;
                             message = None;
@@ -581,6 +970,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                             && active_search.is_none()
                         {
                             let direction = if input::is_scroll_page_up(&event) {
@@ -606,6 +997,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                         {
                             let state = document_state(&tabs[active_index].document, cx);
                             if !state.has_file() {
@@ -661,6 +1054,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                         {
                             let state = document_state(&tabs[active_index].document, cx);
                             if state.has_file() {
@@ -700,6 +1095,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                         {
                             message = None;
                             if let Some(search) = active_search.as_mut() {
@@ -723,6 +1120,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                         {
                             message = None;
                             if let Some(search) = active_search.as_mut() {
@@ -753,6 +1152,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                         {
                             if active_search.take().is_some()
                                 && let Err(error) = close_search(&editor_window, cx)
@@ -769,6 +1170,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                         {
                             if active_search.take().is_some()
                                 && let Err(error) = close_search(&editor_window, cx)
@@ -780,6 +1183,50 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             open_prompt = Some(OpenPrompt::default());
                         }
                     }
+                    TerminalEvent::Key(event) if input::is_quick_open(&event) => {
+                        quit_armed = false;
+                        let Some(repository) = &repository else {
+                            quick_open_prompt = None;
+                            message =
+                                Some("quick open requires a repository directory".to_owned());
+                            continue;
+                        };
+                        if active_search.take().is_some()
+                            && let Err(error) = close_search(&editor_window, cx)
+                        {
+                            failure = Some(format!("failed to close buffer search: {error:#}"));
+                            break;
+                        }
+                        save_as_prompt = None;
+                        open_prompt = None;
+                        go_to_line_prompt = None;
+                        project_search_prompt = None;
+                        quick_open_prompt = Some(QuickOpenPrompt::new(&repository.index));
+                        message = None;
+                    }
+
+                    TerminalEvent::Key(event) if input::is_project_search(&event) => {
+                        quit_armed = false;
+                        let Some(_repository) = &repository else {
+                            project_search_prompt = None;
+                            message =
+                                Some("project search requires a repository directory".to_owned());
+                            continue;
+                        };
+                        if active_search.take().is_some()
+                            && let Err(error) = close_search(&editor_window, cx)
+                        {
+                            failure = Some(format!("failed to close buffer search: {error:#}"));
+                            break;
+                        }
+                        save_as_prompt = None;
+                        open_prompt = None;
+                        go_to_line_prompt = None;
+                        quick_open_prompt = None;
+                        project_search_prompt = Some(ProjectSearchPrompt::new());
+                        message = None;
+                    }
+
                     TerminalEvent::Key(event) if input::is_new_tab(&event) => {
                         quit_armed = false;
                         if active_search.take().is_some()
@@ -791,6 +1238,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         save_as_prompt = None;
                         open_prompt = None;
                         go_to_line_prompt = None;
+                        quick_open_prompt = None;
+                        project_search_prompt = None;
                         let mut document = match cx
                             .update(|cx| open_document(None, services.clone(), cx))
                             .await
@@ -823,6 +1272,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                             && active_search.is_none()
                             && input::is_copy(&event) =>
                     {
@@ -853,6 +1304,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                             && active_search.is_none()
                             && input::is_cut(&event) =>
                     {
@@ -890,6 +1343,255 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             break;
                         }
                         message = Some("cut".to_owned());
+                    }
+                    TerminalEvent::Key(event) if quick_open_prompt.is_some() => {
+                        let action = quick_open_prompt
+                            .as_mut()
+                            .expect("Quick open prompt checked above")
+                            .prompt
+                            .handle_key(&event);
+                        if action != PromptAction::Ignored {
+                            quit_armed = false;
+                            message = None;
+                        }
+
+                        match action {
+                            PromptAction::Changed => {
+                                let repository =
+                                    repository.as_ref().expect("Quick open requires repository");
+                                quick_open_prompt
+                                    .as_mut()
+                                    .expect("Quick open prompt checked above")
+                                    .refresh(&repository.index);
+                            }
+                            PromptAction::Next => quick_open_prompt
+                                .as_mut()
+                                .expect("Quick open prompt checked above")
+                                .step(TabDirection::Next),
+                            PromptAction::Previous => quick_open_prompt
+                                .as_mut()
+                                .expect("Quick open prompt checked above")
+                                .step(TabDirection::Previous),
+                            PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                let selected = {
+                                    let repository =
+                                        repository.as_ref().expect("Quick open requires repository");
+                                    quick_open_prompt
+                                        .as_ref()
+                                        .expect("Quick open prompt checked above")
+                                        .selected_file_index()
+                                        .and_then(|file_index| {
+                                            repository.index.file(file_index)
+                                        })
+                                        .and_then(|file| {
+                                            file.project_path().cloned().map(|project_path| {
+                                                (
+                                                    project_path,
+                                                    file.canonical_path().to_path_buf(),
+                                                    file.relative_path().to_owned(),
+                                                )
+                                            })
+                                        })
+                                };
+                                let Some((project_path, path, label)) = selected else {
+                                    quick_open_prompt
+                                        .as_mut()
+                                        .expect("Quick open prompt checked above")
+                                        .feedback = Some("no matching file".to_owned());
+                                    continue;
+                                };
+
+                                match load_project_document(
+                                    project_path,
+                                    &path,
+                                    &services,
+                                    cx,
+                                )
+                                .await
+                                {
+                                    Ok(document) => {
+                                        if let Some(index) = tabs.iter().position(|tab| {
+                                            tab.document.buffer == document.buffer
+                                        }) {
+                                            active_index = index;
+                                            quick_open_prompt = None;
+                                            message = Some(format!("already open {label}"));
+                                        } else {
+                                            match create_document_tab(
+                                                document,
+                                                services.buffer_store.clone(),
+                                                redraw_sender.clone(),
+                                                cx,
+                                            ) {
+                                                Ok(tab) => {
+                                                    tabs.push(tab);
+                                                    active_index = tabs.len() - 1;
+                                                    quick_open_prompt = None;
+                                                    message = Some(format!("opened {label}"));
+                                                }
+                                                Err(error) => {
+                                                    quick_open_prompt
+                                                        .as_mut()
+                                                        .expect(
+                                                            "Quick open prompt checked above",
+                                                        )
+                                                        .feedback = Some(format!(
+                                                        "open failed: {error:#}"
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        quick_open_prompt
+                                            .as_mut()
+                                            .expect("Quick open prompt checked above")
+                                            .feedback =
+                                            Some(format!("open failed: {error:#}"));
+                                    }
+                                }
+                            }
+                            PromptAction::Cancel => {
+                                quick_open_prompt = None;
+                                message = Some("quick open cancelled".to_owned());
+                            }
+                            PromptAction::CursorMoved | PromptAction::Ignored => {}
+                        }
+                    }
+
+                    TerminalEvent::Key(event) if project_search_prompt.is_some() => {
+                        let action = project_search_prompt
+                            .as_mut()
+                            .expect("Project search prompt checked above")
+                            .prompt
+                            .handle_key(&event);
+                        if action != PromptAction::Ignored {
+                            quit_armed = false;
+                            message = None;
+                        }
+
+                        match action {
+                            PromptAction::Changed => {
+                                let repository = repository
+                                    .as_ref()
+                                    .expect("Project search requires repository");
+                                if let Err(error) = begin_project_search(
+                                    project_search_prompt
+                                        .as_mut()
+                                        .expect("Project search prompt checked above"),
+                                    repository,
+                                    &services,
+                                    redraw_sender.clone(),
+                                    cx,
+                                ) {
+                                    message =
+                                        Some(format!("project search failed: {error:#}"));
+                                }
+                            }
+                            PromptAction::Next => project_search_prompt
+                                .as_mut()
+                                .expect("Project search prompt checked above")
+                                .step(TabDirection::Next),
+                            PromptAction::Previous => project_search_prompt
+                                .as_mut()
+                                .expect("Project search prompt checked above")
+                                .step(TabDirection::Previous),
+                            PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                let selected = project_search_prompt
+                                    .as_ref()
+                                    .expect("Project search prompt checked above")
+                                    .selected_hit()
+                                    .cloned();
+                                let Some(hit) = selected else {
+                                    message = Some("no project search result".to_owned());
+                                    continue;
+                                };
+                                let repository = repository
+                                    .as_ref()
+                                    .expect("Project search requires repository");
+                                let Some(indexed_file) =
+                                    repository.index.file(hit.file_index)
+                                else {
+                                    message = Some(
+                                        "project search result is no longer indexed".to_owned(),
+                                    );
+                                    continue;
+                                };
+                                let path = indexed_file.canonical_path().to_path_buf();
+                                let label = format!(
+                                    "{}:{}:{}",
+                                    hit.summary.path,
+                                    hit.summary.line,
+                                    hit.summary.column
+                                );
+
+                                if let Err(error) = assign_file_language(
+                                    &path,
+                                    &hit.buffer,
+                                    services.language_registry.clone(),
+                                    cx,
+                                )
+                                .await
+                                {
+                                    message = Some(format!(
+                                        "project search open failed: {error:#}"
+                                    ));
+                                    continue;
+                                }
+
+                                let already_open = tabs
+                                    .iter()
+                                    .position(|tab| tab.document.buffer == hit.buffer);
+                                if let Some(index) = already_open {
+                                    active_index = index;
+                                } else {
+                                    let document = OpenDocument {
+                                        buffer: hit.buffer.clone(),
+                                        untitled_label: None,
+                                    };
+                                    match create_document_tab(
+                                        document,
+                                        services.buffer_store.clone(),
+                                        redraw_sender.clone(),
+                                        cx,
+                                    ) {
+                                        Ok(tab) => {
+                                            tabs.push(tab);
+                                            active_index = tabs.len() - 1;
+                                        }
+                                        Err(error) => {
+                                            message = Some(format!(
+                                                "project search open failed: {error:#}"
+                                            ));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                tabs[active_index].manual_vertical_scroll = false;
+                                tabs[active_index].last_cursor = None;
+                                let target_window = tabs[active_index].editor_window;
+                                match move_caret_to_project_search_hit(&target_window, &hit, cx) {
+                                    Ok(()) => {
+                                        project_search_prompt = None;
+                                        message = Some(if already_open.is_some() {
+                                            format!("already open {label}")
+                                        } else {
+                                            format!("opened {label}")
+                                        });
+                                    }
+                                    Err(error) => {
+                                        message = Some(format!(
+                                            "project search open failed: {error:#}"
+                                        ));
+                                    }
+                                }
+                            }
+                            PromptAction::Cancel => {
+                                project_search_prompt = None;
+                                message = Some("project search cancelled".to_owned());
+                            }
+                            PromptAction::CursorMoved | PromptAction::Ignored => {}
+                        }
                     }
                     TerminalEvent::Key(event) if input::is_intercepted_shortcut(&event) => {}
                     TerminalEvent::Key(event) if save_as_prompt.is_some() => {
@@ -995,13 +1697,35 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     .prompt
                                     .text()
                                     .to_owned();
-                                let document = match resolve_path(&input) {
-                                    Ok(path) => {
-                                        cx.update(|cx| {
-                                            open_document(Some(path), services.clone(), cx)
-                                        })
-                                        .await
-                                    }
+                                let path = match &repository {
+                                    Some(repository) => resolve_path_from(
+                                        repository.root.requested_path(),
+                                        &input,
+                                    ),
+                                    None => resolve_path(&input),
+                                };
+                                let document = match path {
+                                    Ok(path) => match &repository {
+                                        Some(repository) => {
+                                            open_repository_document(
+                                                &path,
+                                                repository,
+                                                &services,
+                                                cx,
+                                            )
+                                            .await
+                                        }
+                                        None => {
+                                            cx.update(|cx| {
+                                                open_document(
+                                                    Some(path),
+                                                    services.clone(),
+                                                    cx,
+                                                )
+                                            })
+                                            .await
+                                        }
+                                    },
                                     Err(error) => Err(error),
                                 };
 
@@ -1245,6 +1969,45 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             }
                         }
                     }
+                    TerminalEvent::Paste(text) if project_search_prompt.is_some() => {
+                        let changed = project_search_prompt
+                            .as_mut()
+                            .expect("Project search prompt checked above")
+                            .prompt
+                            .handle_paste(&text)
+                            == PromptAction::Changed;
+                        if changed {
+                            quit_armed = false;
+                            message = None;
+                            let repository = repository
+                                .as_ref()
+                                .expect("Project search requires repository");
+                            if let Err(error) = begin_project_search(
+                                project_search_prompt
+                                    .as_mut()
+                                    .expect("Project search prompt checked above"),
+                                repository,
+                                &services,
+                                redraw_sender.clone(),
+                                cx,
+                            ) {
+                                message = Some(format!("project search failed: {error:#}"));
+                            }
+                        }
+                    }
+                    TerminalEvent::Paste(text) if quick_open_prompt.is_some() => {
+                        let quick_open = quick_open_prompt
+                            .as_mut()
+                            .expect("Quick open prompt checked above");
+                        if quick_open.prompt.handle_paste(&text) == PromptAction::Changed {
+                            quit_armed = false;
+                            message = None;
+                            let repository =
+                                repository.as_ref().expect("Quick open requires repository");
+                            quick_open.refresh(&repository.index);
+                        }
+                    }
+
                     TerminalEvent::Paste(text) if save_as_prompt.is_some() => {
                         let save_as = save_as_prompt
                             .as_mut()
@@ -1316,6 +2079,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                             && active_search.is_none()
                         {
                             let tab = &mut tabs[active_index];
@@ -1339,6 +2104,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if save_as_prompt.is_none()
                             && open_prompt.is_none()
                             && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
                             && active_search.is_none()
                             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
                             && mouse.modifiers == KeyModifiers::NONE
@@ -1358,6 +2125,35 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 break;
                             }
                             message = None;
+                        }
+                    }
+                    TerminalEvent::ProjectSearchFinished { generation, result } => {
+                        let Some(project_search) = project_search_prompt.as_mut() else {
+                            continue;
+                        };
+                        let repository = repository
+                            .as_ref()
+                            .expect("Project search requires repository");
+                        match finish_project_search(
+                            project_search,
+                            generation,
+                            result,
+                            repository,
+                            &services,
+                            redraw_sender.clone(),
+                            cx,
+                        ) {
+                            Ok(CompletionDisposition::Published) => {
+                                quit_armed = false;
+                                close_armed = false;
+                                reload_armed = false;
+                                save_conflict_armed = false;
+                                message = None;
+                            }
+                            Ok(CompletionDisposition::DiscardedStale) => {}
+                            Err(error) => {
+                                message = Some(format!("project search failed: {error:#}"));
+                            }
                         }
                     }
                     TerminalEvent::ReloadFinished { buffer_id, result } => {
@@ -1405,7 +2201,16 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     }
                     TerminalEvent::Resize | TerminalEvent::Redraw => {}
                     TerminalEvent::Signal(signal) => {
-                        failure = Some(format!("terminated by signal {signal}"));
+                        if terminal::is_suspend_signal(signal) {
+                            if let Err(error) = terminal::suspend_and_resume(&mut terminal) {
+                                failure = Some(format!(
+                                    "failed to suspend and resume terminal: {error}"
+                                ));
+                                break;
+                            }
+                            message = Some("resumed".to_owned());
+                            continue;
+                        }
                         break;
                     }
                     TerminalEvent::Error(error) => {
@@ -1522,8 +2327,12 @@ struct CapturedEditorFrame {
 }
 
 fn file_services(cx: &mut App) -> FileServices {
-    let language_registry = native_language_registry(cx);
     let file_system: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
+    file_services_with_fs(cx, file_system)
+}
+
+fn file_services_with_fs(cx: &mut App, file_system: Arc<dyn Fs>) -> FileServices {
+    let language_registry = native_language_registry(cx);
     let worktree_store =
         cx.new(|cx| WorktreeStore::local(true, file_system.clone(), WorktreeIdCounter::get(cx)));
     let buffer_store = cx.new(|cx| BufferStore::local(worktree_store.clone(), cx));
@@ -1533,6 +2342,461 @@ fn file_services(cx: &mut App) -> FileServices {
         file_system,
         language_registry,
     }
+}
+
+struct RepositorySession {
+    root: RepositoryRoot,
+    index: Arc<RepositoryIndex>,
+    // The visible worktree is retained with the immutable index so every
+    // repository path continues to resolve through the same Zed authority.
+    _worktree: Entity<project::Worktree>,
+}
+
+struct StartupState {
+    repository: Option<RepositorySession>,
+    documents: Vec<OpenDocument>,
+    errors: Vec<String>,
+}
+
+async fn prepare_startup(
+    paths: Vec<PathBuf>,
+    implicit_root: bool,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<StartupState> {
+    let first_path = paths
+        .first()
+        .context("startup requires a repository or file path")?;
+    let first_is_directory = if implicit_root {
+        true
+    } else {
+        matches!(
+            services.file_system.metadata(first_path).await,
+            Ok(Some(metadata)) if metadata.is_dir
+        )
+    };
+
+    if !first_is_directory {
+        let mut documents = Vec::with_capacity(paths.len());
+        let mut errors = Vec::new();
+        for path in paths {
+            let result = cx
+                .update(|cx| open_document(Some(path.clone()), services.clone(), cx))
+                .await;
+            match result {
+                Ok(document) => documents.push(document),
+                Err(error) => errors.push(format_open_error(&path, &error)),
+            }
+        }
+        return Ok(StartupState {
+            repository: None,
+            documents,
+            errors,
+        });
+    }
+
+    let repository = prepare_repository(first_path, services, cx).await?;
+    let mut documents = Vec::new();
+    let mut errors = Vec::new();
+
+    let initial_file = repository
+        .index
+        .file_for_alias("README.md")
+        .or_else(|| repository.index.files().first())
+        .map(|file| {
+            (
+                file.project_path().cloned(),
+                file.canonical_path().to_path_buf(),
+            )
+        });
+    if let Some((project_path, path)) = initial_file {
+        let result = match project_path {
+            Some(project_path) => load_project_document(project_path, &path, services, cx).await,
+            None => Err(anyhow::anyhow!(
+                "indexed repository file has no Zed project path: {}",
+                path.display()
+            )),
+        };
+        match result {
+            Ok(document) => documents.push(document),
+            Err(error) => errors.push(format_open_error(&path, &error)),
+        }
+    }
+
+    for path in paths.into_iter().skip(1) {
+        match open_repository_document(&path, &repository, services, cx).await {
+            Ok(document) => documents.push(document),
+            Err(error) => errors.push(format_open_error(&path, &error)),
+        }
+    }
+
+    Ok(StartupState {
+        repository: Some(repository),
+        documents,
+        errors,
+    })
+}
+
+async fn prepare_repository(
+    root_path: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<RepositorySession> {
+    let root = RepositoryRoot::open(root_path, services.file_system.as_ref()).await?;
+    let canonical_root = root.canonical_path().to_path_buf();
+    let (worktree, relative_path) = services
+        .worktree_store
+        .update(cx, |store, cx| {
+            store.find_or_create_worktree(&canonical_root, true, cx)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "could not create repository worktree {}",
+                canonical_root.display()
+            )
+        })?;
+    ensure!(
+        relative_path.as_unix_str().is_empty(),
+        "repository root was absorbed by another worktree"
+    );
+    let (actual_root, visible, scan_complete) = worktree.read_with(cx, |worktree, _| {
+        (
+            worktree.abs_path(),
+            worktree.is_visible(),
+            worktree.as_local().map(|worktree| worktree.scan_complete()),
+        )
+    });
+    ensure!(
+        actual_root.as_ref() == canonical_root,
+        "Zed worktree root {} did not match repository root {}",
+        actual_root.display(),
+        canonical_root.display()
+    );
+    ensure!(visible, "repository worktree must be visible");
+    let scan_complete = scan_complete.context("repository worktree must be local")?;
+    scan_complete.await;
+
+    let index = Arc::new(worktree.read_with(cx, |worktree, _| {
+        RepositoryIndex::from_worktree(root.clone(), worktree)
+    })?);
+
+    Ok(RepositorySession {
+        root,
+        index,
+        _worktree: worktree,
+    })
+}
+
+async fn open_repository_document(
+    requested_path: &Path,
+    repository: &RepositorySession,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<OpenDocument> {
+    let absolute_path = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        repository.root.requested_path().join(requested_path)
+    };
+    let canonical_path = services
+        .file_system
+        .canonicalize(&absolute_path)
+        .await
+        .with_context(|| format!("could not resolve {}", absolute_path.display()))?;
+
+    if let Some(indexed) = repository.index.file_for_canonical_path(&canonical_path) {
+        let project_path = indexed.project_path().cloned().with_context(|| {
+            format!(
+                "indexed repository file has no Zed project path: {}",
+                indexed.relative_path()
+            )
+        })?;
+        return load_project_document(project_path, indexed.canonical_path(), services, cx).await;
+    }
+
+    if canonical_path.starts_with(repository.root.canonical_path()) {
+        let project_path = services
+            .worktree_store
+            .read_with(cx, |store, cx| {
+                store.project_path_for_absolute_path(&canonical_path, cx)
+            })
+            .with_context(|| {
+                format!(
+                    "repository worktree does not contain {}",
+                    canonical_path.display()
+                )
+            })?;
+        return load_project_document(project_path, &canonical_path, services, cx).await;
+    }
+
+    open_single_file_document(&canonical_path, services, cx).await
+}
+
+async fn open_single_file_document(
+    canonical_path: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<OpenDocument> {
+    let metadata = services
+        .file_system
+        .metadata(canonical_path)
+        .await
+        .with_context(|| format!("could not inspect {}", canonical_path.display()))?
+        .with_context(|| format!("file does not exist: {}", canonical_path.display()))?;
+    ensure!(
+        !metadata.is_dir && !metadata.is_fifo,
+        "path is not a regular file: {}",
+        canonical_path.display()
+    );
+
+    let (worktree, relative_path) = services
+        .worktree_store
+        .update(cx, |store, cx| {
+            // A repository-external file is intentionally a non-scanning
+            // single-file worktree. Existing repository worktrees keep their
+            // scanners; this prevents the outside file from probing or
+            // watching its parent and siblings.
+            store.disable_scanner();
+            store.find_or_create_worktree(canonical_path, false, cx)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "could not create a single-file worktree for {}",
+                canonical_path.display()
+            )
+        })?;
+    ensure!(
+        worktree.read_with(cx, |worktree, _| worktree.is_single_file()),
+        "outside file was not opened through a single-file worktree: {}",
+        canonical_path.display()
+    );
+    let project_path = ProjectPath {
+        worktree_id: worktree.read_with(cx, |worktree, _| worktree.id()),
+        path: relative_path,
+    };
+    load_project_document(project_path, canonical_path, services, cx).await
+}
+
+async fn load_project_document(
+    project_path: ProjectPath,
+    path: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<OpenDocument> {
+    let buffer = services
+        .buffer_store
+        .update(cx, |store, cx| store.open_buffer(project_path, cx))
+        .await
+        .with_context(|| format!("could not load {}", path.display()))?;
+    assign_file_language(path, &buffer, services.language_registry.clone(), cx)
+        .await
+        .with_context(|| format!("could not select a language for {}", path.display()))?;
+
+    Ok(OpenDocument {
+        buffer,
+        untitled_label: None,
+    })
+}
+
+fn format_open_error(path: &Path, error: &anyhow::Error) -> String {
+    let details = format!("{error:#}");
+    let is_eloop = details.contains("Too many levels of symbolic links")
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.raw_os_error() == Some(nix::libc::ELOOP))
+        })
+        // BufferStore's asynchronous load path can flatten the source error.
+        // Re-classify the same local path for the user-facing startup error so
+        // a real symlink loop remains distinguishable from an ordinary open
+        // failure. This is diagnostic-only; Zed still owns the actual load.
+        || std::fs::canonicalize(path)
+            .is_err_and(|error| error.raw_os_error() == Some(nix::libc::ELOOP));
+    if is_eloop {
+        format!("ELOOP opening {}: {details}", path.display())
+    } else {
+        format!("failed to open {}: {details}", path.display())
+    }
+}
+
+struct ProjectSearchCommand {
+    generation: SearchGeneration,
+    completion: Task<std::result::Result<ProjectSearchOutput, String>>,
+}
+
+fn start_project_search_command_with<F>(
+    request: ScheduledProjectSearch,
+    cx: &mut gpui::AsyncApp,
+    start: F,
+) -> Result<ProjectSearchCommand>
+where
+    F: FnOnce(
+        String,
+        &mut gpui::AsyncApp,
+    ) -> Result<Task<std::result::Result<ProjectSearchOutput, String>>>,
+{
+    let completion = start(request.query, cx)?;
+    Ok(ProjectSearchCommand {
+        generation: request.generation,
+        completion,
+    })
+}
+
+fn start_zed_project_search_command(
+    request: ScheduledProjectSearch,
+    repository: &RepositorySession,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<ProjectSearchCommand> {
+    let index = repository.index.clone();
+    let file_system = services.file_system.clone();
+    let buffer_store = services.buffer_store.clone();
+    let worktree_store = services.worktree_store.clone();
+    start_project_search_command_with(request, cx, move |query, cx| {
+        let running = cx.update(|cx| {
+            start_literal_project_search(query, file_system, buffer_store, worktree_store, cx)
+        })?;
+        Ok(cx.spawn(async move |cx| {
+            running
+                .collect(index.as_ref(), cx)
+                .await
+                .map_err(|error| format!("{error:#}"))
+        }))
+    })
+}
+
+fn dispatch_project_search(
+    prompt: &mut ProjectSearchPrompt,
+    mut request: ScheduledProjectSearch,
+    repository: &RepositorySession,
+    services: &FileServices,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    loop {
+        let generation = request.generation;
+        let command = match start_zed_project_search_command(request, repository, services, cx) {
+            Ok(command) => command,
+            Err(error) => {
+                let completion = prompt
+                    .scheduler
+                    .complete(generation, Err(format!("{error:#}")));
+                if let Some(next) = completion.next {
+                    request = next;
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        let task = cx.spawn(async move |_cx| {
+            let result = command.completion.await;
+            let _ = event_sender
+                .send(TerminalEvent::ProjectSearchFinished {
+                    generation: command.generation,
+                    result,
+                })
+                .await;
+        });
+        ensure!(
+            prompt.tasks.insert(generation, task).is_none(),
+            "project search generation was dispatched twice"
+        );
+        return Ok(());
+    }
+}
+
+fn begin_project_search(
+    prompt: &mut ProjectSearchPrompt,
+    repository: &RepositorySession,
+    services: &FileServices,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    prompt.selected = 0;
+    let query = prompt.prompt.text().to_owned();
+    if query.is_empty() {
+        prompt.scheduler.cancel();
+        return Ok(());
+    }
+
+    if let Some(request) = prompt.scheduler.request(query)? {
+        dispatch_project_search(prompt, request, repository, services, event_sender, cx)?;
+    }
+    Ok(())
+}
+
+fn project_search_json(output: &ProjectSearchOutput) -> Value {
+    serde_json::json!({
+        "query": output.query.as_ref(),
+        "total_hits": output.total_hits,
+        "visible_results": output.matches.iter().map(|hit| {
+            serde_json::json!({
+                "path": hit.summary.path.as_ref(),
+                "line": hit.summary.line,
+                "column": hit.summary.column,
+                "preview": hit.summary.preview,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn complete_project_search(
+    prompt: &mut ProjectSearchPrompt,
+    generation: SearchGeneration,
+    result: std::result::Result<ProjectSearchOutput, String>,
+) -> ProjectSearchCompletion {
+    prompt.tasks.remove(&generation);
+    let completion = prompt.scheduler.complete(generation, result);
+    if completion.disposition == CompletionDisposition::Published {
+        prompt.selected = 0;
+    }
+    completion
+}
+
+fn finish_project_search(
+    prompt: &mut ProjectSearchPrompt,
+    generation: SearchGeneration,
+    result: std::result::Result<ProjectSearchOutput, String>,
+    repository: &RepositorySession,
+    services: &FileServices,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<CompletionDisposition> {
+    let completion = complete_project_search(prompt, generation, result);
+    if let Some(next) = completion.next {
+        dispatch_project_search(prompt, next, repository, services, event_sender, cx)?;
+    }
+    Ok(completion.disposition)
+}
+
+fn move_caret_to_project_search_hit(
+    editor_window: &WindowHandle<Editor>,
+    hit: &repository::ProjectSearchHit,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    editor_window.update(cx, |editor, window, cx| -> Result<()> {
+        let active_buffer = editor
+            .active_buffer(cx)
+            .context("project-search editor has no active buffer")?;
+        ensure!(
+            active_buffer == hit.buffer,
+            "project-search result buffer is not active"
+        );
+        let start = hit.anchor_range.start;
+        let multi_buffer = editor.buffer().read(cx).snapshot(cx);
+        let range = multi_buffer
+            .buffer_anchor_range_to_anchor_range(start..start)
+            .context("project-search anchor is not present in editor")?;
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::center()),
+            window,
+            cx,
+            |selections| selections.select_anchor_ranges([range]),
+        );
+        Ok(())
+    })?
 }
 
 fn open_document(
@@ -1555,19 +2819,7 @@ fn open_document(
 
     cx.spawn(async move |cx| {
         let project_path = project_path_for_file(&path, &services, cx).await?;
-        let buffer = services
-            .buffer_store
-            .update(cx, |store, cx| store.open_buffer(project_path, cx))
-            .await
-            .with_context(|| format!("could not load {}", path.display()))?;
-        assign_file_language(&path, &buffer, services.language_registry.clone(), cx)
-            .await
-            .with_context(|| format!("could not select a language for {}", path.display()))?;
-
-        Ok(OpenDocument {
-            buffer,
-            untitled_label: None,
-        })
+        load_project_document(project_path, &path, &services, cx).await
     })
 }
 
@@ -1815,6 +3067,18 @@ fn resolve_path(input: &str) -> Result<PathBuf> {
     let input = PathBuf::from(input);
     std::path::absolute(&input)
         .with_context(|| format!("could not make {} absolute", input.display()))
+}
+
+fn resolve_path_from(base: &Path, input: &str) -> Result<PathBuf> {
+    if input.is_empty() {
+        bail!("path is empty");
+    }
+    let input = PathBuf::from(input);
+    if input.is_absolute() {
+        Ok(input)
+    } else {
+        Ok(base.join(input))
+    }
 }
 
 fn untitled_label(id: usize) -> String {
@@ -2176,6 +3440,8 @@ fn capture_editor(
     area: Rect,
     status_label: &str,
     message: Option<&str>,
+    quick_open: Option<(&QuickOpenPrompt, &RepositoryIndex)>,
+    project_search: Option<&ProjectSearchPrompt>,
     search: Option<&ActiveSearch>,
     save_as: Option<&SaveAsPrompt>,
     open: Option<&OpenPrompt>,
@@ -2288,7 +3554,13 @@ fn capture_editor(
         ))
         .bg(terminal_color(editor_style.background));
 
-    let (status, status_cursor_column) = if let Some(save_as) = save_as {
+    let (status, status_cursor_column) = if let Some((quick_open, index)) = quick_open {
+        let (status, cursor) = quick_open.status(message, index);
+        (status, Some(cursor))
+    } else if let Some(project_search) = project_search {
+        let (status, cursor) = project_search.status(message);
+        (status, Some(cursor))
+    } else if let Some(save_as) = save_as {
         let (status, cursor) = save_as.status(message);
         (status, Some(cursor))
     } else if let Some(open) = open {
@@ -2302,7 +3574,7 @@ fn capture_editor(
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Alt-PgUp/PgDn scroll  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-P quick open  Alt-F project search  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Alt-PgUp/PgDn scroll  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -2539,6 +3811,523 @@ fn run_smoke() {
     });
 }
 
+fn run_alpha_1_probe(probe: Alpha1Probe) -> Result<()> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    gpui_platform::headless().run(move |cx| {
+        init_zed(cx);
+        let services = file_services(cx);
+        cx.spawn(async move |cx| {
+            let result = execute_alpha_1_probe(probe, &services, cx)
+                .await
+                .and_then(|value| {
+                    serde_json::to_string(&value).context("serialize Alpha 1 probe result")
+                });
+            sender.send(result).expect("send Alpha 1 probe result");
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
+
+    let json = receiver
+        .recv()
+        .context("Alpha 1 probe runtime exited without a result")??;
+    println!("{json}");
+    Ok(())
+}
+
+async fn execute_alpha_1_probe(
+    probe: Alpha1Probe,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    match probe {
+        Alpha1Probe::RootIdentity { root, inputs } => {
+            alpha_1_root_identity_probe(&root, &inputs, services, cx).await
+        }
+        Alpha1Probe::OutsideTrace(path) => alpha_1_outside_trace_probe(&path, cx).await,
+        Alpha1Probe::ProjectSearch { root, query } => {
+            let repository = prepare_repository(&root, services, cx).await?;
+            let output = collect_project_search(&repository, query, services, cx).await?;
+            Ok(project_search_json(&output))
+        }
+        Alpha1Probe::StaleResult(root) => alpha_1_stale_result_probe(&root, services, cx).await,
+        Alpha1Probe::SearchFailure(root) => alpha_1_search_failure_probe(&root, services, cx).await,
+    }
+}
+
+async fn collect_project_search(
+    repository: &RepositorySession,
+    query: String,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<ProjectSearchOutput> {
+    let mut prompt = ProjectSearchPrompt::new();
+    let request = prompt
+        .scheduler
+        .request(query)?
+        .context("project search did not start")?;
+    let command = start_zed_project_search_command(request, repository, services, cx)?;
+    let output = command.completion.await.map_err(anyhow::Error::msg)?;
+    ensure!(
+        complete_project_search(&mut prompt, command.generation, Ok(output.clone())).disposition
+            == CompletionDisposition::Published,
+        "completed project search was unexpectedly stale"
+    );
+    Ok(output)
+}
+
+async fn alpha_1_root_identity_probe(
+    root_path: &Path,
+    root_inputs: &[Alpha1RootInput],
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    let canonical_root = services
+        .file_system
+        .canonicalize(root_path)
+        .await
+        .with_context(|| format!("canonicalize probe root {}", root_path.display()))?;
+    ensure!(
+        !root_inputs.is_empty(),
+        "root-identity probe requires at least one root input"
+    );
+    let mut root_identities = HashSet::new();
+    let mut worktree_identities = HashSet::new();
+    let mut root_input_results = Vec::with_capacity(root_inputs.len());
+    let mut repositories = Vec::new();
+    let mut directory_opened_as_file = false;
+    for input in root_inputs {
+        let arguments = input.argument.clone().into_iter().collect();
+        let (paths, implicit_root) = resolve_startup_invocation(&input.cwd, arguments)?;
+        ensure!(
+            paths.len() == 1,
+            "root input {} resolved to {} paths",
+            input.id,
+            paths.len()
+        );
+        let resolved_path = services
+            .file_system
+            .canonicalize(&paths[0])
+            .await
+            .with_context(|| format!("canonicalize root input {}", input.id))?;
+        let mut startup = prepare_startup(paths, implicit_root, services, cx).await?;
+        ensure!(
+            startup.errors.is_empty(),
+            "root spelling startup errors: {:?}",
+            startup.errors
+        );
+        directory_opened_as_file |= startup.documents.iter().any(|document| {
+            document_state(document, cx).path.as_deref() == Some(canonical_root.as_path())
+        });
+        let repository = startup
+            .repository
+            .take()
+            .context("root spelling did not produce repository state")?;
+        let repository_root = repository.root.canonical_path();
+        ensure!(
+            resolved_path == canonical_root && repository_root == canonical_root,
+            "root input {} escaped canonical repository {}",
+            input.id,
+            canonical_root.display()
+        );
+        let worktree_id = repository
+            ._worktree
+            .read_with(cx, |worktree, _| worktree.id().to_proto())
+            .to_string();
+        root_identities.insert(repository.root.clone());
+        worktree_identities.insert(worktree_id.clone());
+        root_input_results.push(serde_json::json!({
+            "id": input.id.as_str(),
+            "cwd": input.cwd.display().to_string(),
+            "argument": input.argument.as_ref().map(|path| path.display().to_string()),
+            "resolved_path": resolved_path.display().to_string(),
+            "repository_root": repository_root.display().to_string(),
+            "worktree_id": worktree_id,
+        }));
+        repositories.push(repository);
+    }
+    ensure!(
+        repositories.len() == root_inputs.len(),
+        "not all specified root inputs reached production startup"
+    );
+    ensure!(
+        !directory_opened_as_file,
+        "a repository directory was opened as a file"
+    );
+    ensure!(
+        worktree_identities.len() == 1,
+        "root inputs produced more than one Zed worktree identity"
+    );
+    let repository = repositories.swap_remove(0);
+
+    let absolute_alias = canonical_root.join("src/日本 語.rs");
+    let alias_paths = [
+        ("src/日本 語.rs".to_owned(), PathBuf::from("src/日本 語.rs")),
+        (
+            "./src/日本 語.rs".to_owned(),
+            PathBuf::from("./src/日本 語.rs"),
+        ),
+        (
+            "src/../src/日本 語.rs".to_owned(),
+            PathBuf::from("src/../src/日本 語.rs"),
+        ),
+        (
+            "aliases/日本 語.rs".to_owned(),
+            PathBuf::from("aliases/日本 語.rs"),
+        ),
+        (absolute_alias.display().to_string(), absolute_alias.clone()),
+    ];
+    let (redraw_sender, _redraw_receiver) = async_channel::bounded(64);
+    let mut tabs = Vec::<DocumentTab>::new();
+    let mut aliases = Vec::new();
+    for (label, path) in alias_paths {
+        let document = open_repository_document(&path, &repository, services, cx).await?;
+        let buffer_id = document
+            .buffer
+            .read_with(cx, |buffer, _| buffer.remote_id().to_proto())
+            .to_string();
+        let tab_index = if let Some(index) = tabs
+            .iter()
+            .position(|tab| tab.document.buffer == document.buffer)
+        {
+            index
+        } else {
+            tabs.push(create_document_tab(
+                document,
+                services.buffer_store.clone(),
+                redraw_sender.clone(),
+                cx,
+            )?);
+            tabs.len() - 1
+        };
+        let tab_handle: AnyWindowHandle = tabs[tab_index].editor_window.into();
+        let tab_id = format!("{:?}", tab_handle.window_id());
+        aliases.push(serde_json::json!({
+            "path": label,
+            "buffer_id": buffer_id,
+            "tab_id": tab_id,
+        }));
+    }
+
+    let outside = canonical_root
+        .parent()
+        .context("repository root has no parent")?
+        .join("outside-control.txt");
+    let exclusion_queries = [
+        ".git/alpha1-excluded.txt".to_owned(),
+        "ignored/excluded.txt".to_owned(),
+        "target/excluded.txt".to_owned(),
+        outside.display().to_string(),
+    ];
+    let quick_open_excluded_results = exclusion_queries
+        .iter()
+        .map(|query| {
+            let results = repository
+                .index
+                .quick_open(query, QUICK_OPEN_LIMIT)
+                .into_iter()
+                .filter_map(|matched| repository.index.file(matched.file_index()))
+                .map(|file| file.relative_path().to_owned())
+                .collect::<Vec<_>>();
+            serde_json::json!({"query": query, "results": results})
+        })
+        .collect::<Vec<_>>();
+
+    let excluded_search = collect_project_search(
+        &repository,
+        "ALPHA1_EXCLUDED_SENTINEL".to_owned(),
+        services,
+        cx,
+    )
+    .await?;
+    let project_search_excluded_results =
+        project_search_json(&excluded_search)["visible_results"].clone();
+
+    let worktree_root_count = services.worktree_store.read_with(cx, |store, cx| {
+        store
+            .worktrees()
+            .filter(|worktree| worktree.read(cx).abs_path().starts_with(&canonical_root))
+            .count()
+    });
+    ensure!(
+        worktree_root_count == worktree_identities.len(),
+        "root subtree contains an unreported duplicate worktree"
+    );
+    Ok(serde_json::json!({
+        "repository_root_count": root_identities.len(),
+        "worktree_root_count": worktree_identities.len(),
+        "root_inputs": root_input_results,
+        "directory_opened_as_file": directory_opened_as_file,
+        "aliases": aliases,
+        "quick_open_excluded_results": quick_open_excluded_results,
+        "project_search_excluded_results": project_search_excluded_results,
+    }))
+}
+
+async fn alpha_1_outside_trace_probe(path: &Path, cx: &mut gpui::AsyncApp) -> Result<Value> {
+    let absolute =
+        std::path::absolute(path).with_context(|| format!("make {} absolute", path.display()))?;
+    let canonical = std::fs::canonicalize(&absolute)
+        .with_context(|| format!("resolve controlled outside file {}", absolute.display()))?;
+    let expected_bytes = std::fs::read(&canonical)
+        .with_context(|| format!("read controlled outside file {}", canonical.display()))?;
+
+    let (recording, services) = cx.update(|cx| {
+        let real: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
+        let recording = RecordingFs::new(real);
+        let services = file_services_with_fs(cx, recording.clone());
+        (recording, services)
+    });
+    recording.clear();
+
+    let document = open_single_file_document(&canonical, &services, cx).await?;
+    let (worktree, relative_path) = services
+        .worktree_store
+        .read_with(cx, |store, cx| store.find_worktree(&canonical, cx))
+        .context("outside probe single-file worktree is missing")?;
+    ensure!(
+        relative_path.as_unix_str().is_empty(),
+        "outside file was nested under a parent worktree"
+    );
+    let (worktree_root, is_single_file, scan_complete) = worktree.read_with(cx, |worktree, _| {
+        (
+            worktree.abs_path(),
+            worktree.is_single_file(),
+            worktree.as_local().map(|local| local.scan_complete()),
+        )
+    });
+    ensure!(
+        worktree_root.as_ref() == canonical,
+        "outside worktree root {} differs from file {}",
+        worktree_root.display(),
+        canonical.display()
+    );
+    ensure!(is_single_file, "outside worktree is not single-file");
+    scan_complete
+        .context("outside worktree must be local")?
+        .await;
+
+    let opened_path = document_state(&document, cx)
+        .path
+        .context("outside probe buffer has no file")?;
+    ensure!(
+        opened_path == canonical,
+        "outside probe buffer path {} differs from {}",
+        opened_path.display(),
+        canonical.display()
+    );
+    let opened_bytes = document
+        .buffer
+        .read_with(cx, |buffer, _| buffer.text().to_string().into_bytes());
+    ensure!(
+        opened_bytes == expected_bytes,
+        "outside probe buffer bytes differ"
+    );
+
+    let accesses = recording.accesses();
+    ensure!(!accesses.is_empty(), "outside filesystem trace is empty");
+    let parent = canonical.parent();
+    let read_dir_accesses = accesses
+        .iter()
+        .filter(|access| access.kind == FsPathKind::ReadDir)
+        .collect::<Vec<_>>();
+    let outside_parent_read_dir_count = read_dir_accesses
+        .iter()
+        .filter(|access| Some(access.path.as_path()) == parent)
+        .count();
+    let outside_sibling_read_dir_count = read_dir_accesses
+        .iter()
+        .filter(|access| Some(access.path.as_path()) != parent)
+        .count();
+    ensure!(
+        read_dir_accesses.is_empty(),
+        "single-file worktree issued read_dir at {:?}",
+        read_dir_accesses
+            .iter()
+            .map(|access| access.path.as_path())
+            .collect::<Vec<_>>()
+    );
+    let operations = classify_single_file_accesses(&accesses, &canonical)?;
+    ensure!(
+        operations.contains(&"open-self") && operations.contains(&"stat-self"),
+        "outside trace must observe both open and stat: {operations:?}"
+    );
+
+    Ok(serde_json::json!({
+        "opened_path": opened_path.display().to_string(),
+        "outside_parent_read_dir_count": outside_parent_read_dir_count,
+        "outside_sibling_read_dir_count": outside_sibling_read_dir_count,
+        "operations": operations,
+    }))
+}
+
+async fn alpha_1_stale_result_probe(
+    root: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    let repository = prepare_repository(root, services, cx).await?;
+    let mut prompt = ProjectSearchPrompt::new();
+
+    let request_a = prompt
+        .scheduler
+        .request("ALPHA1_STALE_A".to_owned())?
+        .context("query A did not start")?;
+    let command_a = start_zed_project_search_command(request_a, &repository, services, cx)?;
+    let request_b = prompt
+        .scheduler
+        .request("ALPHA1_STALE_B".to_owned())?
+        .context("query B did not start")?;
+    let command_b = start_zed_project_search_command(request_b, &repository, services, cx)?;
+
+    let mut publish_log = Vec::new();
+    let output_b = command_b.completion.await.map_err(anyhow::Error::msg)?;
+    if complete_project_search(&mut prompt, command_b.generation, Ok(output_b)).disposition
+        == CompletionDisposition::Published
+    {
+        publish_log.push("B");
+    }
+    let output_a = command_a.completion.await.map_err(anyhow::Error::msg)?;
+    if complete_project_search(&mut prompt, command_a.generation, Ok(output_a)).disposition
+        == CompletionDisposition::Published
+    {
+        publish_log.push("A");
+    }
+
+    let (final_query, final_path) = match prompt.scheduler.state() {
+        LatestSearchState::Ready { query, result, .. } => (
+            query.clone(),
+            result
+                .matches
+                .first()
+                .context("query B produced no result")?
+                .summary
+                .path
+                .to_string(),
+        ),
+        state => bail!("unexpected final stale-result state: {state:?}"),
+    };
+    Ok(serde_json::json!({
+        "publish_log": publish_log,
+        "final_query": final_query,
+        "final_path": final_path,
+    }))
+}
+
+fn alpha_1_document_trace(document: &OpenDocument, tab_count: usize, cx: &gpui::AsyncApp) -> Value {
+    let body = document
+        .buffer
+        .read_with(cx, |buffer, _| buffer.text().to_string());
+    let state = document_state(document, cx);
+    serde_json::json!({
+        "tab_count": tab_count,
+        "body_sha256": format!("{:x}", Sha256::digest(body.as_bytes())),
+        "dirty": state.dirty,
+    })
+}
+
+async fn alpha_1_search_failure_probe(
+    root: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    let repository = prepare_repository(root, services, cx).await?;
+    let control_file = repository
+        .index
+        .file_for_alias("README.md")
+        .context("search-failure repository has no README.md")?;
+    let project_path = control_file
+        .project_path()
+        .cloned()
+        .context("README.md has no project path")?;
+    let document =
+        load_project_document(project_path, control_file.canonical_path(), services, cx).await?;
+    let (redraw_sender, _redraw_receiver) = async_channel::bounded(64);
+    let tabs = vec![create_document_tab(
+        document,
+        services.buffer_store.clone(),
+        redraw_sender,
+        cx,
+    )?];
+    let before = alpha_1_document_trace(&tabs[0].document, tabs.len(), cx);
+
+    let mut prompt = ProjectSearchPrompt::new();
+    let (provider_sender, provider_receiver) =
+        async_channel::bounded::<std::result::Result<ProjectSearchOutput, String>>(1);
+    let request = prompt
+        .scheduler
+        .request("ALPHA1_SEARCH_FAILURE".to_owned())?
+        .context("controlled failing search did not start")?;
+    let command = start_project_search_command_with(request, cx, move |_query, cx| {
+        Ok(cx.spawn(async move |_cx| {
+            provider_receiver
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("controlled provider disconnected".to_owned()))
+        }))
+    })?;
+    provider_sender
+        .send(Err("EIO".to_owned()))
+        .await
+        .context("send controlled EIO")?;
+    let completion = command.completion.await;
+    ensure!(
+        complete_project_search(&mut prompt, command.generation, completion).disposition
+            == CompletionDisposition::Published,
+        "controlled EIO completion was unexpectedly stale"
+    );
+    let error = match prompt.scheduler.state() {
+        LatestSearchState::Failed { error, .. } => error.clone(),
+        state => bail!("controlled EIO did not reach failed state: {state:?}"),
+    };
+    let rendered_status = tabs[0].editor_window.update(cx, |editor, _window, cx| {
+        capture_editor(
+            editor,
+            cx,
+            Viewport::default(),
+            false,
+            None,
+            Rect::new(0, 0, 120, 40),
+            "repo",
+            None,
+            None,
+            Some(&prompt),
+            None,
+            None,
+            None,
+            None,
+        )
+        .snapshot
+        .status
+    })?;
+    ensure!(
+        rendered_status.contains("search failed: EIO"),
+        "controlled EIO was not rendered in project-search status"
+    );
+    let after = alpha_1_document_trace(&tabs[0].document, tabs.len(), cx);
+    ensure!(before == after, "search failure mutated editor state");
+
+    tabs[0].editor_window.update(cx, |editor, window, cx| {
+        editor.select_all(&SelectAll, window, cx);
+        editor.insert("ALPHA1_SEARCH_FAILURE_CONTINUED", window, cx);
+    })?;
+    save_document(&tabs[0].document, services, cx).await?;
+    let control_disk_token = services
+        .file_system
+        .load(control_file.canonical_path())
+        .await?;
+    let continued_edit_saved = control_disk_token == "ALPHA1_SEARCH_FAILURE_CONTINUED"
+        && !document_state(&tabs[0].document, cx).dirty;
+
+    Ok(serde_json::json!({
+        "error": error,
+        "before": before,
+        "after": after,
+        "continued_edit_saved": continued_edit_saved,
+        "control_disk_token": control_disk_token,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2572,9 +4361,142 @@ mod tests {
             let _ = std::fs::remove_dir(&self.directory);
         }
     }
+    struct TemporaryRepository {
+        directory: PathBuf,
+        root: PathBuf,
+        root_alias: PathBuf,
+        outside: PathBuf,
+    }
+
+    impl TemporaryRepository {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after the Unix epoch")
+                .as_nanos();
+            let directory =
+                std::env::temp_dir().join(format!("zec-repository-{}-{nonce}", std::process::id()));
+            let root = directory.join("repo");
+            let root_alias = directory.join("repo-alias");
+            let outside = directory.join("outside.txt");
+            std::fs::create_dir_all(root.join("src")).expect("create repository src");
+            std::fs::create_dir_all(root.join("aliases")).expect("create repository aliases");
+            std::fs::create_dir_all(root.join("target")).expect("create ignored target");
+            std::fs::create_dir_all(root.join(".git")).expect("create excluded git metadata");
+            std::fs::write(root.join("README.md"), "ALPHA1_READY_SENTINEL\n")
+                .expect("write repository README");
+            std::fs::write(
+                root.join("src/日本 語.rs"),
+                "pub const TOKEN: &str = \"inside\";\n",
+            )
+            .expect("write canonical repository file");
+            std::fs::write(
+                root.join("target/excluded.rs"),
+                "ALPHA1_EXCLUDED_SENTINEL\n",
+            )
+            .expect("write ignored repository file");
+            std::fs::write(root.join(".git/hidden"), "ALPHA1_EXCLUDED_SENTINEL\n")
+                .expect("write git metadata fixture");
+            std::fs::write(root.join(".gitignore"), "target/\n")
+                .expect("write repository ignore rules");
+            std::fs::write(&outside, "outside control\n").expect("write outside file");
+            std::os::unix::fs::symlink("../src/日本 語.rs", root.join("aliases/日本 語.rs"))
+                .expect("create file alias");
+            std::os::unix::fs::symlink("root-loop", root.join("root-loop"))
+                .expect("create self-referential symlink");
+            std::os::unix::fs::symlink(&root, &root_alias).expect("create root alias");
+            Self {
+                directory,
+                root,
+                root_alias,
+                outside,
+            }
+        }
+    }
+
+    impl Drop for TemporaryRepository {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
 
     fn command(arguments: &[&str]) -> Result<Command> {
         parse_command(arguments.iter().map(|argument| OsString::from(*argument)))
+    }
+
+    #[test]
+    fn project_search_scheduler_is_bounded_and_coalesces_to_latest() {
+        let mut scheduler = ProjectSearchScheduler::<String, String>::default();
+        let first = scheduler
+            .request("query-0000".to_owned())
+            .unwrap()
+            .expect("first query starts immediately");
+        let second = scheduler
+            .request("query-0001".to_owned())
+            .unwrap()
+            .expect("replacement query starts immediately");
+        let mut started_queries = vec![first.query.clone(), second.query.clone()];
+        let mut max_active = scheduler.active_count();
+
+        for index in 2..1_000 {
+            assert!(
+                scheduler
+                    .request(format!("query-{index:04}"))
+                    .unwrap()
+                    .is_none(),
+                "queries beyond the two active slots must be queued"
+            );
+            max_active = max_active.max(scheduler.active_count());
+        }
+        assert_eq!(scheduler.active_count(), 2);
+        assert_eq!(
+            scheduler
+                .queued
+                .as_ref()
+                .map(|request| request.query.as_str()),
+            Some("query-0999")
+        );
+
+        // A synchronous failure of a stale active request must release its
+        // slot to the coalesced latest query instead of losing that query.
+        let first_completion = scheduler.complete(first.generation, Err("start failed".to_owned()));
+        assert_eq!(
+            first_completion.disposition,
+            CompletionDisposition::DiscardedStale
+        );
+        let latest = first_completion
+            .next
+            .expect("latest queued query must be dispatched");
+        started_queries.push(latest.query.clone());
+        max_active = max_active.max(scheduler.active_count());
+
+        let second_completion =
+            scheduler.complete(second.generation, Ok("stale result".to_owned()));
+        assert_eq!(
+            second_completion.disposition,
+            CompletionDisposition::DiscardedStale
+        );
+        assert!(second_completion.next.is_none());
+        assert_eq!(scheduler.active_count(), 1);
+
+        let latest_completion =
+            scheduler.complete(latest.generation, Ok("latest result".to_owned()));
+        assert_eq!(
+            latest_completion.disposition,
+            CompletionDisposition::Published
+        );
+        assert!(latest_completion.next.is_none());
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(max_active, MAX_CONCURRENT_PROJECT_SEARCHES);
+        assert_eq!(started_queries, ["query-0000", "query-0001", "query-0999"]);
+        assert_eq!(
+            scheduler.state(),
+            &LatestSearchState::Ready {
+                generation: latest.generation,
+                query: "query-0999".to_owned(),
+                result: "latest result".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -2639,6 +4561,193 @@ mod tests {
     }
 
     #[test]
+    fn repository_startup_uses_one_root_identity_and_exact_outside_worktree() {
+        let fixture = TemporaryRepository::new();
+        let root = fixture.root.clone();
+        let root_alias = fixture.root_alias.clone();
+        let outside = fixture.outside.clone();
+        let expected_root = std::fs::canonicalize(&root).expect("canonicalize fixture root");
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let services = file_services(cx);
+
+            cx.spawn(async move |cx| {
+                let result: Result<_> = async {
+                    let startup =
+                        prepare_startup(vec![root_alias.clone()], false, &services, cx).await?;
+                    ensure!(
+                        startup.errors.is_empty(),
+                        "startup errors: {:?}",
+                        startup.errors
+                    );
+                    ensure!(
+                        startup.documents.len() == 1,
+                        "expected one startup document"
+                    );
+                    let repository = startup
+                        .repository
+                        .as_ref()
+                        .context("directory startup must retain repository state")?;
+                    let initial_text = startup.documents[0]
+                        .buffer
+                        .read_with(cx, |buffer, _| buffer.text().to_string());
+                    let indexed_paths = repository
+                        .index
+                        .files()
+                        .iter()
+                        .map(|file| file.relative_path().to_owned())
+                        .collect::<Vec<_>>();
+
+                    let mut quick_open = QuickOpenPrompt::new(&repository.index);
+                    ensure!(quick_open.prompt.handle_paste("日本 語.rs") == PromptAction::Changed);
+                    quick_open.refresh(&repository.index);
+                    let selected_path = quick_open
+                        .selected_file_index()
+                        .and_then(|file_index| repository.index.file(file_index))
+                        .map(|file| file.relative_path().to_owned());
+                    let quick_status = quick_open.status(None, &repository.index).0;
+
+                    let canonical_document = open_repository_document(
+                        Path::new("src/日本 語.rs"),
+                        repository,
+                        &services,
+                        cx,
+                    )
+                    .await?;
+                    let alias_document = open_repository_document(
+                        Path::new("aliases/日本 語.rs"),
+                        repository,
+                        &services,
+                        cx,
+                    )
+                    .await?;
+                    let aliases_share_buffer = canonical_document.buffer == alias_document.buffer;
+
+                    let outside_document =
+                        open_repository_document(&outside, repository, &services, cx).await?;
+                    let outside_path = outside.clone();
+                    let canonical_root = repository.root.canonical_path().to_path_buf();
+                    let (visible_count, root_count, outside_single_file, outside_parent_worktree) =
+                        services.worktree_store.read_with(cx, |store, cx| {
+                            let worktrees = store.worktrees().collect::<Vec<_>>();
+                            (
+                                store.visible_worktrees(cx).count(),
+                                worktrees
+                                    .iter()
+                                    .filter(|worktree| {
+                                        worktree.read(cx).abs_path().as_ref()
+                                            == canonical_root.as_path()
+                                    })
+                                    .count(),
+                                worktrees.iter().any(|worktree| {
+                                    let worktree = worktree.read(cx);
+                                    worktree.abs_path().as_ref() == outside_path.as_path()
+                                        && worktree.is_single_file()
+                                }),
+                                worktrees.iter().any(|worktree| {
+                                    worktree.read(cx).abs_path().as_ref()
+                                        == outside_path
+                                            .parent()
+                                            .expect("outside fixture has parent")
+                                }),
+                            )
+                        });
+                    let outside_text = outside_document
+                        .buffer
+                        .read_with(cx, |buffer, _| buffer.text().to_string());
+
+                    let partial = prepare_startup(
+                        vec![root_alias, root.join("README.md"), root.join("root-loop")],
+                        false,
+                        &services,
+                        cx,
+                    )
+                    .await?;
+                    ensure!(partial.documents.len() == 2);
+                    let partial_alias_deduped =
+                        partial.documents[0].buffer == partial.documents[1].buffer;
+                    let partial_error = partial.errors.join("  |  ");
+                    let control = partial
+                        .documents
+                        .first()
+                        .context("partial startup kept no control document")?;
+                    let control_window = cx.update(|cx| open_editor(control.buffer.clone(), cx))?;
+                    control_window.update(cx, |editor, window, cx| {
+                        editor.insert("ALPHA1_PARTIAL_STARTUP_EDIT ", window, cx);
+                    })?;
+                    save_document(control, &services, cx).await?;
+                    let continued_saved = std::fs::read_to_string(root.join("README.md"))?
+                        .starts_with("ALPHA1_PARTIAL_STARTUP_EDIT ");
+
+                    Ok((
+                        repository.root.label(),
+                        repository.root.canonical_path().to_path_buf(),
+                        initial_text,
+                        indexed_paths,
+                        selected_path,
+                        quick_status,
+                        aliases_share_buffer,
+                        visible_count,
+                        root_count,
+                        outside_single_file,
+                        outside_parent_worktree,
+                        outside_text,
+                        partial_alias_deduped,
+                        partial_error,
+                        continued_saved,
+                    ))
+                }
+                .await;
+
+                sender.send(result).expect("send repository startup result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (
+            root_label,
+            canonical_root,
+            initial_text,
+            indexed_paths,
+            selected_path,
+            quick_status,
+            aliases_share_buffer,
+            visible_count,
+            root_count,
+            outside_single_file,
+            outside_parent_worktree,
+            outside_text,
+            partial_alias_deduped,
+            partial_error,
+            continued_saved,
+        ) = receiver
+            .recv()
+            .expect("receive repository startup result")
+            .expect("repository startup scenario should succeed");
+
+        assert_eq!(root_label, "repo");
+        assert_eq!(canonical_root, expected_root);
+        assert_eq!(initial_text, "ALPHA1_READY_SENTINEL\n");
+        assert!(indexed_paths.iter().any(|path| path == "README.md"));
+        assert!(!indexed_paths.iter().any(|path| path.starts_with(".git/")));
+        assert!(!indexed_paths.iter().any(|path| path.starts_with("target/")));
+        assert_eq!(selected_path.as_deref(), Some("src/日本 語.rs"));
+        assert!(quick_status.contains("src/日本 語.rs"));
+        assert!(aliases_share_buffer);
+        assert_eq!(visible_count, 1);
+        assert_eq!(root_count, 1);
+        assert!(outside_single_file);
+        assert!(!outside_parent_worktree);
+        assert_eq!(outside_text, "outside control\n");
+        assert!(partial_alias_deduped);
+        assert!(partial_error.contains("ELOOP"), "{partial_error}");
+        assert!(continued_saved);
+    }
+
+    #[test]
     fn captures_only_the_terminal_viewport_from_a_hundred_thousand_lines() {
         use std::fmt::Write as _;
 
@@ -2672,6 +4781,8 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                     );
                     let middle = capture_editor(
                         editor,
@@ -2689,6 +4800,8 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                     );
                     let end = capture_editor(
                         editor,
@@ -2701,6 +4814,8 @@ mod tests {
                         middle.last_cursor,
                         area,
                         "large",
+                        None,
+                        None,
                         None,
                         None,
                         None,

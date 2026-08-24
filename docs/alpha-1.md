@@ -104,7 +104,10 @@ acceptance verifierが現在の`cargo test -- --list`に全IDが含まれるこ�
 - specに列挙した全aliasの`buffer_id`と`tab_id`がそれぞれ完全一致する
 - `.git`、`target`、ignore対象には専用sentinelを置き、quick-open/project searchの
   expected result JSONがいずれも0件である
-- root外fileのtracing FSをresetしてopenし、そのfile自身へのopen/statだけを許可する。
+- root外fileのtracing FSをresetしてopenし、そのfile自身へのopen/statと、固定Zedが
+  ignore判定で行う`file/.git`および各ancestorのexactな`.git` markerへのbounded metadata
+  (`stat-ancestor-git`)だけを許可する。`stat-ancestor-git`には`file/.git`を含む。
+  `read_dir`、watch/watcher add/remove、mutation、repository operationは禁止し、
   outside parentとsiblingsへの`read_dir` call countは0である
 - startupには正常fileとself-referential symlinkを同時に渡す。`ELOOP`を表示した後もReadyへ到達し、
   正常tabの固定tokenを編集・保存してexit code 0になる
@@ -169,12 +172,15 @@ fresh processで逐次実行し、retryは0回とする。編集/paste payload�
   specに固定した先頭100件とする
 - in-flight search: query replacementは新queryとexpected results、cancelはprompt消滅、
   quitはchild回収を終了eventとする。各20 attemptsのmax 250 ms以下
-- editing: 100,000行fileへ連番tokenをinsertし、そのtokenがexpected cellへ現れるgenerationまで。
-  10 warm-up後500 editsのp95 100 ms以下、max 500 ms以下
+- editing: 100,000行fileへ連番tokenとspecで固定した`payload_suffix = LF`を1回のpasteでinsertし、
+  そのtokenが直前のexpected rowへ現れ、caretが次rowへ移ったgenerationまで。10 warm-up後500 editsの
+  p95 100 ms以下、max 500 ms以下
 - save: 5 MiB fileの固定offsetを各sample直前に1 byte変更してdirtyにし、`Ctrl-S` flushから
   dirty marker消滅とexpected disk bytesの両方まで。2 warm-up後10 samplesのmax 2,000 ms以下
 - zec main processの`/proc/PID/status` `VmHWM`を1,024倍してbytesへ変換した値が
-  1,073,741,824以下で、benchmark中のdescendant process countが0
+  1,073,741,824以下で、benchmark中のdescendant process countが0。descendantはchild spawn前に
+  CN_PROC LISTENのmatching ACKを確認し、fork/clone eventと全TIDの`/proc` childrenを併用して
+  追跡する。event lossはFail、終了時はfinal drain後に明示的にIGNOREを送る
 - reportの`sent_input_ids`、`applied_input_ids`、expected ID列が完全一致し、
   `dropped_count=0`かつreorderなし
 

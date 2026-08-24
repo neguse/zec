@@ -11,7 +11,9 @@ headless の挿入・undo PoCに加え、plain textの端末表示、キー入�
 selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
 terminal viewportのscroll、
 本文のmouse clickによるcaret移動、
-実ファイルのopen/save/save-as、buffer search、go to line/column、terminal clipboard、dirty表示、
+現在directoryまたは明示した`DIRECTORY`をrootとするrepository mode、1つのZed Worktreeと
+`RepositoryIndex`によるfile discovery、`Ctrl-P`のQuick Open、`Alt-F`のproject-wide search、
+実ファイルのopen/save/save-as、`Ctrl-F`のBuffer内検索、go to line/column、terminal clipboard、dirty表示、
 複数tab、実行中のtab open/close、終了時の端末復元まで実装済み。
 
 ## Repository strategy
@@ -19,6 +21,11 @@ terminal viewportのscroll、
 Zed monorepoの fork ではなく、独立した binary crate から Zed の各 crate を Git
 dependency として使う。検証対象が勝手に変わらないよう revision は `Cargo.toml` で
 固定する。Zed 側の private API が本当に必要になるまでは fork や本体変更を持たない。
+
+repository modeではcanonicalizeした`Directory root`につき、rootと一致するvisibleなZed Worktreeを
+1つだけ作る。scan完了後のWorktree snapshotからimmutableな`RepositoryIndex`を構築し、zec独自の
+filesystem walkやfileごとのworktreeは作らない。Zedのignore/external判定とcanonical file identityを
+使うため、symlink aliasも同じfileへ集約される。direct `FILE...` modeは独立した起動経路として残す。
 
 ## Decision
 
@@ -35,11 +42,20 @@ crossterm Event
     -> CrosstermBackend
     -> terminal
 
-FILE
+DIRECTORY (no argsならcurrent directory)
+    -> canonical RepositoryRoot
     -> Zed RealFs
-    -> WorktreeStore
-    -> BufferStore
+    -> 1 visible Worktree
+    -> immutable RepositoryIndex
+       -> Ctrl-P Quick Open -> ProjectPath
+       -> Alt-F -> Zed Search -> Buffer + Anchor range
+    -> shared BufferStore
     -> Zed Buffer × N
+
+FILE... (direct mode)
+    -> Zed RealFs -> WorktreeStore -> shared BufferStore
+
+Zed Buffer × N
     -> hidden Editor window × N
     -> tree-sitter parse / highlighted chunks
 ```
@@ -47,11 +63,13 @@ FILE
 | Component | Responsibility |
 | --- | --- |
 | Zed Editor / Buffer | テキスト、カーソル、selection、編集 action、undo、dirty状態 |
-| Zed BufferStore / WorktreeStore / RealFs | ファイルのopen/save、encoding・改行・disk state |
+| Zed Search / Buffer / Anchor | project-wide matchの探索、本文、match range |
+| Zed BufferStore / WorktreeStore / RealFs | repository file集合とignore判定、ファイルのopen/save、encoding・改行・disk state |
 | Zed Language / tree-sitter | language query、parse、syntax highlight range |
 | GPUI headless | Zed の runtime と window/action context |
 | Crossterm | raw mode、キー・paste・resize入力、端末への出力 |
 | Ratatui | レイアウト、cell buffer、style、差分描画 |
+| zec RepositoryRoot / RepositoryIndex | root identity、alias dedupe、Quick Openの決定的な表示index |
 | zec | 端末イベント変換、Zed snapshot の cell 化、処理の接続 |
 
 編集状態の source of truth は常に Zed とする。端末入力は Zed の action/input 経路へ
@@ -88,11 +106,41 @@ repaintの上限であり、全文検索そのものを定数時間にする主�
 display row単位なので、数MBの単一行ではその行全体のmaterializeとterminal cell変換が残る。
 必要になった時点で独自text modelを作らず、Zed側のvisible-column iterator/hookを検討する。
 
+## Repository root, Quick Open, and Project Search
+
+引数なしの`zec`はcurrent directory、`zec DIRECTORY`は明示したdirectoryをrepository rootにする。
+rootはcanonical pathをidentityとし、同じrootの`.`、absolute path、symlink spellingが別repositoryや
+別Worktreeにならないようにする。Zed Worktreeのscan完了を待ってから、そのsnapshotだけを
+`RepositoryIndex`へ投影する。indexはrelative path、canonical identity、alias、`ProjectPath`を持つ
+presentation用のimmutable snapshotであり、file本文、selection、undo、dirty stateは所有しない。
+
+`Ctrl-P`のQuick Openは`RepositoryIndex`を絞り込み、決定的にrankした先頭100件から選択する。
+`Enter`後はindexが保持するZed `ProjectPath`を`BufferStore`へ渡すため、同じfileやsymlink aliasを
+別Bufferへ複製しない。Quick OpenとProject Searchはrepository modeだけの操作で、direct
+`zec FILE...` modeのopen/save経路はそのまま残す。
+
+`Alt-F`のProject Searchは`Search::local`とZedの`SearchQuery`を使うcase-sensitiveなliteral検索で、
+Zedからstreamされる`Buffer`と`Anchor` rangeをauthorityとする。zecはdiskからmatch本文を独自に
+読み直さず、Zed Buffer snapshotからpath、1-based line、BOMを除いたUnicode scalar column、previewへ
+投影し、canonical file identityとrangeの重複を除いて決定順に並べる。全hit数を保持したままterminalへ
+表示するresultは先頭100件に制限し、`Enter`では保持していた同じBufferとAnchor rangeへcaretを移動する。
+
+queryを変更するたびにgenerationを増やす。高価なZed searchは同時に最大2つまで実行し、2 slotが
+埋まっている間の追加queryはqueue 1件へ最新値だけをcoalesceする。completionは現在のgenerationと
+一致する場合だけpublishし、古いgenerationのsuccess/errorはdiscardする。`Esc`はpromptとqueued
+requestを消してreducerをIdleへ戻すため、既に走っていたtaskがraceして完了してもUIへ戻さない。
+
+Alpha 1 benchmarkはactual production binaryをPTYで操作し、VT parserが描画したstatusを下矢印で
+1件ずつ進め、表示上限100件のpath、line、column、previewと順序をすべてspecと直接比較する。
+結果一覧をfixture fileやtest-only interfaceから読み出さず、production search pathにも
+test-only file hookを設けない。
+
 ## File I/O
 
-`zec FILE...` はCLI入力を絶対パス化し、Zedの `RealFs -> WorktreeStore -> BufferStore` で
-開く。`Project` 全体や手書きの `std::fs::write` は使わない。これによりencoding、BOM、
-改行コード、保存version、外部ファイル状態をZed側の実装に任せられる。
+repository modeでindexから選んだfileと、direct modeの`zec FILE...`はどちらも
+Zedの `RealFs -> WorktreeStore -> BufferStore` で開く。`Project` 全体や手書きの
+`std::fs::write` は使わない。これによりencoding、BOM、改行コード、保存version、
+外部ファイル状態をZed側の実装に任せられる。
 
 該当worktreeがなければ、pathを含む既存の最寄りnon-root directoryを非表示worktreeとして扱う。
 これにより同じdirectory内の外部renameをZedのentry identityで追跡でき、未作成のnested Save As
@@ -102,7 +150,7 @@ scan/watchするため、rename追跡と初期I/Oの交換条件である。
 
 未作成パスもfile付きの `DiskState::New` Bufferになるため、編集後の `save_buffer` で新規作成できる。
 
-引数なしのscratchも裸の `Buffer::local` にはせず、最初から同じ `BufferStore` の
+`Ctrl-N`で作るscratchも裸の `Buffer::local` にはせず、最初から同じ `BufferStore` の
 `create_local_buffer` で生成する。`Ctrl-S` ではterminal-ownedな1行promptから絶対化した
 保存先を `find_or_create_worktree -> save_buffer_as` へ渡す。成功後は同じBuffer Entityに
 fileが付き、Editor、selection、undo履歴、dirty versionを作り直さず通常の `save_buffer`
@@ -170,7 +218,11 @@ themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。
 parse完了は非同期なので `BufferEvent::Reparsed` をterminal event channelへ戻して再描画
 する。これにより、入力イベントを待たずにhighlightが現れる。
 
-## Buffer search
+## Buffer search (`Ctrl-F`, active Buffer only)
+
+この節のBuffer内検索は`Alt-F`のrepository-wide Project Searchとは別機能である。
+`Ctrl-F`はactive tabのBufferだけを対象にし、repositoryの`Search::local`や
+`RepositoryIndex`を使わない。
 
 `Ctrl-F` の本文検索はWorkspaceのGUI search barを生成せず、`Editor` が実装する公開
 `SearchableItem` APIを直接使う。`SearchQuery` の実行、matchのstable anchor、active match、

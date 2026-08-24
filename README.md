@@ -13,11 +13,32 @@ Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection
 PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
 次のマイルストーンは [docs/alpha-1.md](docs/alpha-1.md) の機械判定contractで管理します。
 
+引数なしなら現在のdirectory、directoryを1つ渡した場合はそのdirectoryをrepository rootとして
+起動します。開発checkoutから実行する場合は、それぞれ`cargo run --`、
+`cargo run -- path/to/repository`と同じです。
+
 ```sh
-cargo run -- path/to/file another/file
+zec
+zec DIRECTORY
 ```
 
-既存ファイルと未作成ファイルのどちらも複数指定でき、実行中も`Ctrl-O`から追加できます。
+repository modeでは`Ctrl-P`でQuick Openを開き、root配下のfileを絞り込んで`Enter`で開けます。
+`Alt-F`はrepository全体の大文字小文字を区別するliteral検索です。結果はpath、1-basedのlineと
+Unicode column、previewとして表示し、先頭100件までを上下矢印で選んで`Enter`でそのmatchへ
+移動できます。Unicode normalization、regex、project-wide replaceは行いません。
+
+Quick OpenまたはProject Searchは`Esc`でcancelできます。Project Search中にqueryを変更した場合は
+最新queryの結果だけを表示し、順序が前後して完了した古いqueryの結果は描画も適用もしません。
+`Esc`で閉じた後や別操作へ移った後に完了した結果も無視します。
+
+従来のdirect file modeも残しています。先頭引数がfileなら、既存ファイルと未作成ファイルの
+どちらも複数指定でき、実行中も`Ctrl-O`から追加できます。このmodeではrepositoryを持たないため、
+`Ctrl-P`と`Alt-F`は利用できません。
+
+```sh
+zec path/to/file another/file
+```
+
 `Ctrl-N`では、`Untitled N`という保存先未定のscratch tabを追加できます。
 同じBufferがすでに開かれていればtabを重複させず、既存tabへ移動します。
 `Ctrl-PageUp` / `Ctrl-PageDown` でtabを切り替え、`Ctrl-W`でactive tabを閉じます。
@@ -37,7 +58,7 @@ reloadし、dirtyなら同じキーの再押下を要求します。reloadもZed
 外部delete後も本文を保持して`!`を表示し、`Ctrl-S`の再押下で同じpathへ再作成できます。
 catch可能な`SIGTERM` / `SIGHUP`は通常の終了経路へ渡し、端末modeを復元してから終了します。
 
-引数なし、または`Ctrl-N`では空のscratch bufferを開きます。`Ctrl-S`で1行のSave As promptに入り、
+`Ctrl-N`では空のscratch bufferを開きます。`Ctrl-S`で1行のSave As promptに入り、
 相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、
 既存の通常ファイルはもう一度 `Enter` を押した場合だけ上書きします。`Esc` でcancelできます。
 Save Asと`Ctrl-O`のpath promptはshellを通らないため、`~` はhome directoryへ展開しません。

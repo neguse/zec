@@ -26,7 +26,6 @@ use alpha_1_support::{
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use nix::{libc, sys::termios::Termios};
-use serde::Deserialize;
 
 const STARTUP_WARMUPS: usize = 2;
 const STARTUP_SAMPLES: usize = 20;
@@ -174,10 +173,8 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct ProjectSearchProbe {
-    query: String,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProjectSearchObservation {
     total_hits: usize,
     visible_results: Vec<SearchResultReport>,
 }
@@ -640,19 +637,9 @@ fn spawn_ready(
     root: &Path,
     config_name: &str,
 ) -> Result<(PtySession, Termios, u64, ResourceMonitor)> {
-    spawn_ready_with_env(zec, root, config_name, &[])
-}
-
-fn spawn_ready_with_env(
-    zec: &Path,
-    root: &Path,
-    config_name: &str,
-    environment: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
-) -> Result<(PtySession, Termios, u64, ResourceMonitor)> {
     let config = alpha_1_support::fresh_config_dir(config_name)?;
     let armed_monitor = ResourceMonitor::arm()?;
-    let (mut session, baseline) =
-        PtySession::spawn_with_env(zec, root, &[root.as_os_str()], &config, environment)?;
+    let (mut session, baseline) = PtySession::spawn(zec, root, &[root.as_os_str()], &config)?;
     let monitor = armed_monitor.start(session.pid()?)?;
     let startup_us = session.wait_ready("repo", fixture::READY_SENTINEL)?;
     session.assert_raw(&baseline)?;
@@ -733,7 +720,7 @@ fn project_search_metric(
     zec: &Path,
     root: &Path,
     resources: &mut ResourceTracker,
-) -> Result<(MetricReport, ProjectSearchProbe)> {
+) -> Result<(MetricReport, ProjectSearchObservation)> {
     let expected_rows = expected_benchmark_search_rows();
     ensure!(
         expected_rows.len() == fixture::SEARCH_RESULT_LIMIT,
@@ -742,24 +729,8 @@ fn project_search_metric(
     let mut samples = Vec::with_capacity(PROJECT_SAMPLES);
     let mut observation = None;
     for index in 0..PROJECT_WARMUPS + PROJECT_SAMPLES {
-        let observation_path = root
-            .parent()
-            .context("fixture root has no workspace parent")?
-            .join(format!("project-search-observation-{index:02}.json"));
-        ensure!(
-            !observation_path.exists(),
-            "project-search observation path was not fresh"
-        );
-        let environment = [(
-            std::ffi::OsStr::new("ZEC_ALPHA1_SEARCH_OBSERVATION"),
-            observation_path.as_os_str(),
-        )];
-        let (mut session, baseline, _, monitor) = spawn_ready_with_env(
-            zec,
-            root,
-            &format!("bench-project-{index:02}"),
-            &environment,
-        )?;
+        let (mut session, baseline, _, monitor) =
+            spawn_ready(zec, root, &format!("bench-project-{index:02}"))?;
         session.send(ALT_F)?;
         let prompt = session.mark();
         session.wait_contains("benchmark project-search prompt", prompt, "Project search:")?;
@@ -778,23 +749,11 @@ fn project_search_metric(
             operation,
             &expected_status,
         )?;
-        let bytes =
-            fs::read(&observation_path).context("read same-process project-search observation")?;
-        let probe: ProjectSearchProbe =
-            serde_json::from_slice(&bytes).context("parse project-search observation JSON")?;
-        ensure!(
-            probe.query == "ALPHA1_BENCH_SEARCH"
-                && probe.total_hits == fixture::BENCH_SEARCH_HITS
-                && probe.visible_results == expected_rows,
-            "same-process project-search observation differs from spec"
-        );
-        if let Some(previous) = &observation {
-            ensure!(previous == &probe, "project-search observations differ");
-        } else {
-            observation = Some(probe.clone());
-        }
         if index == PROJECT_WARMUPS {
-            assert_ordered_project_search_rows(&mut session, &expected_rows)?;
+            observation = Some(observe_ordered_project_search_rows(
+                &mut session,
+                &expected_rows,
+            )?);
         }
         if index >= PROJECT_WARMUPS {
             samples.push(elapsed);
@@ -809,32 +768,152 @@ fn project_search_metric(
             Some(5_000_000),
             None,
         ),
-        observation.context("project-search produced no observation")?,
+        observation.context("project-search produced no UI observation")?,
     ))
 }
 
-fn assert_ordered_project_search_rows(
+fn observe_ordered_project_search_rows(
     session: &mut PtySession,
     expected_rows: &[SearchResultReport],
-) -> Result<()> {
-    for (index, row) in expected_rows.iter().enumerate().skip(1) {
-        let moved = session.send_marked(DOWN)?;
-        let expected_status = format!(
-            "Project search: ALPHA1_BENCH_SEARCH  {}/{}  {}:{}:{}  {}",
-            index + 1,
-            fixture::BENCH_SEARCH_HITS,
-            row.path,
-            row.line,
-            row.column,
-            row.preview
+) -> Result<ProjectSearchObservation> {
+    let mut total_hits = None;
+    let mut visible_results = Vec::with_capacity(expected_rows.len());
+    for (index, expected) in expected_rows.iter().enumerate() {
+        if index > 0 {
+            let moved = session.send_marked(DOWN)?;
+            let expected_status = format!(
+                "Project search: ALPHA1_BENCH_SEARCH  {}/{}  {}:{}:{}  {}",
+                index + 1,
+                fixture::BENCH_SEARCH_HITS,
+                expected.path,
+                expected.line,
+                expected.column,
+                expected.preview
+            );
+            session.wait_contains(
+                &format!("ordered project-search row {}", index + 1),
+                moved,
+                &expected_status,
+            )?;
+        }
+
+        let (position, observed_total, row) =
+            parse_project_search_status(session.screen(), expected)?;
+        ensure!(
+            position == index + 1,
+            "project-search UI position {} differs from {}",
+            position,
+            index + 1
         );
-        session.wait_contains(
-            &format!("ordered project-search row {}", index + 1),
-            moved,
-            &expected_status,
-        )?;
+        if let Some(previous_total) = total_hits {
+            ensure!(
+                observed_total == previous_total,
+                "project-search UI total changed during traversal"
+            );
+        } else {
+            total_hits = Some(observed_total);
+        }
+        visible_results.push(row);
     }
-    Ok(())
+
+    let total_hits = total_hits.context("project-search UI traversal had no rows")?;
+    ensure!(
+        total_hits == fixture::BENCH_SEARCH_HITS,
+        "project-search UI total differs from fixture"
+    );
+    ensure!(
+        visible_results == expected_rows,
+        "ordered project-search UI rows differ from spec"
+    );
+    Ok(ProjectSearchObservation {
+        total_hits,
+        visible_results,
+    })
+}
+
+fn parse_project_search_status(
+    screen: &vt100::Screen,
+    expected: &SearchResultReport,
+) -> Result<(usize, usize, SearchResultReport)> {
+    const PREFIX: &str = "Project search: ALPHA1_BENCH_SEARCH  ";
+    let contents = screen.contents();
+    let status = contents
+        .lines()
+        .find_map(|line| line.strip_prefix(PREFIX))
+        .context("rendered project-search status line was absent")?;
+    let (position_and_total, result) = status
+        .split_once("  ")
+        .context("rendered project-search status lacked result separator")?;
+    let (position, total_hits) = position_and_total
+        .split_once('/')
+        .context("rendered project-search status lacked position/total")?;
+    let position = position
+        .parse::<usize>()
+        .context("rendered project-search position was not numeric")?;
+    let total_hits = total_hits
+        .parse::<usize>()
+        .context("rendered project-search total was not exact numeric output")?;
+    let (location, preview_and_footer) = result
+        .split_once("  ")
+        .context("rendered project-search status lacked preview separator")?;
+    ensure!(
+        preview_and_footer.starts_with(&expected.preview),
+        "rendered project-search preview differs from exact oracle"
+    );
+    let footer = &preview_and_footer[expected.preview.len()..];
+    let rendered_core = format!(
+        "{PREFIX}{position_and_total}  {location}  {}",
+        expected.preview
+    );
+    ensure!(
+        rendered_core.is_ascii(),
+        "benchmark project-search status oracle must be ASCII"
+    );
+    let remaining_columns = usize::from(alpha_1_support::COLS)
+        .checked_sub(rendered_core.len())
+        .context("project-search status core exceeded terminal width")?;
+    // Every fixed benchmark row leaves at most six cells, so only the
+    // ASCII prefix of ProjectSearchPrompt's action hint can be rendered.
+    const PROJECT_SEARCH_ACTION_PREFIX: &str = "  Enter";
+    ensure!(
+        remaining_columns <= PROJECT_SEARCH_ACTION_PREFIX.len(),
+        "benchmark row left unverified columns after its action hint prefix"
+    );
+    let expected_footer = PROJECT_SEARCH_ACTION_PREFIX
+        .get(..remaining_columns)
+        .expect("ASCII action hint clipping is a character boundary");
+    ensure!(
+        footer == expected_footer,
+        "rendered project-search action suffix differed after terminal clipping: observed {footer:?}, expected {expected_footer:?}"
+    );
+    let preview = &preview_and_footer[..expected.preview.len()];
+    let mut location = location.rsplitn(3, ':');
+    let column = location
+        .next()
+        .context("rendered project-search status lacked column")?
+        .parse::<u32>()
+        .context("rendered project-search column was not numeric")?;
+    let line = location
+        .next()
+        .context("rendered project-search status lacked line")?
+        .parse::<u32>()
+        .context("rendered project-search line was not numeric")?;
+    let path = location
+        .next()
+        .context("rendered project-search status lacked path")?;
+    ensure!(!path.is_empty(), "rendered project-search path was empty");
+
+    let observed = SearchResultReport {
+        path: path.to_owned(),
+        line,
+        column,
+        preview: preview.to_owned(),
+    };
+    ensure!(
+        &observed == expected,
+        "rendered project-search row differs from exact oracle"
+    );
+    Ok((position, total_hits, observed))
 }
 
 fn in_flight_metrics(
@@ -1190,6 +1269,69 @@ mod tests {
     fn benchmark_spec_is_fully_consumed_and_fixed() {
         let oracle = benchmark_oracle().expect("parse benchmark oracle");
         verify_benchmark_oracle(&oracle).expect("verify every benchmark oracle field");
+    }
+
+    #[test]
+    fn project_search_status_parser_handles_120_columns_and_rejects_suffix() {
+        let mut expected = SearchResultReport {
+            path: "bench/search-0099.txt".to_owned(),
+            line: 1,
+            column: 11,
+            preview: String::new(),
+        };
+        let header = format!(
+            "Project search: ALPHA1_BENCH_SEARCH  100/1000  {}:{}:{}  ",
+            expected.path, expected.line, expected.column
+        );
+        let preview_width = usize::from(alpha_1_support::COLS)
+            .checked_sub(header.len())
+            .expect("status header fits the fixed terminal");
+        expected.preview = "x".repeat(preview_width);
+        let status = format!("{header}{}", expected.preview);
+        assert_eq!(status.len(), usize::from(alpha_1_support::COLS));
+
+        let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
+        parser.process(format!("\x1b[2J\x1b[40;1H{status}").as_bytes());
+        let (position, total_hits, observed) =
+            parse_project_search_status(parser.screen(), &expected)
+                .expect("parse an exact full-width status row");
+        assert_eq!((position, total_hits), (100, 1_000));
+        assert_eq!(observed, expected);
+
+        let expected = SearchResultReport {
+            path: "bench/search-0009.txt".to_owned(),
+            line: 1,
+            column: 11,
+            preview: "row 0009: ALPHA1_BENCH_SEARCH result 0009".to_owned(),
+        };
+        let core = format!(
+            "Project search: ALPHA1_BENCH_SEARCH  10/1000  {}:{}:{}  {}",
+            expected.path, expected.line, expected.column, expected.preview
+        );
+        assert_eq!(core.len(), 115);
+        let status_with_clipped_hint = format!("{core}  Ent");
+        assert_eq!(
+            status_with_clipped_hint.len(),
+            usize::from(alpha_1_support::COLS)
+        );
+        let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
+        parser.process(format!("\x1b[2J\x1b[40;1H{status_with_clipped_hint}").as_bytes());
+        let (position, total_hits, observed) =
+            parse_project_search_status(parser.screen(), &expected)
+                .expect("accept the exact action hint clipped at 120 columns");
+        assert_eq!((position, total_hits), (10, 1_000));
+        assert_eq!(observed, expected);
+
+        let status_with_bad_suffix = format!("{core}  EnX");
+        let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
+        parser.process(format!("\x1b[2J\x1b[40;1H{status_with_bad_suffix}").as_bytes());
+        let error = parse_project_search_status(parser.screen(), &expected)
+            .expect_err("unexpected rendered suffix must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("rendered project-search action suffix differed")
+        );
     }
 
     #[test]

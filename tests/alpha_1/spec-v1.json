@@ -55,7 +55,7 @@
   },
   "outside_trace": {
     "path": "/tmp/zec-alpha-1-v1/outside-control.txt",
-    "allowed_operations": ["open-self","stat-self"],
+    "allowed_operations": ["open-self","stat-self","stat-ancestor-git"],
     "outside_parent_read_dir_count": 0,
     "outside_sibling_read_dir_count": 0
   },
@@ -355,7 +355,7 @@
     ]},
     "project_search": {"warmups":2,"samples":10,"p95_max_us":5000000,"expected_hits":1000,"visible_results":100},
     "in_flight_search": {"attempts_each":20,"max_us":250000},
-    "editing": {"path":"bench/large-100000-lines.txt","warmups":10,"samples":500,"p95_max_us":100000,"max_us":500000,"input_id_template":"EDIT_{SEQUENCE_4}"},
+    "editing": {"path":"bench/large-100000-lines.txt","warmups":10,"samples":500,"p95_max_us":100000,"max_us":500000,"input_id_template":"EDIT_{SEQUENCE_4}","payload_suffix":"LF"},
     "save": {"path":"bench/save-5mib.txt","size":5242880,"warmups":2,"samples":10,"max_us":2000000},
     "vm_hwm_max_bytes": 1073741824,
     "descendant_process_count": 0,

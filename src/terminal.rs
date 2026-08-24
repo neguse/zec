@@ -25,8 +25,10 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 #[cfg(unix)]
 use signal_hook::{
     SigId,
-    consts::{SIGHUP, SIGTERM},
+    consts::{SIGHUP, SIGINT, SIGQUIT, SIGSTOP, SIGTERM, SIGTSTP},
 };
+
+use crate::repository::{ProjectSearchOutput, SearchGeneration};
 
 pub type ZecTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -48,6 +50,10 @@ pub enum TerminalEvent {
         buffer_id: u64,
         result: Result<(), String>,
     },
+    ProjectSearchFinished {
+        generation: SearchGeneration,
+        result: Result<ProjectSearchOutput, String>,
+    },
     Error(String),
     Signal(i32),
 }
@@ -58,8 +64,12 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
+        Self::activate()?;
+        Ok(Self { active: true })
+    }
 
+    fn activate() -> io::Result<()> {
+        enable_raw_mode()?;
         if let Err(error) = execute!(
             stdout(),
             EnterAlternateScreen,
@@ -71,8 +81,7 @@ impl TerminalSession {
             let _ = restore_terminal();
             return Err(error);
         }
-
-        Ok(Self { active: true })
+        Ok(())
     }
 
     pub fn terminal(&self) -> io::Result<ZecTerminal> {
@@ -113,6 +122,39 @@ fn restore_terminal() -> io::Result<()> {
     }
 }
 
+pub fn is_suspend_signal(signal: i32) -> bool {
+    #[cfg(unix)]
+    {
+        signal == SIGTSTP
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signal;
+        false
+    }
+}
+
+pub fn suspend_and_resume(terminal: &mut ZecTerminal) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        restore_terminal()?;
+        signal_hook::low_level::raise(SIGSTOP)?;
+        TerminalSession::activate()?;
+        // The physical screen is already clear. Reset Ratatui's previous
+        // buffer without querying the cursor, so the next draw is complete.
+        terminal.swap_buffers();
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = terminal;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "job control is unavailable on this platform",
+        ))
+    }
+}
+
 struct ShutdownSignals {
     pending: Arc<AtomicUsize>,
     #[cfg(unix)]
@@ -124,8 +166,8 @@ impl ShutdownSignals {
         let pending = Arc::new(AtomicUsize::new(0));
         #[cfg(unix)]
         {
-            let mut registrations = Vec::with_capacity(2);
-            for signal in [SIGHUP, SIGTERM] {
+            let mut registrations = Vec::with_capacity(5);
+            for signal in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP] {
                 match signal_hook::flag::register_usize(signal, pending.clone(), signal as usize) {
                     Ok(registration) => registrations.push(registration),
                     Err(error) => {
@@ -217,7 +259,9 @@ fn send_pending_signal(sender: &Sender<TerminalEvent>, pending: &AtomicUsize) ->
         return false;
     };
     let _ = sender.send_blocking(TerminalEvent::Signal(signal));
-    true
+    // Shutdown signals terminate the reader; SIGTSTP must keep it alive so
+    // keyboard input resumes after SIGCONT.
+    !is_suspend_signal(signal)
 }
 
 fn read_events(
@@ -334,6 +378,21 @@ mod tests {
         assert_eq!(pending.load(Ordering::SeqCst), 0);
         assert!(!send_pending_signal(&sender, &pending));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn suspend_signal_is_forwarded_without_stopping_the_reader() {
+        let pending = AtomicUsize::new(SIGTSTP as usize);
+        let (sender, receiver) = async_channel::bounded(1);
+
+        assert!(!send_pending_signal(&sender, &pending));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(TerminalEvent::Signal(SIGTSTP))
+        ));
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn closing_a_full_channel_unblocks_a_blocking_sender() {
         let (sender, _receiver) = async_channel::bounded(1);
