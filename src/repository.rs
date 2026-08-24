@@ -14,7 +14,10 @@ use std::{
     hash::{Hash, Hasher},
     ops::Range,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -516,9 +519,9 @@ fn quick_open_score(folded_query: &str, path: &str) -> Option<QuickOpenScore> {
 
 /// Start one case-sensitive, literal, non-ignored Zed project search.
 ///
-/// Dropping the returned value cancels its GPUI task. The caller should first
-/// invalidate its [`LatestSearch`] generation so a raced completion cannot be
-/// published.
+/// Superseding callers should close its result stream through the cancellation
+/// handle, then retain the running task until `collect` finishes its cooperative
+/// unwind. A raced completion still requires [`LatestSearch`] invalidation.
 pub fn start_literal_project_search(
     query: impl Into<String>,
     fs: Arc<dyn Fs>,
@@ -547,19 +550,58 @@ pub fn start_literal_project_search(
     let results = Search::local(fs, buffer_store, worktree_store, usize::MAX, cx)
         .into_handle(zed_query, cx)
         .results(cx);
+    let cancelled = Arc::new(AtomicBool::new(false));
     Ok(RunningLiteralSearch {
         query: query.into(),
         results,
+        cancelled,
     })
 }
 
-#[must_use = "dropping a running project search cancels it"]
+#[must_use = "a running project search must be collected to completion"]
 pub struct RunningLiteralSearch {
     query: Arc<str>,
     results: SearchResults<SearchResult>,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Best-effort cooperative cancellation for a running Zed search stream.
+/// Closing the receiver requests a stop but is not a completion acknowledgement.
+#[derive(Clone)]
+pub struct RunningLiteralSearchCancellation {
+    cancelled: Arc<AtomicBool>,
+    results: async_channel::Receiver<SearchResult>,
+}
+
+impl RunningLiteralSearchCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, AtomicOrdering::Release);
+        self.results.close();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_probe() -> Self {
+        let (_sender, results) = async_channel::unbounded();
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            results,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(AtomicOrdering::Acquire)
+    }
 }
 
 impl RunningLiteralSearch {
+    pub fn cancellation_handle(&self) -> RunningLiteralSearchCancellation {
+        RunningLiteralSearchCancellation {
+            cancelled: self.cancelled.clone(),
+            results: self.results.rx.clone(),
+        }
+    }
+
     /// Drain Zed's search stream and project anchor ranges into deterministic
     /// terminal rows. Each hit retains the Zed buffer and anchor range used to
     /// open/apply it; the preview is presentation data, not editable state.
@@ -568,12 +610,19 @@ impl RunningLiteralSearch {
         repository: &RepositoryIndex,
         cx: &mut AsyncApp,
     ) -> Result<ProjectSearchOutput> {
-        let SearchResults { task_handle, rx } = self.results;
-        let _task_handle = task_handle;
+        let RunningLiteralSearch {
+            query,
+            results,
+            cancelled,
+        } = self;
+        let SearchResults { task_handle, rx } = results;
         let mut source_limit_reached = false;
         let mut candidates = Vec::new();
 
         while let Ok(result) = rx.recv().await {
+            if cancelled.load(AtomicOrdering::Acquire) {
+                break;
+            }
             match result {
                 SearchResult::Buffer { buffer, ranges } => {
                     let buffer_for_hits = buffer.clone();
@@ -585,6 +634,14 @@ impl RunningLiteralSearch {
                 SearchResult::LimitReached => source_limit_reached = true,
                 SearchResult::WaitingForScan | SearchResult::Searching => {}
             }
+        }
+
+        // Receiver close is only a cooperative stop request. Awaiting Zed's
+        // task acknowledges completion and avoids dropping its scoped worker
+        // pool on a GPUI executor thread.
+        task_handle.await;
+        if cancelled.load(AtomicOrdering::Acquire) {
+            bail!("project search cancelled");
         }
 
         // Project search can encounter both a symlink and its target. Prefer a
@@ -622,7 +679,7 @@ impl RunningLiteralSearch {
             })
             .collect();
         Ok(ProjectSearchOutput {
-            query: self.query,
+            query,
             matches,
             total_hits,
             source_limit_reached,

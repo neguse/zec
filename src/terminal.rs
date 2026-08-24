@@ -28,7 +28,7 @@ use signal_hook::{
     consts::{SIGHUP, SIGINT, SIGQUIT, SIGSTOP, SIGTERM, SIGTSTP},
 };
 
-use crate::repository::{ProjectSearchOutput, SearchGeneration};
+use crate::{ProjectSearchRequestKey, repository::ProjectSearchOutput};
 
 pub type ZecTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -50,8 +50,11 @@ pub enum TerminalEvent {
         buffer_id: u64,
         result: Result<(), String>,
     },
+    ProjectSearchDebounceElapsed {
+        request: ProjectSearchRequestKey,
+    },
     ProjectSearchFinished {
-        generation: SearchGeneration,
+        request: ProjectSearchRequestKey,
         result: Result<ProjectSearchOutput, String>,
     },
     Error(String),

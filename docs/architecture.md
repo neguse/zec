@@ -125,11 +125,22 @@ Zedからstreamされる`Buffer`と`Anchor` rangeをauthorityとする。zecはd
 投影し、canonical file identityとrangeの重複を除いて決定順に並べる。全hit数を保持したままterminalへ
 表示するresultは先頭100件に制限し、`Enter`では保持していた同じBufferとAnchor rangeへcaretを移動する。
 
-queryを変更するたびにgenerationを増やし、古いgenerationを無効化して対応するGPUI taskをdropする。
-したがって高価なZed searchは最新queryの1件だけをactiveにし、queue待ちなしで直ちに開始する。
-completionは現在のgenerationと一致する場合だけpublishし、cancelとraceした古いgenerationの
-success/errorはdiscardする。`Esc`はreducerをIdleへ戻してactive taskをdropするため、完了eventが
-capacity 1のterminal channelへ既に入っていてもUIへ戻さない。
+queryを変更するたびにprompt-local generationを増やし、app-wide coordinatorは同時に実行する
+Zed searchを最大2件、待機requestをlatest 1件に制限する。key editは16 msのtrailing debounceで
+まとめ、bracketed pasteはatomicな完成queryとして直ちにeligibleにする。debounce後のkey queryは
+実行中searchがある間も待機させるため、置換時のbackspace中間queryは2枠目を占有せず、完成した
+pasteだけが予約した2枠目へ直ちに進める。
+
+旧searchの停止はZed `SearchResults` receiverの`close()`でbest-effortに要求する。ただしcloseは
+worker停止のackではないため、新しいpasteのdispatchを待たせず、旧searchのslotも解放しない。
+`RunningLiteralSearch::collect`はclose後もZedの`task_handle`を明示的にawaitし、app-wide
+coordinatorはそのfinish eventまで外側のTask handleを保持する。pasteによるsupersede、空query、
+`Esc`、prompt closeはいずれもreceiverをcloseしてreducer/debounce/pendingをlogical cancelするが、
+in-flight Taskはdropしない。app teardownだけはclose後に外側Taskをdetachして自然unwindを許す。
+
+各requestはprompt session IDとgenerationの組で識別するため、古いcompletionがcapacity 1の
+terminal channelへ既に入った後でpromptを開き直しても、新sessionへsuccess/errorをpublishしない。
+promptが存在しない間のfinish eventもcoordinator自身は処理し、ack済みslotを必ず解放する。
 
 Alpha 1 benchmarkはactual production binaryをPTYで操作し、VT parserが描画したstatusを下矢印で
 1件ずつ進め、表示上限100件のpath、line、column、previewと順序をすべてspecと直接比較する。
