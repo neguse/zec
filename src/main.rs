@@ -8,7 +8,7 @@ mod terminal;
 mod tracing_fs;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     env,
     ffi::OsString,
     io::{self, IsTerminal as _},
@@ -64,7 +64,6 @@ use zed_fs::{Fs, RealFs};
 
 const USAGE: &str = "Usage: zec [DIRECTORY | FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-P quick open, Alt-F project search, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
 const QUICK_OPEN_LIMIT: usize = 100;
-const MAX_CONCURRENT_PROJECT_SEARCHES: usize = 2;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -212,25 +211,21 @@ struct ScheduledProjectSearch {
 
 struct ProjectSearchCompletion {
     disposition: CompletionDisposition,
-    next: Option<ScheduledProjectSearch>,
 }
 
-/// Bounds expensive Zed full-search work while keeping prompt state on the
-/// newest generation. Two requests may run concurrently so a replacement
-/// query never waits for the request it superseded; additional edits coalesce
-/// into one latest-only queue entry.
+/// Keeps at most the newest expensive Zed full-search active. Every changed
+/// query invalidates the old generation immediately; the prompt owner then
+/// drops the corresponding task before dispatching this request.
 struct ProjectSearchScheduler<R, E> {
     reducer: LatestSearch<String, R, E>,
-    active: BTreeSet<SearchGeneration>,
-    queued: Option<ScheduledProjectSearch>,
+    active: Option<SearchGeneration>,
 }
 
 impl<R, E> Default for ProjectSearchScheduler<R, E> {
     fn default() -> Self {
         Self {
             reducer: LatestSearch::default(),
-            active: BTreeSet::new(),
-            queued: None,
+            active: None,
         }
     }
 }
@@ -240,22 +235,15 @@ impl<R, E> ProjectSearchScheduler<R, E> {
         self.reducer.state()
     }
 
-    fn request(&mut self, query: String) -> Result<Option<ScheduledProjectSearch>> {
+    fn request(&mut self, query: String) -> Result<ScheduledProjectSearch> {
         let generation = self.reducer.begin(query.clone())?;
-        let request = ScheduledProjectSearch { generation, query };
-        if self.active.len() < MAX_CONCURRENT_PROJECT_SEARCHES {
-            let inserted = self.active.insert(generation);
-            debug_assert!(inserted, "new search generation must be unique");
-            Ok(Some(request))
-        } else {
-            self.queued = Some(request);
-            Ok(None)
-        }
+        self.active = Some(generation);
+        Ok(ScheduledProjectSearch { generation, query })
     }
 
     fn cancel(&mut self) {
         self.reducer.cancel();
-        self.queued = None;
+        self.active = None;
     }
 
     fn complete(
@@ -263,28 +251,20 @@ impl<R, E> ProjectSearchScheduler<R, E> {
         generation: SearchGeneration,
         result: std::result::Result<R, E>,
     ) -> ProjectSearchCompletion {
-        if !self.active.remove(&generation) {
+        if self.active != Some(generation) {
             return ProjectSearchCompletion {
                 disposition: CompletionDisposition::DiscardedStale,
-                next: None,
             };
         }
 
+        self.active = None;
         let disposition = self.reducer.complete(generation, result);
-        let next = if self.active.len() < MAX_CONCURRENT_PROJECT_SEARCHES {
-            self.queued.take().inspect(|request| {
-                let inserted = self.active.insert(request.generation);
-                debug_assert!(inserted, "queued search generation must be unique");
-            })
-        } else {
-            None
-        };
-        ProjectSearchCompletion { disposition, next }
+        ProjectSearchCompletion { disposition }
     }
 
     #[cfg(test)]
     fn active_count(&self) -> usize {
-        self.active.len()
+        usize::from(self.active.is_some())
     }
 }
 
@@ -303,6 +283,19 @@ impl ProjectSearchPrompt {
             selected: 0,
             tasks: BTreeMap::new(),
         }
+    }
+
+    /// Invalidate before dropping tasks so even a completion already queued
+    /// on the bounded terminal channel is harmless when it is later handled.
+    fn cancel_search(&mut self) {
+        self.scheduler.cancel();
+        self.tasks.clear();
+    }
+
+    fn replace_search(&mut self, query: String) -> Result<ScheduledProjectSearch> {
+        let request = self.scheduler.request(query)?;
+        self.tasks.clear();
+        Ok(request)
     }
 
     fn output(&self) -> Option<&ProjectSearchOutput> {
@@ -373,6 +366,12 @@ impl ProjectSearchPrompt {
             ),
             cursor_column,
         )
+    }
+}
+
+impl Drop for ProjectSearchPrompt {
+    fn drop(&mut self) {
+        self.cancel_search();
     }
 }
 
@@ -2131,29 +2130,15 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         let Some(project_search) = project_search_prompt.as_mut() else {
                             continue;
                         };
-                        let repository = repository
-                            .as_ref()
-                            .expect("Project search requires repository");
-                        match finish_project_search(
-                            project_search,
-                            generation,
-                            result,
-                            repository,
-                            &services,
-                            redraw_sender.clone(),
-                            cx,
-                        ) {
-                            Ok(CompletionDisposition::Published) => {
+                        match finish_project_search(project_search, generation, result) {
+                            CompletionDisposition::Published => {
                                 quit_armed = false;
                                 close_armed = false;
                                 reload_armed = false;
                                 save_conflict_armed = false;
                                 message = None;
                             }
-                            Ok(CompletionDisposition::DiscardedStale) => {}
-                            Err(error) => {
-                                message = Some(format!("project search failed: {error:#}"));
-                            }
+                            CompletionDisposition::DiscardedStale => {}
                         }
                     }
                     TerminalEvent::ReloadFinished { buffer_id, result } => {
@@ -2669,42 +2654,36 @@ fn start_zed_project_search_command(
 
 fn dispatch_project_search(
     prompt: &mut ProjectSearchPrompt,
-    mut request: ScheduledProjectSearch,
+    request: ScheduledProjectSearch,
     repository: &RepositorySession,
     services: &FileServices,
     event_sender: async_channel::Sender<TerminalEvent>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
-    loop {
-        let generation = request.generation;
-        let command = match start_zed_project_search_command(request, repository, services, cx) {
-            Ok(command) => command,
-            Err(error) => {
-                let completion = prompt
-                    .scheduler
-                    .complete(generation, Err(format!("{error:#}")));
-                if let Some(next) = completion.next {
-                    request = next;
-                    continue;
-                }
-                return Err(error);
-            }
-        };
-        let task = cx.spawn(async move |_cx| {
-            let result = command.completion.await;
-            let _ = event_sender
-                .send(TerminalEvent::ProjectSearchFinished {
-                    generation: command.generation,
-                    result,
-                })
-                .await;
-        });
-        ensure!(
-            prompt.tasks.insert(generation, task).is_none(),
-            "project search generation was dispatched twice"
-        );
-        return Ok(());
-    }
+    let generation = request.generation;
+    let command = match start_zed_project_search_command(request, repository, services, cx) {
+        Ok(command) => command,
+        Err(error) => {
+            prompt
+                .scheduler
+                .complete(generation, Err(format!("{error:#}")));
+            return Err(error);
+        }
+    };
+    let task = cx.spawn(async move |_cx| {
+        let result = command.completion.await;
+        let _ = event_sender
+            .send(TerminalEvent::ProjectSearchFinished {
+                generation: command.generation,
+                result,
+            })
+            .await;
+    });
+    ensure!(
+        prompt.tasks.insert(generation, task).is_none(),
+        "project search generation was dispatched twice"
+    );
+    Ok(())
 }
 
 fn begin_project_search(
@@ -2717,13 +2696,12 @@ fn begin_project_search(
     prompt.selected = 0;
     let query = prompt.prompt.text().to_owned();
     if query.is_empty() {
-        prompt.scheduler.cancel();
+        prompt.cancel_search();
         return Ok(());
     }
 
-    if let Some(request) = prompt.scheduler.request(query)? {
-        dispatch_project_search(prompt, request, repository, services, event_sender, cx)?;
-    }
+    let request = prompt.replace_search(query)?;
+    dispatch_project_search(prompt, request, repository, services, event_sender, cx)?;
     Ok(())
 }
 
@@ -2759,16 +2737,8 @@ fn finish_project_search(
     prompt: &mut ProjectSearchPrompt,
     generation: SearchGeneration,
     result: std::result::Result<ProjectSearchOutput, String>,
-    repository: &RepositorySession,
-    services: &FileServices,
-    event_sender: async_channel::Sender<TerminalEvent>,
-    cx: &mut gpui::AsyncApp,
-) -> Result<CompletionDisposition> {
-    let completion = complete_project_search(prompt, generation, result);
-    if let Some(next) = completion.next {
-        dispatch_project_search(prompt, next, repository, services, event_sender, cx)?;
-    }
-    Ok(completion.disposition)
+) -> CompletionDisposition {
+    complete_project_search(prompt, generation, result).disposition
 }
 
 fn move_caret_to_project_search_hit(
@@ -3862,10 +3832,7 @@ async fn collect_project_search(
     cx: &mut gpui::AsyncApp,
 ) -> Result<ProjectSearchOutput> {
     let mut prompt = ProjectSearchPrompt::new();
-    let request = prompt
-        .scheduler
-        .request(query)?
-        .context("project search did not start")?;
+    let request = prompt.scheduler.request(query)?;
     let command = start_zed_project_search_command(request, repository, services, cx)?;
     let output = command.completion.await.map_err(anyhow::Error::msg)?;
     ensure!(
@@ -4169,15 +4136,9 @@ async fn alpha_1_stale_result_probe(
     let repository = prepare_repository(root, services, cx).await?;
     let mut prompt = ProjectSearchPrompt::new();
 
-    let request_a = prompt
-        .scheduler
-        .request("ALPHA1_STALE_A".to_owned())?
-        .context("query A did not start")?;
+    let request_a = prompt.scheduler.request("ALPHA1_STALE_A".to_owned())?;
     let command_a = start_zed_project_search_command(request_a, &repository, services, cx)?;
-    let request_b = prompt
-        .scheduler
-        .request("ALPHA1_STALE_B".to_owned())?
-        .context("query B did not start")?;
+    let request_b = prompt.scheduler.request("ALPHA1_STALE_B".to_owned())?;
     let command_b = start_zed_project_search_command(request_b, &repository, services, cx)?;
 
     let mut publish_log = Vec::new();
@@ -4256,8 +4217,7 @@ async fn alpha_1_search_failure_probe(
         async_channel::bounded::<std::result::Result<ProjectSearchOutput, String>>(1);
     let request = prompt
         .scheduler
-        .request("ALPHA1_SEARCH_FAILURE".to_owned())?
-        .context("controlled failing search did not start")?;
+        .request("ALPHA1_SEARCH_FAILURE".to_owned())?;
     let command = start_project_search_command_with(request, cx, move |_query, cx| {
         Ok(cx.spawn(async move |_cx| {
             provider_receiver
@@ -4425,59 +4385,36 @@ mod tests {
     }
 
     #[test]
-    fn project_search_scheduler_is_bounded_and_coalesces_to_latest() {
+    fn project_search_scheduler_supersedes_every_obsolete_generation() {
         let mut scheduler = ProjectSearchScheduler::<String, String>::default();
         let first = scheduler
             .request("query-0000".to_owned())
-            .unwrap()
             .expect("first query starts immediately");
-        let second = scheduler
-            .request("query-0001".to_owned())
-            .unwrap()
-            .expect("replacement query starts immediately");
-        let mut started_queries = vec![first.query.clone(), second.query.clone()];
+        let mut obsolete = vec![first.generation];
+        let mut latest = first;
         let mut max_active = scheduler.active_count();
 
-        for index in 2..1_000 {
-            assert!(
-                scheduler
-                    .request(format!("query-{index:04}"))
-                    .unwrap()
-                    .is_none(),
-                "queries beyond the two active slots must be queued"
-            );
+        for index in 1..1_000 {
+            latest = scheduler
+                .request(format!("query-{index:04}"))
+                .expect("every replacement query starts immediately");
+            obsolete.push(latest.generation);
             max_active = max_active.max(scheduler.active_count());
         }
-        assert_eq!(scheduler.active_count(), 2);
-        assert_eq!(
-            scheduler
-                .queued
-                .as_ref()
-                .map(|request| request.query.as_str()),
-            Some("query-0999")
-        );
-
-        // A synchronous failure of a stale active request must release its
-        // slot to the coalesced latest query instead of losing that query.
-        let first_completion = scheduler.complete(first.generation, Err("start failed".to_owned()));
-        assert_eq!(
-            first_completion.disposition,
-            CompletionDisposition::DiscardedStale
-        );
-        let latest = first_completion
-            .next
-            .expect("latest queued query must be dispatched");
-        started_queries.push(latest.query.clone());
-        max_active = max_active.max(scheduler.active_count());
-
-        let second_completion =
-            scheduler.complete(second.generation, Ok("stale result".to_owned()));
-        assert_eq!(
-            second_completion.disposition,
-            CompletionDisposition::DiscardedStale
-        );
-        assert!(second_completion.next.is_none());
+        let latest_generation = obsolete.pop().expect("latest generation");
+        assert_eq!(latest.generation, latest_generation);
+        assert_eq!(latest.query, "query-0999");
         assert_eq!(scheduler.active_count(), 1);
+
+        for generation in obsolete {
+            assert_eq!(
+                scheduler
+                    .complete(generation, Ok("stale result".to_owned()))
+                    .disposition,
+                CompletionDisposition::DiscardedStale
+            );
+            assert_eq!(scheduler.active_count(), 1);
+        }
 
         let latest_completion =
             scheduler.complete(latest.generation, Ok("latest result".to_owned()));
@@ -4485,10 +4422,8 @@ mod tests {
             latest_completion.disposition,
             CompletionDisposition::Published
         );
-        assert!(latest_completion.next.is_none());
         assert_eq!(scheduler.active_count(), 0);
-        assert_eq!(max_active, MAX_CONCURRENT_PROJECT_SEARCHES);
-        assert_eq!(started_queries, ["query-0000", "query-0001", "query-0999"]);
+        assert_eq!(max_active, 1);
         assert_eq!(
             scheduler.state(),
             &LatestSearchState::Ready {
@@ -4496,6 +4431,56 @@ mod tests {
                 query: "query-0999".to_owned(),
                 result: "latest result".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn project_search_prompt_drops_obsolete_task_handles() {
+        let mut prompt = ProjectSearchPrompt::new();
+        let first = prompt
+            .replace_search("first".to_owned())
+            .expect("first search request");
+        assert!(
+            prompt
+                .tasks
+                .insert(first.generation, Task::ready(()))
+                .is_none()
+        );
+
+        let latest = prompt
+            .replace_search("latest".to_owned())
+            .expect("replacement search request");
+        assert!(prompt.tasks.is_empty(), "obsolete task handle was retained");
+        assert_eq!(prompt.scheduler.active_count(), 1);
+        assert!(matches!(
+            prompt.scheduler.state(),
+            LatestSearchState::Running { generation, query }
+                if *generation == latest.generation && query == "latest"
+        ));
+        assert_eq!(
+            prompt
+                .scheduler
+                .complete(first.generation, Err("stale".to_owned()))
+                .disposition,
+            CompletionDisposition::DiscardedStale
+        );
+
+        assert!(
+            prompt
+                .tasks
+                .insert(latest.generation, Task::ready(()))
+                .is_none()
+        );
+        prompt.cancel_search();
+        assert!(prompt.tasks.is_empty(), "cancel retained a task handle");
+        assert_eq!(prompt.scheduler.active_count(), 0);
+        assert!(matches!(prompt.scheduler.state(), LatestSearchState::Idle));
+        assert_eq!(
+            prompt
+                .scheduler
+                .complete(latest.generation, Err("cancelled".to_owned()))
+                .disposition,
+            CompletionDisposition::DiscardedStale
         );
     }
 

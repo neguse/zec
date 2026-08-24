@@ -125,10 +125,11 @@ Zedからstreamされる`Buffer`と`Anchor` rangeをauthorityとする。zecはd
 投影し、canonical file identityとrangeの重複を除いて決定順に並べる。全hit数を保持したままterminalへ
 表示するresultは先頭100件に制限し、`Enter`では保持していた同じBufferとAnchor rangeへcaretを移動する。
 
-queryを変更するたびにgenerationを増やす。高価なZed searchは同時に最大2つまで実行し、2 slotが
-埋まっている間の追加queryはqueue 1件へ最新値だけをcoalesceする。completionは現在のgenerationと
-一致する場合だけpublishし、古いgenerationのsuccess/errorはdiscardする。`Esc`はpromptとqueued
-requestを消してreducerをIdleへ戻すため、既に走っていたtaskがraceして完了してもUIへ戻さない。
+queryを変更するたびにgenerationを増やし、古いgenerationを無効化して対応するGPUI taskをdropする。
+したがって高価なZed searchは最新queryの1件だけをactiveにし、queue待ちなしで直ちに開始する。
+completionは現在のgenerationと一致する場合だけpublishし、cancelとraceした古いgenerationの
+success/errorはdiscardする。`Esc`はreducerをIdleへ戻してactive taskをdropするため、完了eventが
+capacity 1のterminal channelへ既に入っていてもUIへ戻さない。
 
 Alpha 1 benchmarkはactual production binaryをPTYで操作し、VT parserが描画したstatusを下矢印で
 1件ずつ進め、表示上限100件のpath、line、column、previewと順序をすべてspecと直接比較する。
