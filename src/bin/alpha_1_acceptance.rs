@@ -17,6 +17,7 @@ use alpha_1_support::{
 use anyhow::{Context as _, Result, ensure};
 use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 
 fn main() -> Result<()> {
     match parse_invocation(true)? {
@@ -243,6 +244,7 @@ struct Alpha1Oracle {
     quick_open: QuickOpenOracle,
     project_search: ProjectSearchOracle,
     outside_trace: OutsideTraceOracle,
+    partial_startup: PartialStartupOracle,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -302,6 +304,15 @@ struct OutsideTraceOracle {
     allowed_operations: Vec<String>,
     outside_parent_read_dir_count: usize,
     outside_sibling_read_dir_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct PartialStartupOracle {
+    normal_path: String,
+    eloop_path: String,
+    expected_error: String,
+    editable_token: String,
+    expected_exit_code: i32,
 }
 
 fn alpha_1_oracle() -> Result<Alpha1Oracle> {
@@ -494,9 +505,19 @@ fn outside_trace(zec: &Path) -> Result<String> {
 
 fn partial_startup(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
+    let oracle = alpha_1_oracle()?;
+    let partial = &oracle.partial_startup;
+    ensure!(
+        partial.expected_error == "ELOOP",
+        "partial-startup expected error must be ELOOP"
+    );
+    ensure!(
+        partial.expected_exit_code == 0,
+        "partial-startup expected exit code must be zero"
+    );
     let config = alpha_1_support::fresh_config_dir("A1_PARTIAL_STARTUP")?;
-    let normal = generated.root.join(fixture::READY_PATH);
-    let loop_path = generated.root.join("links/root-loop");
+    let normal = generated.root.join(&partial.normal_path);
+    let loop_path = generated.root.join(&partial.eloop_path);
     let (mut session, baseline) = PtySession::spawn(
         zec,
         &generated.root,
@@ -504,18 +525,18 @@ fn partial_startup(zec: &Path) -> Result<String> {
         &config,
     )?;
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
+    let expected_error = format!("ELOOP opening {}", loop_path.display());
     ensure!(
-        session.screen().contents().contains("ELOOP")
-            || session.screen().contents().contains("Too many levels"),
-        "partial startup did not render ELOOP"
+        session.screen().contents().contains(&expected_error),
+        "partial startup did not render exact error prefix {expected_error:?}"
     );
     session.send(CTRL_A)?;
-    session.paste("ALPHA1_PARTIAL_STARTUP_EDIT")?;
+    session.paste(&partial.editable_token)?;
     session.send(CTRL_S)?;
     let mark = session.mark();
     session.wait_contains("partial startup save", mark, "saved")?;
     ensure!(
-        fs::read(&normal)? == b"ALPHA1_PARTIAL_STARTUP_EDIT",
+        fs::read(&normal)? == partial.editable_token.as_bytes(),
         "partial startup edit did not reach disk"
     );
     clean_quit(&mut session, &baseline)?;
@@ -641,22 +662,54 @@ fn open_project_query(session: &mut PtySession, query: &ProjectSearchQueryOracle
     );
     wait_project_query(session, query)?;
     let expected = &query.expected_results[0];
+    let terminal_column = terminal_cell_column(&expected.preview, expected.column)?;
+    let opened_label = format!(
+        "opened {}:{}:{}",
+        expected.path, expected.line, expected.column
+    );
     session.send(ENTER)?;
     let opened = session.mark();
-    let caret = format!("Ln {}, Col {}", expected.line, expected.column);
     session.wait_after(
         &format!("open exact project-search result {}", query.id),
         opened,
         alpha_1_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
-            contents.contains(&expected.path)
+            let expected_row = u16::try_from(expected.line.saturating_sub(1)).ok();
+            let cursor_matches = expected_row.is_some_and(|expected_row| {
+                let (cursor_row, cursor_column) = screen.cursor_position();
+                if cursor_row != expected_row {
+                    return false;
+                }
+                let row = screen.contents_between(cursor_row, 0, cursor_row, screen.size().1);
+                row.find(&expected.preview).is_some_and(|preview_byte| {
+                    let preview_start = row[..preview_byte].width();
+                    usize::from(cursor_column)
+                        == preview_start.saturating_add(terminal_column.saturating_sub(1))
+                })
+            });
+            contents.contains(&opened_label)
                 && contents.contains(&expected.preview)
-                && contents.contains(&caret)
+                && cursor_matches
                 && !contents.contains("Project search:")
         },
     )?;
     Ok(())
+}
+
+fn terminal_cell_column(line: &str, scalar_column: u32) -> Result<usize> {
+    ensure!(scalar_column > 0, "project-search columns are 1-based");
+    let scalar_offset = usize::try_from(scalar_column.saturating_sub(1))
+        .context("project-search scalar column does not fit usize")?;
+    let prefix = line
+        .char_indices()
+        .nth(scalar_offset)
+        .map_or(line, |(byte_offset, _)| &line[..byte_offset]);
+    ensure!(
+        scalar_offset <= line.chars().count(),
+        "project-search scalar column {scalar_column} exceeds preview {line:?}"
+    );
+    Ok(prefix.width().saturating_add(1))
 }
 
 fn project_search(zec: &Path) -> Result<String> {
@@ -897,27 +950,28 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         &reopen_config,
     )?;
     reopen.wait_ready("repo", fixture::READY_SENTINEL)?;
-    for (path, token, caret) in [
+    for (path, token, expected_cursor) in [
         (
             fixture::EDIT_A_PATH,
             format!("ALPHA1_EDIT_A_{run:02}"),
-            "Ln 1, Col 1",
+            (0, 2),
         ),
         (
             fixture::EDIT_C_PATH,
             format!("ALPHA1_EDIT_C_{run:02}"),
-            "Ln 1, Col 1",
+            (0, 2),
         ),
         (
             fixture::EDIT_D_PATH,
             format!("ALPHA1_EDIT_D_{run:02}"),
-            "Ln 1, Col 1",
+            (0, 2),
         ),
     ] {
         open_quick(&mut reopen, path, path, &token)?;
         ensure!(
-            reopen.screen().contents().contains(caret),
-            "reopen caret differs for {path}"
+            reopen.screen().cursor_position() == expected_cursor,
+            "reopen VT caret differs for {path}: expected {expected_cursor:?}, got {:?}",
+            reopen.screen().cursor_position()
         );
         ensure!(
             fs::read(generated.root.join(path))?
@@ -928,9 +982,10 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
     let b_token = format!("ALPHA1_EDIT_B_{run:02}");
     open_project(&mut reopen, &b_token, fixture::EDIT_B_PATH, &b_token)?;
     ensure!(
-        reopen.screen().contents().contains("Ln 2, Col 26"),
-        "project-search reopen caret differs for {}",
-        fixture::EDIT_B_PATH
+        reopen.screen().cursor_position() == (1, 27),
+        "project-search reopen VT caret differs for {}: expected (1, 27), got {:?}",
+        fixture::EDIT_B_PATH,
+        reopen.screen().cursor_position()
     );
     ensure!(
         fs::read(generated.root.join(fixture::EDIT_B_PATH))?
@@ -1216,4 +1271,24 @@ fn clean_quit(session: &mut PtySession, baseline: &nix::sys::termios::Termios) -
     let status = session.wait_exit()?;
     ensure!(status.success(), "Ctrl-Q exit failed: {status}");
     session.assert_restored_and_joined(baseline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_cell_column;
+
+    #[test]
+    fn converts_scalar_columns_to_terminal_cell_columns() {
+        assert_eq!(
+            terminal_cell_column("Unicode path fixture: 日本語 e\u{301}", 27).unwrap(),
+            30
+        );
+        assert_eq!(
+            terminal_cell_column("// Alpha 1 UTF-8 BOM fixture", 4).unwrap(),
+            4
+        );
+        assert_eq!(terminal_cell_column("control", 1).unwrap(), 1);
+        assert!(terminal_cell_column("control", 0).is_err());
+        assert!(terminal_cell_column("control", 9).is_err());
+    }
 }

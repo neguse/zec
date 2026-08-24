@@ -1,25 +1,31 @@
 mod alpha_1_support;
 
 use std::{
-    collections::BTreeMap,
-    fs,
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
-    sync::mpsc::{self, Sender, TryRecvError},
+    process,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        mpsc::{self, Sender, TryRecvError},
+    },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use alpha_1_support::{
     ALT_F, BenchmarkReport, CTRL_G, CTRL_P, CTRL_Q, CTRL_S, DELETE, DOWN, ENTER, ESC, InputTrace,
-    Invocation, MetricReport, PtySession, REPORT_SCHEMA_VERSION, binary_report,
+    Invocation, MetricReport, PtySession, REPORT_SCHEMA_VERSION, benchmark_oracle, binary_report,
     descendant_process_count, environment_report, fixture, oracle_hashes, parse_invocation,
-    reset_fixed_fixture, verify_benchmark_report, vm_hwm_bytes, write_report,
+    reset_fixed_fixture, verify_benchmark_oracle, verify_benchmark_report, vm_hwm_bytes_if_present,
+    write_report,
 };
 use alpha_1_support::{
     SearchResultReport, expected_benchmark_quick_open_queries, expected_benchmark_search_rows,
 };
-use anyhow::{Context as _, Result, ensure};
-use nix::sys::termios::Termios;
+use anyhow::{Context as _, Result, bail, ensure};
+use nix::{libc, sys::termios::Termios};
 use serde::Deserialize;
 
 const STARTUP_WARMUPS: usize = 2;
@@ -33,6 +39,20 @@ const EDIT_WARMUPS: usize = 10;
 const EDIT_SAMPLES: usize = 500;
 const SAVE_WARMUPS: usize = 2;
 const SAVE_SAMPLES: usize = 10;
+
+const NETLINK_CONNECTOR: i32 = 11;
+const CN_IDX_PROC: u32 = 1;
+const CN_VAL_PROC: u32 = 1;
+const PROC_CN_MCAST_IGNORE: u32 = 2;
+const PROC_CN_MCAST_LISTEN: u32 = 1;
+const NLMSG_NOOP: u16 = 1;
+const NLMSG_ERROR: u16 = 2;
+const NLMSG_DONE: u16 = 3;
+const NLMSG_OVERRUN: u16 = 4;
+const PROC_EVENT_FORK: u32 = 1;
+const NETLINK_HEADER_LEN: usize = 16;
+const CONNECTOR_HEADER_LEN: usize = 20;
+static NEXT_CONTROL_SEQUENCE: AtomicU32 = AtomicU32::new(1);
 
 fn main() -> Result<()> {
     match parse_invocation(false)? {
@@ -48,6 +68,8 @@ fn main() -> Result<()> {
 }
 
 fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
+    let benchmark_oracle = benchmark_oracle()?;
+    verify_benchmark_oracle(&benchmark_oracle)?;
     let zec = fs::canonicalize(&arguments.zec).context("canonicalize --zec")?;
     let generated = reset_fixed_fixture()?;
     let mut resources = ResourceTracker::default();
@@ -58,7 +80,12 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
         project_search_metric(&zec, &generated.root, &mut resources)?;
     let (replace_query, cancel_search, quit_in_flight_search) =
         in_flight_metrics(&zec, &generated.root, &mut resources)?;
-    let (editing, input_trace) = editing_metric(&zec, &generated.root, &mut resources)?;
+    let (editing, input_trace) = editing_metric(
+        &zec,
+        &generated.root,
+        &mut resources,
+        &benchmark_oracle.editing.payload_suffix,
+    )?;
     let save = save_metric(&zec, &generated.root, &mut resources)?;
 
     let assertions = BTreeMap::from([
@@ -90,7 +117,7 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
         ),
         (
             "vm_hwm".to_owned(),
-            resources.max_vm_hwm_bytes <= 1_073_741_824,
+            resources.max_vm_hwm_bytes > 0 && resources.max_vm_hwm_bytes <= 1_073_741_824,
         ),
         (
             "no_descendant_processes".to_owned(),
@@ -155,6 +182,318 @@ struct ProjectSearchProbe {
     visible_results: Vec<SearchResultReport>,
 }
 
+struct ArmedResourceMonitor {
+    events: ProcEventSocket,
+}
+
+struct ProcEventSocket {
+    fd: OwnedFd,
+    subscribed: bool,
+}
+
+impl ProcEventSocket {
+    fn subscribe() -> Result<Self> {
+        let raw_fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                NETLINK_CONNECTOR,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error()).context("open proc-connector socket");
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let receive_buffer: libc::c_int = 4 * 1024 * 1024;
+        let configured = unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&receive_buffer as *const libc::c_int).cast(),
+                std::mem::size_of_val(&receive_buffer) as libc::socklen_t,
+            )
+        };
+        if configured < 0 {
+            return Err(io::Error::last_os_error())
+                .context("configure proc-connector receive buffer");
+        }
+
+        let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        address.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+        address.nl_pid = process::id();
+        address.nl_groups = CN_IDX_PROC;
+        let bound = unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                (&address as *const libc::sockaddr_nl).cast(),
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        };
+        if bound < 0 {
+            return Err(io::Error::last_os_error()).context("bind proc-connector socket");
+        }
+
+        let mut socket = Self {
+            fd,
+            subscribed: false,
+        };
+        let acknowledgement = socket.send_subscription(PROC_CN_MCAST_LISTEN)?;
+        socket.subscribed = true;
+        socket.wait_control_ack("LISTEN", acknowledgement)?;
+        Ok(socket)
+    }
+
+    fn unsubscribe(&mut self) -> Result<()> {
+        if self.subscribed {
+            let _ = self.send_subscription(PROC_CN_MCAST_IGNORE)?;
+            self.subscribed = false;
+        }
+        Ok(())
+    }
+
+    fn wait_control_ack(&self, operation: &str, expected_acknowledgement: u32) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let received = unsafe {
+                libc::recv(
+                    self.fd.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    0,
+                )
+            };
+            if received < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    ensure!(
+                        Instant::now() < deadline,
+                        "proc-connector {operation} acknowledgement timed out"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if error.raw_os_error() == Some(libc::ENOBUFS) {
+                    bail!("proc-connector lost events before {operation} acknowledgement");
+                }
+                return Err(error).with_context(|| {
+                    format!("receive proc-connector {operation} acknowledgement")
+                });
+            }
+            ensure!(received > 0, "proc-connector returned EOF");
+            if parse_proc_events(
+                &buffer[..received as usize],
+                &mut Vec::new(),
+                Some(expected_acknowledgement),
+            )? {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "proc-connector {operation} acknowledgement timed out"
+            );
+        }
+    }
+
+    fn send_subscription(&self, operation: u32) -> Result<u32> {
+        let sequence = NEXT_CONTROL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let request_acknowledgement = process::id();
+        let message_len = NETLINK_HEADER_LEN + CONNECTOR_HEADER_LEN + 4;
+        let mut message = Vec::with_capacity(message_len);
+        push_u32(&mut message, message_len as u32);
+        push_u16(&mut message, NLMSG_DONE);
+        push_u16(&mut message, 1);
+        push_u32(&mut message, sequence);
+        push_u32(&mut message, process::id());
+        push_u32(&mut message, CN_IDX_PROC);
+        push_u32(&mut message, CN_VAL_PROC);
+        push_u32(&mut message, sequence);
+        push_u32(&mut message, request_acknowledgement);
+        push_u16(&mut message, 4);
+        push_u16(&mut message, 0);
+        push_u32(&mut message, operation);
+        ensure!(
+            message.len() == message_len,
+            "proc-connector message size differs"
+        );
+
+        let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        kernel.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+        let sent = unsafe {
+            libc::sendto(
+                self.fd.as_raw_fd(),
+                message.as_ptr().cast(),
+                message.len(),
+                0,
+                (&kernel as *const libc::sockaddr_nl).cast(),
+                std::mem::size_of_val(&kernel) as libc::socklen_t,
+            )
+        };
+        if sent < 0 {
+            return Err(io::Error::last_os_error()).context("subscribe to proc fork events");
+        }
+        ensure!(sent as usize == message.len(), "short proc-connector send");
+        Ok(request_acknowledgement.wrapping_add(1))
+    }
+
+    fn drain_fork_edges(&self, edges: &mut Vec<(i32, i32)>) -> Result<()> {
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let received = unsafe {
+                libc::recv(
+                    self.fd.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    0,
+                )
+            };
+            if received < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    return Ok(());
+                }
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if error.raw_os_error() == Some(libc::ENOBUFS) {
+                    bail!("proc-connector lost fork events (ENOBUFS)");
+                }
+                return Err(error).context("receive proc fork events");
+            }
+            ensure!(received > 0, "proc-connector returned EOF");
+            let _ = parse_proc_events(&buffer[..received as usize], edges, None)?;
+        }
+    }
+}
+
+impl Drop for ProcEventSocket {
+    fn drop(&mut self) {
+        let _ = self.unsubscribe();
+    }
+}
+
+fn parse_proc_events(
+    datagram: &[u8],
+    edges: &mut Vec<(i32, i32)>,
+    expected_acknowledgement: Option<u32>,
+) -> Result<bool> {
+    let mut matched_acknowledgement = false;
+    let mut offset = 0;
+    while offset < datagram.len() {
+        ensure!(
+            datagram.len() - offset >= NETLINK_HEADER_LEN,
+            "truncated netlink header"
+        );
+        let message_len = read_u32(datagram, offset)? as usize;
+        let message_type = read_u16(datagram, offset + 4)?;
+        ensure!(
+            message_len >= NETLINK_HEADER_LEN && offset + message_len <= datagram.len(),
+            "invalid netlink message length"
+        );
+        match message_type {
+            NLMSG_NOOP => {}
+            NLMSG_ERROR => {
+                ensure!(
+                    message_len >= NETLINK_HEADER_LEN + 4,
+                    "truncated netlink error"
+                );
+                let code = read_i32(datagram, offset + NETLINK_HEADER_LEN)?;
+                ensure!(code == 0, "proc-connector netlink error {code}");
+            }
+            NLMSG_OVERRUN => bail!("proc-connector reported lost fork events"),
+            NLMSG_DONE => {
+                let connector = offset + NETLINK_HEADER_LEN;
+                ensure!(
+                    message_len >= NETLINK_HEADER_LEN + CONNECTOR_HEADER_LEN,
+                    "truncated connector header"
+                );
+                let index = read_u32(datagram, connector)?;
+                let value = read_u32(datagram, connector + 4)?;
+                let acknowledgement = read_u32(datagram, connector + 12)?;
+                let payload_len = read_u16(datagram, connector + 16)? as usize;
+                let payload = connector + CONNECTOR_HEADER_LEN;
+                ensure!(
+                    payload + payload_len <= offset + message_len,
+                    "truncated proc event payload"
+                );
+                if index == CN_IDX_PROC && value == CN_VAL_PROC && payload_len >= 32 {
+                    let event = read_u32(datagram, payload)?;
+                    if event == 0 && expected_acknowledgement == Some(acknowledgement) {
+                        let error = read_i32(datagram, payload + 16)?;
+                        ensure!(error == 0, "proc-connector control error {error}");
+                        matched_acknowledgement = true;
+                    } else if event == PROC_EVENT_FORK {
+                        let fork = payload + 16;
+                        let parent_tgid = i32::try_from(read_u32(datagram, fork + 4)?)
+                            .context("parent TGID does not fit pid_t")?;
+                        let child_tgid = i32::try_from(read_u32(datagram, fork + 12)?)
+                            .context("child TGID does not fit pid_t")?;
+                        if child_tgid != parent_tgid {
+                            edges.push((parent_tgid, child_tgid));
+                        }
+                    }
+                }
+            }
+            other => bail!("unexpected netlink message type {other}"),
+        }
+        let aligned = (message_len + 3) & !3;
+        if offset + aligned > datagram.len() {
+            ensure!(
+                offset + message_len == datagram.len(),
+                "truncated netlink alignment padding"
+            );
+            break;
+        }
+        offset += aligned;
+    }
+    Ok(matched_acknowledgement)
+}
+
+fn observed_descendant_count(root: i32, edges: &[(i32, i32)]) -> usize {
+    let mut descendants = BTreeSet::new();
+    loop {
+        let before = descendants.len();
+        for &(parent, child) in edges {
+            if (parent == root || descendants.contains(&parent)) && child != root {
+                descendants.insert(child);
+            }
+        }
+        if descendants.len() == before {
+            return descendants.len();
+        }
+    }
+}
+
+fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
+    let value = bytes
+        .get(offset..offset + 2)
+        .context("truncated native-endian u16")?;
+    Ok(u16::from_ne_bytes([value[0], value[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .context("truncated native-endian u32")?;
+    Ok(u32::from_ne_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn read_i32(bytes: &[u8], offset: usize) -> Result<i32> {
+    Ok(i32::from_ne_bytes(read_u32(bytes, offset)?.to_ne_bytes()))
+}
+
 #[derive(Default)]
 struct ResourceTracker {
     max_vm_hwm_bytes: u64,
@@ -183,24 +522,31 @@ struct ResourceMonitor {
     handle: Option<JoinHandle<Result<ResourceObservation>>>,
 }
 
-impl ResourceMonitor {
-    fn start(pid: i32) -> Result<Self> {
-        let initial_vm_hwm_bytes = vm_hwm_bytes(pid)?;
+impl ArmedResourceMonitor {
+    fn start(self, pid: i32) -> Result<ResourceMonitor> {
+        let initial_vm_hwm_bytes = vm_hwm_bytes_if_present(pid)?.unwrap_or(0);
         let initial_descendant_count = descendant_process_count(pid)?;
         let (stop, receiver) = mpsc::channel();
+        let mut events = self.events;
         let handle = thread::Builder::new()
             .name(format!("alpha-1-resource-{pid}"))
             .spawn(move || {
+                let mut fork_edges = Vec::new();
                 let mut observation = ResourceObservation {
                     max_vm_hwm_bytes: initial_vm_hwm_bytes,
                     max_descendant_count: initial_descendant_count,
                 };
                 loop {
+                    events.drain_fork_edges(&mut fork_edges)?;
+                    observation.max_descendant_count = observation
+                        .max_descendant_count
+                        .max(observed_descendant_count(pid, &fork_edges));
                     let proc_path = format!("/proc/{pid}");
-                    match vm_hwm_bytes(pid) {
-                        Ok(bytes) => {
+                    match vm_hwm_bytes_if_present(pid) {
+                        Ok(Some(bytes)) => {
                             observation.max_vm_hwm_bytes = observation.max_vm_hwm_bytes.max(bytes);
                         }
+                        Ok(None) => {}
                         Err(_) if !Path::new(&proc_path).exists() => {}
                         Err(error) => return Err(error),
                     }
@@ -212,19 +558,38 @@ impl ResourceMonitor {
                         Err(_) if !Path::new(&proc_path).exists() => {}
                         Err(error) => return Err(error),
                     }
-                    match receiver.try_recv() {
-                        Ok(()) | Err(TryRecvError::Disconnected) => break,
-                        Err(TryRecvError::Empty) => {
-                            thread::sleep(Duration::from_millis(1));
-                        }
+                    let stopping = match receiver.try_recv() {
+                        Ok(()) | Err(TryRecvError::Disconnected) => true,
+                        Err(TryRecvError::Empty) => false,
+                    };
+                    if stopping {
+                        events.drain_fork_edges(&mut fork_edges)?;
+                        observation.max_descendant_count = observation
+                            .max_descendant_count
+                            .max(observed_descendant_count(pid, &fork_edges));
+                        break;
                     }
+                    thread::sleep(Duration::from_millis(1));
                 }
+                events.unsubscribe()?;
+                ensure!(
+                    observation.max_vm_hwm_bytes > 0,
+                    "VmHWM was never observed for zec"
+                );
                 Ok(observation)
             })
             .context("spawn continuous resource monitor")?;
-        Ok(Self {
+        Ok(ResourceMonitor {
             stop,
             handle: Some(handle),
+        })
+    }
+}
+
+impl ResourceMonitor {
+    fn arm() -> Result<ArmedResourceMonitor> {
+        Ok(ArmedResourceMonitor {
+            events: ProcEventSocket::subscribe()?,
         })
     }
 
@@ -285,9 +650,10 @@ fn spawn_ready_with_env(
     environment: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
 ) -> Result<(PtySession, Termios, u64, ResourceMonitor)> {
     let config = alpha_1_support::fresh_config_dir(config_name)?;
+    let armed_monitor = ResourceMonitor::arm()?;
     let (mut session, baseline) =
         PtySession::spawn_with_env(zec, root, &[root.as_os_str()], &config, environment)?;
-    let monitor = ResourceMonitor::start(session.pid()?)?;
+    let monitor = armed_monitor.start(session.pid()?)?;
     let startup_us = session.wait_ready("repo", fixture::READY_SENTINEL)?;
     session.assert_raw(&baseline)?;
     Ok((session, baseline, startup_us, monitor))
@@ -479,15 +845,29 @@ fn in_flight_metrics(
     let mut replace = Vec::with_capacity(IN_FLIGHT_ATTEMPTS);
     let mut cancel = Vec::with_capacity(IN_FLIGHT_ATTEMPTS);
     let mut quit = Vec::with_capacity(IN_FLIGHT_ATTEMPTS);
+    let replacement_query_a = "ALPHA1_STALE_A";
+    let replacement_query_b = "ALPHA1_STALE_B";
+    let common_prefix_len = replacement_query_a
+        .bytes()
+        .zip(replacement_query_b.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    ensure!(
+        replacement_query_a.is_char_boundary(common_prefix_len)
+            && replacement_query_b.is_char_boundary(common_prefix_len),
+        "replacement query common prefix is not UTF-8 aligned"
+    );
+    let removed_suffix_count = replacement_query_a[common_prefix_len..].chars().count();
+    let inserted_suffix = &replacement_query_b[common_prefix_len..];
 
     for index in 0..IN_FLIGHT_ATTEMPTS {
         let (mut session, baseline, _, monitor) =
             spawn_ready(zec, root, &format!("bench-replace-{index:02}"))?;
-        begin_in_flight_search(&mut session, "ALPHA1_STALE_A")?;
-        for _ in 0.."ALPHA1_STALE_A".len() {
+        begin_in_flight_search(&mut session, replacement_query_a)?;
+        for _ in 0..removed_suffix_count {
             session.send(b"\x7f")?;
         }
-        let operation = session.paste_marked("ALPHA1_STALE_B")?;
+        let operation = session.paste_marked(inserted_suffix)?;
         replace.push(session.wait_contains(
             "exact replacement query result",
             operation,
@@ -532,24 +912,31 @@ fn editing_metric(
     zec: &Path,
     root: &Path,
     resources: &mut ResourceTracker,
+    payload_suffix_name: &str,
 ) -> Result<(MetricReport, InputTrace)> {
     let (mut session, baseline, _, monitor) = spawn_ready(zec, root, "bench-editing")?;
     let path = root.join("bench/large-100000-lines.txt");
     let original = fs::read(&path).context("read original 100,000-line file")?;
+    let payload_suffix = match payload_suffix_name {
+        "LF" => "\n",
+        other => bail!("unsupported editing payload suffix {other}"),
+    };
     quick_open(
         &mut session,
         "large-100000-lines.txt",
         "bench/large-100000-lines.txt",
     )?;
+    let marker = "large-line-049999";
     session.send(CTRL_G)?;
     session.paste("50000:1")?;
-    session.send(ENTER)?;
-    let positioned = session.mark();
-    session.wait_contains(
-        "100,000-line edit position",
+    let positioned = session.send_marked(ENTER)?;
+    session.wait_after(
+        "100,000-line exact edit position",
         positioned,
-        "large-line-049999",
+        alpha_1_support::SCREEN_TIMEOUT,
+        |screen| token_immediately_after_cursor(screen, marker),
     )?;
+    let body_column = session.screen().cursor_position().1;
 
     let expected_ids = (1..=EDIT_SAMPLES)
         .map(|sequence| format!("EDIT_{sequence:04}"))
@@ -566,7 +953,8 @@ fn editing_metric(
         } else {
             expected_ids[index - EDIT_WARMUPS].clone()
         };
-        let operation = session.paste_marked(&id)?;
+        let payload = format!("{id}{payload_suffix}");
+        let operation = session.paste_marked(&payload)?;
         if index >= EDIT_WARMUPS {
             sent.push(id.clone());
         }
@@ -575,7 +963,7 @@ fn editing_metric(
             operation,
             alpha_1_support::SCREEN_TIMEOUT,
             |screen| {
-                token_immediately_before_cursor(screen, &id)
+                token_on_previous_editor_row(screen, &id, body_column)
                     && screen.contents().contains("large-100000-lines.txt+]")
             },
         )?;
@@ -597,13 +985,18 @@ fn editing_metric(
                 && !contents.contains("large-100000-lines.txt+]")
         },
     )?;
-    let marker = b"large-line-049999";
     let insertion_offset = original
         .windows(marker.len())
-        .position(|window| window == marker)
+        .position(|window| window == marker.as_bytes())
         .context("line 50,000 marker is absent")?;
-    let warmup_payload = warmup_ids.concat();
-    let edit_payload = expected_ids.concat();
+    let warmup_payload = warmup_ids
+        .iter()
+        .map(|id| format!("{id}{payload_suffix}"))
+        .collect::<String>();
+    let edit_payload = expected_ids
+        .iter()
+        .map(|id| format!("{id}{payload_suffix}"))
+        .collect::<String>();
     let mut expected_disk =
         Vec::with_capacity(original.len() + warmup_payload.len() + edit_payload.len());
     expected_disk.extend_from_slice(&original[..insertion_offset]);
@@ -618,16 +1011,13 @@ fn editing_metric(
 
     let observed_edit = &disk[insertion_offset + warmup_payload.len()
         ..insertion_offset + warmup_payload.len() + edit_payload.len()];
-    let mut file_ids = Vec::with_capacity(expected_ids.len());
-    let mut offset = 0;
-    for expected in &expected_ids {
-        let end = offset + expected.len();
-        let observed = std::str::from_utf8(&observed_edit[offset..end])
-            .context("saved edit ID is not UTF-8")?;
-        ensure!(observed == expected, "saved edit ID sequence differs");
-        file_ids.push(observed.to_owned());
-        offset = end;
-    }
+    let observed_edit =
+        std::str::from_utf8(observed_edit).context("saved edit ID sequence is not UTF-8")?;
+    let file_ids = observed_edit
+        .split_terminator(payload_suffix)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ensure!(file_ids == expected_ids, "saved edit ID sequence differs");
     quit_clean(&mut session, &baseline, resources, monitor)?;
 
     let dropped_count = expected_ids.len().saturating_sub(applied.len());
@@ -715,6 +1105,33 @@ fn save_metric(zec: &Path, root: &Path, resources: &mut ResourceTracker) -> Resu
     ))
 }
 
+fn token_immediately_after_cursor(screen: &vt100::Screen, token: &str) -> bool {
+    let (row, column) = screen.cursor_position();
+    let Ok(width) = u16::try_from(token.len()) else {
+        return false;
+    };
+    let (_, columns) = screen.size();
+    if column.saturating_add(width) > columns {
+        return false;
+    }
+    screen.contents_between(row, column, row, column + width) == token
+}
+
+fn token_on_previous_editor_row(screen: &vt100::Screen, token: &str, body_column: u16) -> bool {
+    let (row, column) = screen.cursor_position();
+    if row == 0 || column != body_column {
+        return false;
+    }
+    let Ok(width) = u16::try_from(token.len()) else {
+        return false;
+    };
+    let (_, columns) = screen.size();
+    if body_column.saturating_add(width) > columns {
+        return false;
+    }
+    screen.contents_between(row - 1, body_column, row - 1, body_column + width) == token
+}
+
 fn token_immediately_before_cursor(screen: &vt100::Screen, token: &str) -> bool {
     let (row, column) = screen.cursor_position();
     let Ok(width) = u16::try_from(token.len()) else {
@@ -761,4 +1178,63 @@ fn quit_clean(
     ensure!(status.success(), "benchmark Ctrl-Q failed: {status}");
     session.assert_restored_and_joined(baseline)?;
     resources.finish(monitor)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{process::Command, time::Instant};
+
+    use super::*;
+
+    #[test]
+    fn benchmark_spec_is_fully_consumed_and_fixed() {
+        let oracle = benchmark_oracle().expect("parse benchmark oracle");
+        verify_benchmark_oracle(&oracle).expect("verify every benchmark oracle field");
+    }
+
+    #[test]
+    fn edit_cell_predicate_checks_the_previous_editor_row_without_the_gutter() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"\x1b[1;1H  ABCDE   \x1b[2;1H  marker  \x1b[2;3H");
+        let screen = parser.screen();
+
+        assert_eq!(screen.cursor_position(), (1, 2));
+        assert!(token_on_previous_editor_row(screen, "ABCDE", 2));
+        assert!(!token_on_previous_editor_row(screen, "ABCXE", 2));
+        assert!(token_immediately_after_cursor(screen, "marker"));
+    }
+
+    #[test]
+    fn proc_events_capture_a_short_lived_descendant() {
+        let mut events = ProcEventSocket::subscribe().expect("subscribe before root spawn");
+        let mut root = Command::new("/bin/sh")
+            .args(["-c", "(/bin/true) & wait"])
+            .spawn()
+            .expect("spawn synthetic root process");
+        let root_pid = i32::try_from(root.id()).expect("root PID fits pid_t");
+        let status = root.wait().expect("reap synthetic root process");
+        assert!(status.success());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut edges = Vec::new();
+        loop {
+            events
+                .drain_fork_edges(&mut edges)
+                .expect("drain loss-free proc events");
+            if observed_descendant_count(root_pid, &edges) > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "short-lived descendant was absent from proc events: {edges:?}"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            descendant_process_count(root_pid).is_err(),
+            "synthetic root unexpectedly remained in /proc"
+        );
+        events.unsubscribe().expect("send explicit IGNORE");
+        assert!(!events.subscribed);
+    }
 }

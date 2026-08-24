@@ -296,6 +296,87 @@ pub struct QuickOpenQuery {
     pub expected_selected_path: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkOracle {
+    pub report_schema_version: u32,
+    pub startup: P95Oracle,
+    pub quick_open: QuickOpenBenchmarkOracle,
+    pub project_search: ProjectSearchBenchmarkOracle,
+    pub in_flight_search: InFlightBenchmarkOracle,
+    pub editing: EditingBenchmarkOracle,
+    pub save: SaveBenchmarkOracle,
+    pub vm_hwm_max_bytes: u64,
+    pub descendant_process_count: usize,
+    pub nearest_rank_p95: String,
+    pub input_invariants: InputInvariantOracle,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct P95Oracle {
+    pub warmups: usize,
+    pub samples: usize,
+    pub p95_max_us: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QuickOpenBenchmarkOracle {
+    pub warmups: usize,
+    pub samples: usize,
+    pub p95_max_us: u64,
+    pub max_us: u64,
+    pub queries: Vec<QuickOpenQuery>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSearchBenchmarkOracle {
+    pub warmups: usize,
+    pub samples: usize,
+    pub p95_max_us: u64,
+    pub expected_hits: usize,
+    pub visible_results: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InFlightBenchmarkOracle {
+    pub attempts_each: usize,
+    pub max_us: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EditingBenchmarkOracle {
+    pub path: String,
+    pub warmups: usize,
+    pub samples: usize,
+    pub p95_max_us: u64,
+    pub max_us: u64,
+    pub input_id_template: String,
+    pub payload_suffix: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SaveBenchmarkOracle {
+    pub path: String,
+    pub size: u64,
+    pub warmups: usize,
+    pub samples: usize,
+    pub max_us: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InputInvariantOracle {
+    pub sent_equals_applied_equals_expected: bool,
+    pub dropped_count: usize,
+    pub reordered: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkReport {
@@ -570,6 +651,115 @@ pub fn expected_poc_ids() -> Vec<String> {
     EXPECTED_POC_IDS.lines().map(str::to_owned).collect()
 }
 
+pub fn benchmark_oracle() -> Result<BenchmarkOracle> {
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fixture::spec_bytes()).context("parse generated Alpha 1 spec")?;
+    serde_json::from_value(
+        spec.get("benchmark")
+            .cloned()
+            .context("Alpha 1 spec has no benchmark object")?,
+    )
+    .context("parse complete benchmark oracle")
+}
+
+pub fn verify_benchmark_oracle(oracle: &BenchmarkOracle) -> Result<()> {
+    ensure!(
+        oracle.report_schema_version == REPORT_SCHEMA_VERSION,
+        "benchmark report schema oracle differs"
+    );
+    ensure!(
+        (
+            oracle.startup.warmups,
+            oracle.startup.samples,
+            oracle.startup.p95_max_us
+        ) == (2, 20, 3_000_000),
+        "startup benchmark oracle differs"
+    );
+    ensure!(
+        (
+            oracle.quick_open.warmups,
+            oracle.quick_open.samples,
+            oracle.quick_open.p95_max_us,
+            oracle.quick_open.max_us,
+        ) == (10, 100, 150_000, 500_000),
+        "quick-open benchmark oracle differs"
+    );
+    ensure!(
+        oracle.quick_open.queries.len() == fixture::BENCH_QUICK_OPEN_QUERIES,
+        "quick-open query oracle count differs"
+    );
+    for (index, query) in oracle.quick_open.queries.iter().enumerate() {
+        let expected = format!("bench/search-{index:04}.txt");
+        ensure!(
+            query.query == expected && query.expected_selected_path == expected,
+            "quick-open query oracle {index} differs"
+        );
+    }
+    ensure!(
+        (
+            oracle.project_search.warmups,
+            oracle.project_search.samples,
+            oracle.project_search.p95_max_us,
+            oracle.project_search.expected_hits,
+            oracle.project_search.visible_results,
+        ) == (
+            2,
+            10,
+            5_000_000,
+            fixture::BENCH_SEARCH_HITS,
+            fixture::SEARCH_RESULT_LIMIT
+        ),
+        "project-search benchmark oracle differs"
+    );
+    ensure!(
+        (
+            oracle.in_flight_search.attempts_each,
+            oracle.in_flight_search.max_us
+        ) == (20, 250_000),
+        "in-flight benchmark oracle differs"
+    );
+    ensure!(
+        (
+            oracle.editing.path.as_str(),
+            oracle.editing.warmups,
+            oracle.editing.samples,
+            oracle.editing.p95_max_us,
+            oracle.editing.max_us,
+            oracle.editing.input_id_template.as_str(),
+            oracle.editing.payload_suffix.as_str(),
+        ) == (
+            "bench/large-100000-lines.txt",
+            10,
+            500,
+            100_000,
+            500_000,
+            "EDIT_{SEQUENCE_4}",
+            "LF",
+        ),
+        "editing benchmark oracle differs"
+    );
+    ensure!(
+        (
+            oracle.save.path.as_str(),
+            oracle.save.size,
+            oracle.save.warmups,
+            oracle.save.samples,
+            oracle.save.max_us,
+        ) == ("bench/save-5mib.txt", 5 * 1024 * 1024, 2, 10, 2_000_000),
+        "save benchmark oracle differs"
+    );
+    ensure!(
+        oracle.vm_hwm_max_bytes == 1_073_741_824
+            && oracle.descendant_process_count == 0
+            && oracle.nearest_rank_p95 == "sorted_samples[ceil(0.95*N)-1]"
+            && oracle.input_invariants.sent_equals_applied_equals_expected
+            && oracle.input_invariants.dropped_count == 0
+            && !oracle.input_invariants.reordered,
+        "benchmark resource/statistics/input invariant oracle differs"
+    );
+    Ok(())
+}
+
 pub fn expected_benchmark_search_rows() -> Vec<SearchResultReport> {
     let spec: serde_json::Value =
         serde_json::from_slice(&fixture::spec_bytes()).expect("generated spec is valid JSON");
@@ -585,10 +775,10 @@ pub fn expected_benchmark_search_rows() -> Vec<SearchResultReport> {
 }
 
 pub fn expected_benchmark_quick_open_queries() -> Vec<QuickOpenQuery> {
-    let spec: serde_json::Value =
-        serde_json::from_slice(&fixture::spec_bytes()).expect("generated spec is valid JSON");
-    serde_json::from_value(spec["benchmark"]["quick_open"]["queries"].clone())
-        .expect("benchmark quick-open queries match QuickOpenQuery")
+    benchmark_oracle()
+        .expect("generated benchmark oracle is valid")
+        .quick_open
+        .queries
 }
 
 pub fn observe_poc_tests(repo: &Path) -> Result<(usize, Vec<String>)> {
@@ -763,57 +953,73 @@ pub fn verify_benchmark_report(report: &BenchmarkReport) -> Result<()> {
     verify_environment(&report.environment)?;
     verify_binary(&report.binary)?;
     ensure!(report.oracles == oracle_hashes(), "oracle hashes mismatch");
+    let oracle = benchmark_oracle()?;
+    verify_benchmark_oracle(&oracle)?;
     for (label, metric, warmups, samples, p95_limit, max_limit) in [
-        ("startup", &report.startup, 2, 20, Some(3_000_000), None),
+        (
+            "startup",
+            &report.startup,
+            oracle.startup.warmups,
+            oracle.startup.samples,
+            Some(oracle.startup.p95_max_us),
+            None,
+        ),
         (
             "quick_open",
             &report.quick_open,
-            10,
-            100,
-            Some(150_000),
-            Some(500_000),
+            oracle.quick_open.warmups,
+            oracle.quick_open.samples,
+            Some(oracle.quick_open.p95_max_us),
+            Some(oracle.quick_open.max_us),
         ),
         (
             "project_search",
             &report.project_search,
-            2,
-            10,
-            Some(5_000_000),
+            oracle.project_search.warmups,
+            oracle.project_search.samples,
+            Some(oracle.project_search.p95_max_us),
             None,
         ),
         (
             "replace_query",
             &report.replace_query,
             0,
-            20,
+            oracle.in_flight_search.attempts_each,
             None,
-            Some(250_000),
+            Some(oracle.in_flight_search.max_us),
         ),
         (
             "cancel_search",
             &report.cancel_search,
             0,
-            20,
+            oracle.in_flight_search.attempts_each,
             None,
-            Some(250_000),
+            Some(oracle.in_flight_search.max_us),
         ),
         (
             "quit_in_flight_search",
             &report.quit_in_flight_search,
             0,
-            20,
+            oracle.in_flight_search.attempts_each,
             None,
-            Some(250_000),
+            Some(oracle.in_flight_search.max_us),
         ),
         (
             "editing",
             &report.editing,
-            10,
-            500,
-            Some(100_000),
-            Some(500_000),
+            oracle.editing.warmups,
+            oracle.editing.samples,
+            Some(oracle.editing.p95_max_us),
+            Some(oracle.editing.max_us),
         ),
-        ("save", &report.save, 2, 10, None, Some(2_000_000)),
+        (
+            "save",
+            &report.save,
+            oracle.save.warmups,
+            oracle.save.samples,
+            None,
+            Some(oracle.save.max_us),
+        ),
     ] {
         ensure!(
             metric.warmups == warmups
@@ -836,11 +1042,11 @@ pub fn verify_benchmark_report(report: &BenchmarkReport) -> Result<()> {
         metric.verify(label)?;
     }
     ensure!(
-        report.project_search_total_hits == fixture::BENCH_SEARCH_HITS,
+        report.project_search_total_hits == oracle.project_search.expected_hits,
         "project search hit count mismatch"
     );
     ensure!(
-        report.project_search_visible_results == fixture::SEARCH_RESULT_LIMIT,
+        report.project_search_visible_results == oracle.project_search.visible_results,
         "visible project search count mismatch"
     );
     ensure!(
@@ -848,12 +1054,13 @@ pub fn verify_benchmark_report(report: &BenchmarkReport) -> Result<()> {
         "ordered visible project search rows differ from spec"
     );
     ensure!(
-        report.vm_hwm_bytes <= report.vm_hwm_limit_bytes
-            && report.vm_hwm_limit_bytes == 1_073_741_824,
+        report.vm_hwm_bytes > 0
+            && report.vm_hwm_bytes <= report.vm_hwm_limit_bytes
+            && report.vm_hwm_limit_bytes == oracle.vm_hwm_max_bytes,
         "VmHWM limit failed"
     );
     ensure!(
-        report.descendant_process_count == 0,
+        report.descendant_process_count == oracle.descendant_process_count,
         "zec spawned descendant processes"
     );
     let trace = &report.input_trace;
@@ -862,9 +1069,19 @@ pub fn verify_benchmark_report(report: &BenchmarkReport) -> Result<()> {
             && trace.applied_input_ids == trace.expected_input_ids,
         "input ID sequences differ"
     );
-    ensure!(trace.dropped_count == 0, "input IDs were dropped");
-    ensure!(!trace.reordered, "input IDs were reordered");
-    let expected_edit_ids = (1..=500)
+    ensure!(
+        oracle.input_invariants.sent_equals_applied_equals_expected,
+        "input equality invariant is disabled"
+    );
+    ensure!(
+        trace.dropped_count == oracle.input_invariants.dropped_count,
+        "input IDs were dropped"
+    );
+    ensure!(
+        trace.reordered == oracle.input_invariants.reordered,
+        "input IDs were reordered"
+    );
+    let expected_edit_ids = (1..=oracle.editing.samples)
         .map(|sequence| format!("EDIT_{sequence:04}"))
         .collect::<Vec<_>>();
     ensure!(
@@ -1569,17 +1786,21 @@ pub fn assert_process_group_absent(process_group: i32) -> Result<()> {
     );
     Ok(())
 }
+
 pub fn vm_hwm_bytes(pid: i32) -> Result<u64> {
+    vm_hwm_bytes_if_present(pid)?.context("VmHWM is absent from zec status")
+}
+
+pub fn vm_hwm_bytes_if_present(pid: i32) -> Result<Option<u64>> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))
         .with_context(|| format!("read /proc/{pid}/status"))?;
 
-    status
+    Ok(status
         .lines()
         .find_map(|line| line.strip_prefix("VmHWM:"))
         .and_then(|value| value.split_whitespace().next())
         .and_then(|value| value.parse::<u64>().ok())
-        .map(|kib| kib.saturating_mul(1024))
-        .context("VmHWM is absent from zec status")
+        .map(|kib| kib.saturating_mul(1024)))
 }
 
 pub fn descendant_process_count(pid: i32) -> Result<usize> {
