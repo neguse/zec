@@ -532,8 +532,7 @@ fn partial_startup(zec: &Path) -> Result<String> {
     );
     session.send(CTRL_A)?;
     session.paste(&partial.editable_token)?;
-    session.send(CTRL_S)?;
-    let mark = session.mark();
+    let mark = session.send_marked(CTRL_S)?;
     session.wait_contains("partial startup save", mark, "saved")?;
     ensure!(
         fs::read(&normal)? == partial.editable_token.as_bytes(),
@@ -590,14 +589,12 @@ fn open_exact_quick(
     opened_path: &str,
     body: &str,
 ) -> Result<()> {
-    session.send(CTRL_P)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(CTRL_P)?;
     session.wait_contains("exact quick-open prompt", prompt, "Quick open:")?;
     let queried = session.paste_marked(query)?;
     let exact_result = format!("Quick open: {query}  1/1  {selected_path}");
     session.wait_contains("exact quick-open selected result", queried, &exact_result)?;
-    session.send(ENTER)?;
-    let opened = session.mark();
+    let opened = session.send_marked(ENTER)?;
     session.wait_after(
         "exact quick-open target",
         opened,
@@ -622,8 +619,7 @@ fn project_query<'a>(oracle: &'a Alpha1Oracle, id: &str) -> Result<&'a ProjectSe
 }
 
 fn wait_project_query(session: &mut PtySession, query: &ProjectSearchQueryOracle) -> Result<()> {
-    session.send(ALT_F)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(ALT_F)?;
     session.wait_contains("project-search prompt", prompt, "Project search:")?;
     let queried = session.paste_marked(&query.text)?;
     let total = query
@@ -667,8 +663,7 @@ fn open_project_query(session: &mut PtySession, query: &ProjectSearchQueryOracle
         "opened {}:{}:{}",
         expected.path, expected.line, expected.column
     );
-    session.send(ENTER)?;
-    let opened = session.mark();
+    let opened = session.send_marked(ENTER)?;
     session.wait_after(
         &format!("open exact project-search result {}", query.id),
         opened,
@@ -730,8 +725,7 @@ fn project_search(zec: &Path) -> Result<String> {
     }
 
     let stale_a = project_query(&oracle, "stale_a")?;
-    session.send(ALT_F)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(ALT_F)?;
     session.wait_contains("stale-A project-search prompt", prompt, "Project search:")?;
     let started_a = session.paste_marked(&stale_a.text)?;
     session.wait_contains(
@@ -752,8 +746,7 @@ fn project_search(zec: &Path) -> Result<String> {
     )?;
 
     let stale_b = project_query(&oracle, "stale_b")?;
-    session.send(ALT_F)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(ALT_F)?;
     session.wait_contains("stale-B project-search prompt", prompt, "Project search:")?;
     let current = session.paste_marked(&stale_b.text)?;
     let expected_b = &stale_b.expected_results[0];
@@ -774,8 +767,7 @@ fn project_search(zec: &Path) -> Result<String> {
     close_project_query(&mut session, "stale_b")?;
 
     let quit_query = project_query(&oracle, "benchmark")?;
-    session.send(ALT_F)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(ALT_F)?;
     session.wait_contains("quit project-search prompt", prompt, "Project search:")?;
     let started_quit = session.paste_marked(&quit_query.text)?;
     session.wait_contains(
@@ -841,6 +833,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         "日本 語.rs",
         fixture::EDIT_A_PATH,
         "ALPHA1_EDIT_A_OLD",
+        None,
     )?;
     select_current_match(&mut session, "ALPHA1_EDIT_A_OLD")?;
     let input_id_a = expected_ids[0].clone();
@@ -856,6 +849,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         "ALPHA1_FIND_B_OLD",
         fixture::EDIT_B_PATH,
         "ALPHA1_FIND_B_OLD",
+        None,
     )?;
     select_current_match(&mut session, "ALPHA1_FIND_B_OLD")?;
     let input_id_b = expected_ids[1].clone();
@@ -871,6 +865,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         "no-final-newline.txt",
         fixture::EDIT_C_PATH,
         "ALPHA1_EDIT_C_OLD",
+        None,
     )?;
     session.send(END)?;
     let input_id_c = expected_ids[2].clone();
@@ -888,12 +883,10 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
     sent_ids.push(input_id_d.clone());
     session.wait_contains("scratch D input ID", inserted_d, &input_id_d)?;
     applied_ids.push(input_id_d);
-    session.send(CTRL_S)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(CTRL_S)?;
     session.wait_contains("workflow Save As prompt", prompt, "Save as:")?;
     session.paste(fixture::EDIT_D_PATH)?;
-    session.send(ENTER)?;
-    let saved = session.mark();
+    let saved = session.send_marked(ENTER)?;
     session.wait_after(
         "workflow Save As completion and clean four-tab status",
         saved,
@@ -967,7 +960,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
             (0, 2),
         ),
     ] {
-        open_quick(&mut reopen, path, path, &token)?;
+        open_quick(&mut reopen, path, path, &token, Some(expected_cursor))?;
         ensure!(
             reopen.screen().cursor_position() == expected_cursor,
             "reopen VT caret differs for {path}: expected {expected_cursor:?}, got {:?}",
@@ -980,7 +973,13 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         );
     }
     let b_token = format!("ALPHA1_EDIT_B_{run:02}");
-    open_project(&mut reopen, &b_token, fixture::EDIT_B_PATH, &b_token)?;
+    open_project(
+        &mut reopen,
+        &b_token,
+        fixture::EDIT_B_PATH,
+        &b_token,
+        Some((1, 27)),
+    )?;
     ensure!(
         reopen.screen().cursor_position() == (1, 27),
         "project-search reopen VT caret differs for {}: expected (1, 27), got {:?}",
@@ -1091,12 +1090,10 @@ fn save_failure(zec: &Path) -> Result<String> {
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
     session.send(CTRL_N)?;
     session.paste("ALPHA1_UNSAVED_ENOTDIR")?;
-    session.send(CTRL_S)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(CTRL_S)?;
     session.wait_contains("ENOTDIR Save As prompt", prompt, "Save as:")?;
     session.paste(failed_relative)?;
-    session.send(ENTER)?;
-    let failed = session.mark();
+    let failed = session.send_marked(ENTER)?;
     session.wait_after(
         "ENOTDIR save failure",
         failed,
@@ -1112,8 +1109,7 @@ fn save_failure(zec: &Path) -> Result<String> {
         !failed_path.exists(),
         "ENOTDIR path was unexpectedly created"
     );
-    session.send(CTRL_Q)?;
-    let guarded = session.mark();
+    let guarded = session.send_marked(CTRL_Q)?;
     session.wait_contains("dirty guard after ENOTDIR", guarded, "unsaved or deleted")?;
     let close_guard = session.send_marked(CTRL_W)?;
     session.wait_contains(
@@ -1180,8 +1176,7 @@ fn suspend_resume(zec: &Path) -> Result<String> {
         session.send_signal(Signal::SIGTSTP)?;
         session.wait_stopped()?;
         session.assert_restored(&baseline)?;
-        session.send_signal(Signal::SIGCONT)?;
-        let resumed = session.mark();
+        let resumed = session.send_signal_marked(Signal::SIGCONT)?;
         session.wait_after(
             "Ready after SIGCONT",
             resumed,
@@ -1209,49 +1204,88 @@ fn suspend_resume(zec: &Path) -> Result<String> {
     Ok("SIGTSTP restored, SIGCONT re-entered, edited, saved and exited".to_owned())
 }
 
-fn open_quick(session: &mut PtySession, query: &str, path: &str, body: &str) -> Result<()> {
-    session.send(CTRL_P)?;
-    let prompt = session.mark();
+fn opened_editor_frame_matches(
+    contents: &str,
+    cursor: (u16, u16),
+    cursor_visible: bool,
+    path: &str,
+    body: &str,
+    prompt: &str,
+    expected_cursor: Option<(u16, u16)>,
+) -> bool {
+    cursor_visible
+        && contents.contains(path)
+        && contents.contains(body)
+        && !contents.contains(prompt)
+        && expected_cursor.is_none_or(|expected| cursor == expected)
+}
+
+fn open_quick(
+    session: &mut PtySession,
+    query: &str,
+    path: &str,
+    body: &str,
+    expected_cursor: Option<(u16, u16)>,
+) -> Result<()> {
+    let prompt = session.send_marked(CTRL_P)?;
     session.wait_contains("quick-open prompt", prompt, "Quick open:")?;
     let queried = session.paste_marked(query)?;
     session.wait_contains("quick-open selected path", queried, path)?;
-    session.send(ENTER)?;
-    let opened = session.mark();
+    let opened = session.send_marked(ENTER)?;
     session.wait_after(
-        "quick-open target",
+        "quick-open target editor frame",
         opened,
         alpha_1_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
-            contents.contains(path) && contents.contains(body)
+            opened_editor_frame_matches(
+                &contents,
+                screen.cursor_position(),
+                !screen.hide_cursor(),
+                path,
+                body,
+                "Quick open:",
+                expected_cursor,
+            )
         },
     )?;
     Ok(())
 }
 
-fn open_project(session: &mut PtySession, query: &str, path: &str, body: &str) -> Result<()> {
-    session.send(ALT_F)?;
-    let prompt = session.mark();
+fn open_project(
+    session: &mut PtySession,
+    query: &str,
+    path: &str,
+    body: &str,
+    expected_cursor: Option<(u16, u16)>,
+) -> Result<()> {
+    let prompt = session.send_marked(ALT_F)?;
     session.wait_contains("project-search prompt", prompt, "Project search:")?;
     let queried = session.paste_marked(query)?;
     session.wait_contains("project-search selected path", queried, path)?;
-    session.send(ENTER)?;
-    let opened = session.mark();
+    let opened = session.send_marked(ENTER)?;
     session.wait_after(
-        "project-search target",
+        "project-search target editor frame",
         opened,
         alpha_1_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
-            contents.contains(path) && contents.contains(body)
+            opened_editor_frame_matches(
+                &contents,
+                screen.cursor_position(),
+                !screen.hide_cursor(),
+                path,
+                body,
+                "Project search:",
+                expected_cursor,
+            )
         },
     )?;
     Ok(())
 }
 
 fn select_current_match(session: &mut PtySession, search: &str) -> Result<()> {
-    session.send(b"\x06")?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(b"\x06")?;
     session.wait_contains("buffer find prompt", prompt, "Find:")?;
     let queried = session.paste_marked(search)?;
     session.wait_contains("buffer find match", queried, "1/1")?;
@@ -1275,7 +1309,59 @@ fn clean_quit(session: &mut PtySession, baseline: &nix::sys::termios::Termios) -
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_cell_column;
+    use super::{opened_editor_frame_matches, terminal_cell_column};
+
+    #[test]
+    fn opened_editor_frame_rejects_partial_prompt_cursor_and_accepts_exact_caret() {
+        let path = "src/reopened.txt";
+        let body = "ALPHA1_REOPENED_BODY";
+        let partial = format!("{path}\n{body}\nQuick open: reopened");
+        assert!(!opened_editor_frame_matches(
+            &partial,
+            (39, 120),
+            true,
+            path,
+            body,
+            "Quick open:",
+            Some((0, 2)),
+        ));
+        assert!(!opened_editor_frame_matches(
+            &format!("{path}\n{body}"),
+            (39, 32),
+            true,
+            path,
+            body,
+            "Project search:",
+            Some((1, 27)),
+        ));
+        assert!(opened_editor_frame_matches(
+            &format!("{path}\n{body}"),
+            (0, 2),
+            true,
+            path,
+            body,
+            "Quick open:",
+            Some((0, 2)),
+        ));
+        assert!(opened_editor_frame_matches(
+            &format!("{path}\n{body}"),
+            (1, 27),
+            true,
+            path,
+            body,
+            "Project search:",
+            Some((1, 27)),
+        ));
+        assert!(!opened_editor_frame_matches(
+            &format!("{path}\n{body}"),
+            (1, 27),
+            false,
+            path,
+            body,
+            "Project search:",
+            Some((1, 27)),
+        ));
+    }
 
     #[test]
     fn converts_scalar_columns_to_terminal_cell_columns() {

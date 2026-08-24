@@ -690,8 +690,7 @@ fn quick_open_metric(
         .map(|query| (false, query))
         .chain(queries.iter().map(|query| (true, query)));
     for (measured, query) in attempts {
-        session.send(CTRL_P)?;
-        let prompt = session.mark();
+        let prompt = session.send_marked(CTRL_P)?;
         session.wait_contains("benchmark quick-open prompt", prompt, "Quick open:")?;
         let operation = session.paste_marked(&query.query)?;
         let expected_status = format!(
@@ -734,8 +733,7 @@ fn project_search_metric(
     for index in 0..PROJECT_WARMUPS + PROJECT_SAMPLES {
         let (mut session, baseline, _, monitor) =
             spawn_ready(zec, root, &format!("bench-project-{index:02}"))?;
-        session.send(ALT_F)?;
-        let prompt = session.mark();
+        let prompt = session.send_marked(ALT_F)?;
         session.wait_contains("benchmark project-search prompt", prompt, "Project search:")?;
         let operation = session.paste_marked("ALPHA1_BENCH_SEARCH")?;
         let first = &expected_rows[0];
@@ -1128,8 +1126,7 @@ fn save_metric(zec: &Path, root: &Path, resources: &mut ResourceTracker) -> Resu
     quick_open(&mut session, "save-5mib.txt", "bench/save-5mib.txt")?;
     session.send(CTRL_G)?;
     session.paste("1:1")?;
-    session.send(ENTER)?;
-    let positioned = session.mark();
+    let positioned = session.send_marked(ENTER)?;
     session.wait_contains("5 MiB save position", positioned, "Ln 1, Col 1")?;
 
     let path = root.join("bench/save-5mib.txt");
@@ -1225,20 +1222,31 @@ fn token_immediately_before_cursor(screen: &vt100::Screen, token: &str) -> bool 
     screen.contents_between(row, column - width, row, column) == token
 }
 fn quick_open(session: &mut PtySession, query: &str, expected_path: &str) -> Result<()> {
-    session.send(CTRL_P)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(CTRL_P)?;
     session.wait_contains("benchmark quick-open prompt", prompt, "Quick open:")?;
     let queried = session.paste_marked(query)?;
     session.wait_contains("benchmark quick-open path", queried, expected_path)?;
-    session.send(ENTER)?;
-    let opened = session.mark();
-    session.wait_contains("benchmark quick-open target", opened, expected_path)?;
+    let opened = session.send_marked(ENTER)?;
+    session.wait_after(
+        "benchmark quick-open target editor frame",
+        opened,
+        alpha_1_support::SCREEN_TIMEOUT,
+        |screen| {
+            let contents = screen.contents();
+            let (cursor_row, cursor_column) = screen.cursor_position();
+            let (rows, columns) = screen.size();
+            contents.contains(expected_path)
+                && !contents.contains("Quick open:")
+                && !screen.hide_cursor()
+                && cursor_row < rows.saturating_sub(1)
+                && cursor_column < columns
+        },
+    )?;
     Ok(())
 }
 
 fn begin_in_flight_search(session: &mut PtySession, query: &str) -> Result<()> {
-    session.send(ALT_F)?;
-    let prompt = session.mark();
+    let prompt = session.send_marked(ALT_F)?;
     session.wait_contains("in-flight project-search prompt", prompt, "Project search:")?;
     let started = session.paste_marked(query)?;
     session.wait_contains(

@@ -1195,7 +1195,11 @@ enum ReaderEvent {
 
 #[derive(Clone, Copy, Debug)]
 pub struct OperationMark {
+    /// Post-action origin used for normative latency and timeout accounting.
     at: Instant,
+    /// Pre-action lower bound used to admit a response that races the write,
+    /// flush, or signal syscall.
+    observe_not_before: Instant,
     generation: u64,
 }
 
@@ -1203,6 +1207,30 @@ impl OperationMark {
     pub fn elapsed_us(self) -> u64 {
         duration_us(self.at.elapsed())
     }
+}
+
+fn mark_around_action(
+    generation: u64,
+    action: impl FnOnce() -> Result<()>,
+) -> Result<OperationMark> {
+    mark_around_action_with_clock(generation, Instant::now, action, Instant::now)
+}
+
+fn mark_around_action_with_clock(
+    generation: u64,
+    observe_now: impl FnOnce() -> Instant,
+    action: impl FnOnce() -> Result<()>,
+    latency_now: impl FnOnce() -> Instant,
+) -> Result<OperationMark> {
+    let observe_not_before = observe_now();
+    action()?;
+    let at = latency_now();
+    debug_assert!(at >= observe_not_before);
+    Ok(OperationMark {
+        at,
+        observe_not_before,
+        generation,
+    })
 }
 
 pub struct PtySession {
@@ -1333,6 +1361,7 @@ impl PtySession {
             transcript: Vec::new(),
             spawn_mark: OperationMark {
                 at: spawn_started,
+                observe_not_before: spawn_started,
                 generation: 0,
             },
             scenario_deadline: spawn_started + SCENARIO_TIMEOUT,
@@ -1359,8 +1388,10 @@ impl PtySession {
     }
 
     pub fn mark(&self) -> OperationMark {
+        let at = Instant::now();
         OperationMark {
-            at: Instant::now(),
+            at,
+            observe_not_before: at,
             generation: self.generation,
         }
     }
@@ -1376,8 +1407,8 @@ impl PtySession {
     }
 
     pub fn send_marked(&mut self, bytes: &[u8]) -> Result<OperationMark> {
-        self.send(bytes)?;
-        Ok(self.mark())
+        let generation = self.generation;
+        mark_around_action(generation, || self.send(bytes))
     }
 
     pub fn paste(&mut self, text: &str) -> Result<()> {
@@ -1389,8 +1420,8 @@ impl PtySession {
     }
 
     pub fn paste_marked(&mut self, text: &str) -> Result<OperationMark> {
-        self.paste(text)?;
-        Ok(self.mark())
+        let generation = self.generation;
+        mark_around_action(generation, || self.paste(text))
     }
 
     pub fn wait_contains(
@@ -1468,7 +1499,7 @@ impl PtySession {
         Ok(completed_at
             .filter(|completed| {
                 *completed <= deadline
-                    && *completed >= mark.at
+                    && *completed >= mark.observe_not_before
                     && self.generation > mark.generation
                     && predicate(self.parser.screen())
             })
@@ -1483,6 +1514,10 @@ impl PtySession {
         let pid = self.pid()?;
         killpg(Pid::from_raw(pid), signal)
             .with_context(|| format!("send {signal:?} to zec process group {pid}"))
+    }
+
+    pub fn send_signal_marked(&self, signal: Signal) -> Result<OperationMark> {
+        mark_around_action(self.generation, || self.send_signal(signal))
     }
 
     pub fn wait_stopped(&mut self) -> Result<()> {
@@ -1880,4 +1915,42 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         || haystack
             .windows(needle.len())
             .any(|window| window == needle)
+}
+
+#[cfg(test)]
+mod marked_action_tests {
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    use super::mark_around_action_with_clock;
+
+    #[test]
+    fn observation_mark_precedes_action_but_latency_origin_follows_it() {
+        let order = RefCell::new(Vec::new());
+        let observe_at = Instant::now();
+        let latency_at = observe_at + Duration::from_millis(1);
+        let mark = mark_around_action_with_clock(
+            17,
+            || {
+                order.borrow_mut().push("observe");
+                observe_at
+            },
+            || {
+                order.borrow_mut().push("action");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("latency");
+                latency_at
+            },
+        )
+        .expect("marked action succeeds");
+
+        assert_eq!(order.borrow().as_slice(), ["observe", "action", "latency"]);
+        assert_eq!(mark.observe_not_before, observe_at);
+        assert_eq!(mark.at, latency_at);
+        assert_eq!(mark.generation, 17);
+    }
 }
