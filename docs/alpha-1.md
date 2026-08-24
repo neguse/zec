@@ -22,10 +22,12 @@ promotion対象になる。
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
+rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+/tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 cargo build --locked --release \
   --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
-cargo test --locked --bin zec -- --test-threads=1
-cargo test --locked --test pty_acceptance -- --test-threads=1
+cargo test --locked --release --bin zec -- --test-threads=1
+cargo test --locked --release --test pty_acceptance -- --test-threads=1
 timeout --signal=TERM --kill-after=5s 45m \
   ./target/release/alpha_1_acceptance --zec ./target/release/zec \
   --repo . --assert --report target/alpha-1/acceptance.json
@@ -89,9 +91,9 @@ spec SHA-256、操作前とexpected操作後のmanifest SHA-256をreportへ残�
 
 ### A0. PoC regression
 
-先頭2つのtest commandで既存PoC graduationのunit/headless 93件とactual-binary PTY 1件を
+2つのrelease-profile test commandで既存PoC graduationのunit/headless 93件とactual-binary PTY 1件を
 すべて通す。`tests/alpha_1/poc-test-ids-v1.txt`へbaseline 94 test IDを固定し、
-acceptance verifierが現在の`cargo test -- --list`に全IDが含まれることを確認する。
+acceptance verifierが現在の`cargo test --release -- --list`に全IDが含まれることを確認する。
 追加testは許可するが、既存caseの削除・ignore・filterによる欠落はFailとする。
 ### A1. Directory root and file identity
 

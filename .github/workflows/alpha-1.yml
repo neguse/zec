@@ -97,7 +97,8 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --format-version 1 --no-deps >/dev/null
           cargo fmt --all -- --check
-          cargo run --locked --bin alpha_1_fixture -- verify-oracles --repo .
+          rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+          /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 
       - name: Build the release gate binaries
         timeout-minutes: 60
@@ -108,8 +109,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --bin zec -- --test-threads=1
-          cargo test --locked --test pty_acceptance -- --test-threads=1
+          cargo test --locked --release --bin zec -- --test-threads=1
+          cargo test --locked --release --test pty_acceptance -- --test-threads=1
 
       - name: Run Alpha 1 acceptance
         timeout-minutes: 45

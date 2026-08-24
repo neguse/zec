@@ -785,10 +785,19 @@ pub fn observe_poc_tests(repo: &Path) -> Result<(usize, Vec<String>)> {
     let mut observed = BTreeSet::new();
     let mut ignored = BTreeSet::new();
     for arguments in [
-        vec!["test", "--locked", "--bin", "zec", "--", "--list"],
         vec![
             "test",
             "--locked",
+            "--release",
+            "--bin",
+            "zec",
+            "--",
+            "--list",
+        ],
+        vec![
+            "test",
+            "--locked",
+            "--release",
             "--test",
             "pty_acceptance",
             "--",

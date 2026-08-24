@@ -159,10 +159,13 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
     };
     write_report(&arguments.report, &report)?;
     println!(
-        "Alpha 1 benchmark: startup p95={}us, quick-open p95={}us, search p95={}us, edit p95={}us, save max={}us; report {}",
+        "Alpha 1 benchmark: startup p95={}us, quick-open p95={}us, search p95={}us, replace max={}us, cancel max={}us, quit max={}us, edit p95={}us, save max={}us; report {}",
         report.startup.p95_us,
         report.quick_open.p95_us,
         report.project_search.p95_us,
+        report.replace_query.max_us,
+        report.cancel_search.max_us,
+        report.quit_in_flight_search.max_us,
         report.editing.p95_us,
         report.save.max_us,
         arguments.report.display()
