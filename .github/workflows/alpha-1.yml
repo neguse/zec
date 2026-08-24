@@ -3,7 +3,6 @@ name: Alpha 1
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   actions: read
@@ -11,7 +10,7 @@ permissions:
 
 concurrency:
   group: alpha-1-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -66,6 +65,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record disk baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CI_DISK_BASELINE_KIB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $3 }')" >> "$GITHUB_ENV"
+
       - name: Install Linux build dependencies
         timeout-minutes: 10
         shell: bash
@@ -111,6 +116,17 @@ jobs:
           set -euo pipefail
           cargo test --locked --release --bin zec -- --test-threads=1
           cargo test --locked --release --test pty_acceptance -- --test-threads=1
+
+      - name: Run headless smoke
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_output="$(./target/release/zec --smoke)"
+          printf '%s\n' "$smoke_output"
+          grep -Fq 'initial: ""' <<< "$smoke_output"
+          grep -Fq 'after insert: "hello from zec"' <<< "$smoke_output"
+          grep -Fq 'after undo: ""' <<< "$smoke_output"
 
       - name: Run Alpha 1 acceptance
         timeout-minutes: 45
@@ -162,6 +178,19 @@ jobs:
           printf 'candidate_sha=%s\nrun_id=%s\nrun_attempt=%s\nartifact_id=%s\nartifact_digest=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$ARTIFACT_ID" "$ARTIFACT_DIGEST"
+
+      - name: Enforce CI disk budget
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE"
+          du -sh target "$HOME/.cargo/git" "$HOME/.cargo/registry" 2>/dev/null || true
+          used_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $3 }')"
+          generated_kib="$((used_kib - CI_DISK_BASELINE_KIB))"
+          budget_kib="$((14 * 1024 * 1024))"
+          echo "CI-generated disk: $((generated_kib / 1024)) MiB (budget: $((budget_kib / 1024)) MiB)"
+          test "$generated_kib" -lt "$budget_kib"
 
   evidence:
     name: Alpha 1 evidence
