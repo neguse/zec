@@ -12251,6 +12251,7 @@ dependencies = [
  "unicode-width",
  "vt100",
  "workspace",
+ "worktree",
 ]
 
 [[package]]

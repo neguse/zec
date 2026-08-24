@@ -119,24 +119,30 @@ presentation用のimmutable snapshotであり、file本文、selection、undo、
 別Bufferへ複製しない。Quick OpenとProject Searchはrepository modeだけの操作で、direct
 `zec FILE...` modeのopen/save経路はそのまま残す。
 
-`Alt-F`のProject Searchは`Search::local`とZedの`SearchQuery`を使うcase-sensitiveなliteral検索で、
-Zedからstreamされる`Buffer`と`Anchor` rangeをauthorityとする。zecはdiskからmatch本文を独自に
-読み直さず、Zed Buffer snapshotからpath、1-based line、BOMを除いたUnicode scalar column、previewへ
-投影し、canonical file identityとrangeの重複を除いて決定順に並べる。全hit数を保持したままterminalへ
-表示するresultは先頭100件に制限し、`Enter`では保持していた同じBufferとAnchor rangeへcaretを移動する。
+`Alt-F`のProject Searchは`RepositoryIndex`の決定順file setとZed `SearchQuery`を使う
+case-sensitiveなliteral検索である。実行ごとのworker数はGPUIのCPU数を1〜4へclampし、dispatch済み
+fileもworker数の2倍までに制限する。closed fileのdisk prefilterとno-hitの決定順retireは固定
+background worker/collector内で完結し、disk hitまたはopen bufferだけをforeground `AsyncApp`へ渡す。
+open bufferはdisk prefilterを迂回して同一physical fileの全aliasを`BufferStore` snapshotから検索し、
+closed fileのhitは`BufferStore`でopenする。disk判定はbinary除外以外はoptimizationに留め、最終authorityは
+常にZed `BufferSnapshot`と`Anchor` rangeとする。
+zecはsnapshotからpath、1-based line、BOMを除いたUnicode scalar column、previewへ投影し、canonical
+file identityとrangeの重複を除いて決定順に並べる。sourceは5,000 matching filesまたは10,000 rangesの
+exact limitまで保持し、5,001件目または10,001件目を検出した場合だけlower-bound flagを立てる。全hit数を
+保持したままterminalへ表示するresultは先頭100件に制限し、`Enter`では保持していた同じBufferとAnchor
+rangeへcaretを移動する。
 
 queryを変更するたびにprompt-local generationを増やし、app-wide coordinatorは同時に実行する
-Zed searchを最大2件、待機requestをlatest 1件に制限する。key editは16 msのtrailing debounceで
-まとめ、bracketed pasteはatomicな完成queryとして直ちにeligibleにする。debounce後のkey queryは
-実行中searchがある間も待機させるため、置換時のbackspace中間queryは2枠目を占有せず、完成した
-pasteだけが予約した2枠目へ直ちに進める。
+project searchを最大2件、待機requestをlatest 1件に制限する。key editは旧runを直ちにcancelしてから
+16 msのtrailing debounceでまとめ、bracketed pasteはatomicな完成queryとして直ちにeligibleにする。
+debounce後のkey queryは実行中searchがある間も待機させるため、置換時のbackspace中間queryは2枠目を
+占有せず、完成したpasteだけが予約した2枠目へ直ちに進める。
 
-旧searchの停止はZed `SearchResults` receiverの`close()`でbest-effortに要求する。ただしcloseは
-worker停止のackではないため、新しいpasteのdispatchを待たせず、旧searchのslotも解放しない。
-`RunningLiteralSearch::collect`はclose後もZedの`task_handle`を明示的にawaitし、app-wide
-coordinatorはそのfinish eventまで外側のTask handleを保持する。pasteによるsupersede、空query、
-`Esc`、prompt closeはいずれもreceiverをcloseしてreducer/debounce/pendingをlogical cancelするが、
-in-flight Taskはdropしない。app teardownだけはclose後に外側Taskをdetachして自然unwindを許す。
+cancelはuser用signalを閉じ、file scan、queue待機、snapshot chunkの各境界をwakeする。source cap用の
+internal stopとは分離し、user cancelだけをerrorとして返す。producerと固定workerはdropせず自然終了まで
+joinし、app-wide coordinatorはfinish eventまで外側Task handleを保持する。pasteによるsupersede、空query、
+`Esc`、prompt closeはいずれもreducer/debounce/pendingをlogical cancelするが、in-flight Taskはdropしない。
+app teardownだけはcancel後に外側Taskをdetachし、そのTask自身がworker joinを完了する。
 
 各requestはprompt session IDとgenerationの組で識別するため、古いcompletionがcapacity 1の
 terminal channelへ既に入った後でpromptを開き直しても、新sessionへsuccess/errorをpublishしない。

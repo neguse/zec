@@ -36,6 +36,7 @@ unicode-width = "0.2"
 text = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 vt100 = "0.16"
 workspace = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+worktree = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -259,7 +259,7 @@ struct ProjectSearchCompletion {
     next: Option<ScheduledProjectSearch>,
 }
 
-/// Pure scheduling state for expensive Zed searches. A running request keeps
+/// Pure scheduling state for bounded project searches. A running request keeps
 /// its slot until its completion event; replacing a query never treats Task
 /// drop as proof that the underlying Zed workers have stopped.
 #[derive(Default)]
@@ -403,7 +403,7 @@ struct ActiveProjectSearch {
 }
 
 /// Owns every in-flight task across prompt lifetimes. Debounce tasks may be
-/// replaced freely; Zed search tasks are removed only after their finish event.
+/// replaced freely; project-search tasks are removed only after their finish event.
 #[derive(Default)]
 struct ProjectSearchCoordinator {
     scheduler: ProjectSearchScheduler,
@@ -439,9 +439,10 @@ impl ProjectSearchCoordinator {
     ) -> Result<Option<ScheduledProjectSearch>> {
         let session = request.key.session;
         let schedule = self.scheduler.request(request, change)?;
-        if change == ProjectSearchChange::Paste {
-            self.cancel_session_searches(session);
-        }
+        // Every edit invalidates the old query immediately. Key requests still
+        // wait for the 16 ms trailing debounce before dispatch, but their old
+        // file workers stop consuming CPU during that debounce window.
+        self.cancel_session_searches(session);
         self.debounce_task = schedule.debounce.map(|request| {
             let timer = cx.background_executor().timer(PROJECT_SEARCH_DEBOUNCE);
             cx.spawn(async move |_cx| {
@@ -517,8 +518,8 @@ impl Drop for ProjectSearchCoordinator {
             if let Some(cancellation) = active.cancellation {
                 cancellation.cancel();
             }
-            // App shutdown must not synchronously drop Zed's scoped worker
-            // pool on one of the same workers needed to drain that scope.
+            // The detached outer task retains and naturally joins every fixed
+            // worker after app-level cancellation.
             active.task.detach();
         }
     }
@@ -1759,6 +1760,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 let repository = repository
                                     .as_ref()
                                     .expect("Project search requires repository");
+                                let open_buffers = project_searchable_buffers(&tabs);
                                 if let Err(error) = begin_project_search(
                                     project_search_prompt
                                         .as_mut()
@@ -1767,6 +1769,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     ProjectSearchChange::Key,
                                     repository,
                                     &services,
+                                    open_buffers,
                                     redraw_sender.clone(),
                                     cx,
                                 ) {
@@ -1834,6 +1837,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     let document = OpenDocument {
                                         buffer: hit.buffer.clone(),
                                         untitled_label: None,
+                                        project_searchable: true,
                                     };
                                     match create_document_tab(
                                         document,
@@ -2268,6 +2272,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             let repository = repository
                                 .as_ref()
                                 .expect("Project search requires repository");
+                            let open_buffers = project_searchable_buffers(&tabs);
                             if let Err(error) = begin_project_search(
                                 project_search_prompt
                                     .as_mut()
@@ -2276,6 +2281,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 ProjectSearchChange::Paste,
                                 repository,
                                 &services,
+                                open_buffers,
                                 redraw_sender.clone(),
                                 cx,
                             ) {
@@ -2422,11 +2428,13 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         let repository = repository
                             .as_ref()
                             .expect("scheduled project search requires repository");
+                        let open_buffers = project_searchable_buffers(&tabs);
                         if let Err(error) = dispatch_project_search(
                             &mut project_search_coordinator,
                             next,
                             repository,
                             &services,
+                            open_buffers,
                             redraw_sender.clone(),
                             cx,
                         ) {
@@ -2455,11 +2463,13 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             let repository = repository
                                 .as_ref()
                                 .expect("scheduled project search requires repository");
+                            let open_buffers = project_searchable_buffers(&tabs);
                             if let Err(error) = dispatch_project_search(
                                 &mut project_search_coordinator,
                                 next,
                                 repository,
                                 &services,
+                                open_buffers,
                                 redraw_sender.clone(),
                                 cx,
                             ) {
@@ -2599,6 +2609,10 @@ struct FileServices {
 struct OpenDocument {
     buffer: Entity<Buffer>,
     untitled_label: Option<String>,
+    /// Mirrors Zed's project-search eligibility for documents owned by zec.
+    ///
+    /// Scratch buffers stay false even after Save As makes them file-backed.
+    project_searchable: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2635,6 +2649,13 @@ struct CapturedEditorFrame {
     snapshot: RenderSnapshot,
     manual_vertical_scroll: bool,
     last_cursor: Option<Cursor>,
+}
+
+fn project_searchable_buffers(tabs: &[DocumentTab]) -> Vec<Entity<Buffer>> {
+    tabs.iter()
+        .filter(|tab| tab.document.project_searchable)
+        .map(|tab| tab.document.buffer.clone())
+        .collect()
 }
 
 fn file_services(cx: &mut App) -> FileServices {
@@ -2908,6 +2929,7 @@ async fn load_project_document(
     Ok(OpenDocument {
         buffer,
         untitled_label: None,
+        project_searchable: true,
     })
 }
 
@@ -2962,20 +2984,27 @@ fn start_zed_project_search_command(
     request: ScheduledProjectSearch,
     repository: &RepositorySession,
     services: &FileServices,
+    open_buffers: Vec<Entity<Buffer>>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<ProjectSearchCommand> {
     let key = request.key;
     let index = repository.index.clone();
     let file_system = services.file_system.clone();
     let buffer_store = services.buffer_store.clone();
-    let worktree_store = services.worktree_store.clone();
     let running = cx.update(|cx| {
-        start_literal_project_search(request.query, file_system, buffer_store, worktree_store, cx)
+        start_literal_project_search(
+            request.query,
+            index.clone(),
+            file_system,
+            buffer_store,
+            open_buffers,
+            cx,
+        )
     })?;
     let cancellation = running.cancellation_handle();
     let completion = cx.spawn(async move |cx| {
         running
-            .collect(index.as_ref(), cx)
+            .collect(cx)
             .await
             .map_err(|error| format!("{error:#}"))
     });
@@ -3007,11 +3036,12 @@ fn dispatch_project_search(
     request: ScheduledProjectSearch,
     repository: &RepositorySession,
     services: &FileServices,
+    open_buffers: Vec<Entity<Buffer>>,
     event_sender: async_channel::Sender<TerminalEvent>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
     let key = request.key;
-    let command = start_zed_project_search_command(request, repository, services, cx);
+    let command = start_zed_project_search_command(request, repository, services, open_buffers, cx);
     let (completion, cancellation) = project_search_command_parts(key, command);
     let task = cx.spawn(async move |_cx| {
         let result = completion.await;
@@ -3031,6 +3061,7 @@ fn begin_project_search(
     change: ProjectSearchChange,
     repository: &RepositorySession,
     services: &FileServices,
+    open_buffers: Vec<Entity<Buffer>>,
     event_sender: async_channel::Sender<TerminalEvent>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
@@ -3045,7 +3076,15 @@ fn begin_project_search(
     let request = prompt.request(query)?;
     let next = coordinator.schedule(request, change, event_sender.clone(), cx)?;
     if let Some(next) = next {
-        dispatch_project_search(coordinator, next, repository, services, event_sender, cx)?;
+        dispatch_project_search(
+            coordinator,
+            next,
+            repository,
+            services,
+            open_buffers,
+            event_sender,
+            cx,
+        )?;
     }
     Ok(())
 }
@@ -3128,6 +3167,7 @@ fn open_document(
         return Task::ready(Ok(OpenDocument {
             buffer,
             untitled_label: Some("[No Name]".to_owned()),
+            project_searchable: false,
         }));
     };
 
@@ -4161,7 +4201,8 @@ async fn execute_alpha_1_probe(
         Alpha1Probe::OutsideTrace(path) => alpha_1_outside_trace_probe(&path, cx).await,
         Alpha1Probe::ProjectSearch { root, query } => {
             let repository = prepare_repository(&root, services, cx).await?;
-            let output = collect_project_search(&repository, query, services, cx).await?;
+            let output =
+                collect_project_search(&repository, query, services, Vec::new(), cx).await?;
             Ok(project_search_json(&output))
         }
         Alpha1Probe::StaleResult(root) => alpha_1_stale_result_probe(&root, services, cx).await,
@@ -4173,6 +4214,7 @@ async fn collect_project_search(
     repository: &RepositorySession,
     query: String,
     services: &FileServices,
+    open_buffers: Vec<Entity<Buffer>>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<ProjectSearchOutput> {
     let mut scheduler = ProjectSearchScheduler::default();
@@ -4183,7 +4225,8 @@ async fn collect_project_search(
         .request(requested, ProjectSearchChange::Paste)?
         .next
         .context("project search did not start")?;
-    let command = start_zed_project_search_command(request, repository, services, cx)?;
+    let command =
+        start_zed_project_search_command(request, repository, services, open_buffers, cx)?;
     let output = command.completion.await.map_err(anyhow::Error::msg)?;
     let finished = scheduler.finish(command.request);
     ensure!(finished.was_active, "completed search had no active slot");
@@ -4356,6 +4399,7 @@ async fn alpha_1_root_identity_probe(
         &repository,
         "ALPHA1_EXCLUDED_SENTINEL".to_owned(),
         services,
+        project_searchable_buffers(&tabs),
         cx,
     )
     .await?;
@@ -4497,7 +4541,8 @@ async fn alpha_1_stale_result_probe(
         )?
         .next
         .context("query A did not start")?;
-    let command_a = start_zed_project_search_command(request_a, &repository, services, cx)?;
+    let command_a =
+        start_zed_project_search_command(request_a, &repository, services, Vec::new(), cx)?;
     let request_b = scheduler
         .request(
             prompt.request("ALPHA1_STALE_B".to_owned())?,
@@ -4505,7 +4550,8 @@ async fn alpha_1_stale_result_probe(
         )?
         .next
         .context("query B did not start")?;
-    let command_b = start_zed_project_search_command(request_b, &repository, services, cx)?;
+    let command_b =
+        start_zed_project_search_command(request_b, &repository, services, Vec::new(), cx)?;
 
     let mut publish_log = Vec::new();
     let key_b = command_b.request;
@@ -4960,6 +5006,65 @@ mod tests {
     }
 
     #[test]
+    fn project_search_coordinator_drop_cancels_fresh_handle_and_detaches_task() {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        gpui_platform::headless().run(move |cx| {
+            cx.spawn(async move |cx| {
+                let result: Result<()> = async {
+                    let mut coordinator = ProjectSearchCoordinator::default();
+                    let session = coordinator.open_session().context("search session")?;
+                    let mut prompt = ProjectSearchPrompt::new(session);
+                    let request = coordinator
+                        .scheduler
+                        .request(
+                            prompt.request("fresh".to_owned())?,
+                            ProjectSearchChange::Paste,
+                        )?
+                        .next
+                        .context("fresh search")?;
+                    let (release_sender, release_receiver) = async_channel::bounded(1);
+                    let (finished_sender, finished_receiver) = async_channel::bounded(1);
+                    let live_task = cx.spawn(async move |_cx| {
+                        let _ = release_receiver.recv().await;
+                        let _ = finished_sender.send(()).await;
+                    });
+                    let cancellation = RunningLiteralSearchCancellation::test_probe();
+                    let cancellation_probe = cancellation.clone();
+                    coordinator.attach(request.key, live_task, Some(cancellation))?;
+                    ensure!(
+                        !cancellation_probe.is_cancelled(),
+                        "fresh handle was cancelled"
+                    );
+
+                    drop(coordinator);
+                    ensure!(
+                        cancellation_probe.is_cancelled(),
+                        "coordinator drop did not cancel fresh handle"
+                    );
+                    ensure!(
+                        !release_sender.is_closed(),
+                        "coordinator drop dropped instead of detaching live task"
+                    );
+                    release_sender.send(()).await.context("release live task")?;
+                    finished_receiver
+                        .recv()
+                        .await
+                        .context("detached live task did not finish")?;
+                    Ok(())
+                }
+                .await;
+                result_sender.send(result).expect("send fresh-drop result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+        result_receiver
+            .recv()
+            .expect("receive fresh-drop result")
+            .expect("fresh coordinator drop lifecycle");
+    }
+
+    #[test]
     fn project_search_coordinator_retains_live_task_through_supersede_close_and_drop() {
         let (result_sender, result_receiver) = mpsc::sync_channel(1);
         gpui_platform::headless().run(move |cx| {
@@ -4985,6 +5090,20 @@ mod tests {
                     let cancellation = RunningLiteralSearchCancellation::test_probe();
                     let cancellation_probe = cancellation.clone();
                     coordinator.attach(first.key, live_task, Some(cancellation))?;
+
+                    let key_edit = prompt.request("key-edit".to_owned())?;
+                    let (key_sender, _key_receiver) = async_channel::unbounded();
+                    ensure!(
+                        coordinator
+                            .schedule(key_edit, ProjectSearchChange::Key, key_sender, cx)?
+                            .is_none(),
+                        "key edit dispatched before its debounce"
+                    );
+                    ensure!(
+                        cancellation_probe.is_cancelled(),
+                        "key edit did not cancel the old run before debounce"
+                    );
+                    ensure!(coordinator.task_count() == 1, "key edit lost the old task");
 
                     let replacement = prompt.request("second".to_owned())?;
                     let (event_sender, _event_receiver) = async_channel::unbounded();
@@ -5150,6 +5269,85 @@ mod tests {
                 .ends_with("~/notes.txt")
         );
         assert!(resolve_path("").is_err());
+    }
+
+    #[test]
+    fn project_search_uses_dirty_open_buffer_as_snapshot_authority() {
+        let fixture = TemporaryRepository::new();
+        let root = fixture.root.clone();
+        let dirty_path = root.join("dirty-authority.txt");
+        std::fs::write(&dirty_path, "DISK_ONLY\n").expect("write dirty authority fixture");
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        gpui_platform::headless().run(move |cx| {
+            init_zed(cx);
+            let services = file_services(cx);
+            cx.spawn(async move |cx| {
+                let result: Result<_> = async {
+                    let repository = prepare_repository(&root, &services, cx).await?;
+                    let document = open_repository_document(
+                        Path::new("dirty-authority.txt"),
+                        &repository,
+                        &services,
+                        cx,
+                    )
+                    .await?;
+                    document.buffer.update(cx, |buffer, cx| {
+                        let len = buffer.len();
+                        buffer.edit([(0..len, "DIRTY_AUTHORITY café\n")], None, cx);
+                    });
+                    ensure!(document_state(&document, cx).dirty, "buffer is not dirty");
+
+                    let index = repository.index.clone();
+                    let file_system = services.file_system.clone();
+                    let buffer_store = services.buffer_store.clone();
+                    let running = cx.update(|cx| {
+                        start_literal_project_search(
+                            "DIRTY_AUTHORITY café",
+                            index,
+                            file_system,
+                            buffer_store,
+                            vec![document.buffer.clone()],
+                            cx,
+                        )
+                    })?;
+                    let output = running.collect(cx).await?;
+                    let rows = output
+                        .matches
+                        .iter()
+                        .map(|hit| {
+                            (
+                                hit.summary.path.to_string(),
+                                hit.summary.preview.clone(),
+                                hit.byte_range.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let disk = services.file_system.load(&dirty_path).await?.to_string();
+                    Ok((output.total_hits, output.source_limit_reached, rows, disk))
+                }
+                .await;
+                sender.send(result).expect("send dirty authority result");
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        let (total, source_limit, rows, disk) = receiver
+            .recv()
+            .expect("receive dirty authority result")
+            .expect("dirty authority search");
+        assert_eq!(total, 1);
+        assert!(!source_limit);
+        assert_eq!(
+            rows,
+            vec![(
+                "dirty-authority.txt".to_owned(),
+                "DIRTY_AUTHORITY café".to_owned(),
+                0.."DIRTY_AUTHORITY café".len(),
+            )]
+        );
+        assert_eq!(disk, "DISK_ONLY\n");
     }
 
     #[test]
