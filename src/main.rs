@@ -973,7 +973,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
     let mut terminal = terminal_session.terminal()?;
     let (error_sender, error_receiver) = mpsc::sync_channel(1);
 
-    gpui_platform::headless().run(move |cx| {
+    editor_application().run(move |cx| {
         init_zed(cx);
         let services = file_services(cx);
         cx.spawn(async move |cx| {
@@ -2939,18 +2939,36 @@ fn format_open_error(path: &Path, error: &anyhow::Error) -> String {
         || error.chain().any(|cause| {
             cause
                 .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.raw_os_error() == Some(nix::libc::ELOOP))
+                .is_some_and(is_filesystem_loop_error)
         })
         // BufferStore's asynchronous load path can flatten the source error.
         // Re-classify the same local path for the user-facing startup error so
         // a real symlink loop remains distinguishable from an ordinary open
         // failure. This is diagnostic-only; Zed still owns the actual load.
         || std::fs::canonicalize(path)
-            .is_err_and(|error| error.raw_os_error() == Some(nix::libc::ELOOP));
+            .is_err_and(|error| is_filesystem_loop_error(&error));
     if is_eloop {
         format!("ELOOP opening {}: {details}", path.display())
     } else {
         format!("failed to open {}: {details}", path.display())
+    }
+}
+
+fn is_filesystem_loop_error(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(nix::libc::ELOOP)
+    }
+    #[cfg(windows)]
+    {
+        // Win32 ERROR_CANT_RESOLVE_FILENAME. This is what CreateFileW reports
+        // when resolving a symbolic-link cycle.
+        error.raw_os_error() == Some(1921)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = error;
+        false
     }
 }
 
@@ -3689,6 +3707,21 @@ fn init_zed(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
+fn editor_application() -> gpui::Application {
+    #[cfg(windows)]
+    {
+        // The pinned GPUI Windows headless platform intentionally omits the
+        // DirectX and drag/drop devices required by `open_window`. zec keeps
+        // its editor windows hidden, but still needs the regular platform to
+        // construct Zed's Editor.
+        gpui_platform::application()
+    }
+    #[cfg(not(windows))]
+    {
+        gpui_platform::headless()
+    }
+}
+
 fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Editor>> {
     cx.open_window(
         WindowOptions {
@@ -4143,7 +4176,7 @@ fn keep_cursor_visible(
 }
 
 fn run_smoke() {
-    gpui_platform::headless().run(|cx| {
+    editor_application().run(|cx| {
         init_zed(cx);
         let buffer = cx.new(|cx| Buffer::local(String::new(), cx));
         let window = open_editor(buffer, cx).expect("failed to open editor");
@@ -4167,7 +4200,7 @@ fn run_smoke() {
 
 fn run_alpha_1_probe(probe: Alpha1Probe) -> Result<()> {
     let (sender, receiver) = mpsc::sync_channel(1);
-    gpui_platform::headless().run(move |cx| {
+    editor_application().run(move |cx| {
         init_zed(cx);
         let services = file_services(cx);
         cx.spawn(async move |cx| {
@@ -4748,7 +4781,9 @@ mod tests {
     struct TemporaryRepository {
         directory: PathBuf,
         root: PathBuf,
+        #[cfg(unix)]
         root_alias: PathBuf,
+        #[cfg(unix)]
         outside: PathBuf,
     }
 
@@ -4761,7 +4796,9 @@ mod tests {
             let directory =
                 std::env::temp_dir().join(format!("zec-repository-{}-{nonce}", std::process::id()));
             let root = directory.join("repo");
+            #[cfg(unix)]
             let root_alias = directory.join("repo-alias");
+            #[cfg(unix)]
             let outside = directory.join("outside.txt");
             std::fs::create_dir_all(root.join("src")).expect("create repository src");
             std::fs::create_dir_all(root.join("aliases")).expect("create repository aliases");
@@ -4783,16 +4820,22 @@ mod tests {
                 .expect("write git metadata fixture");
             std::fs::write(root.join(".gitignore"), "target/\n")
                 .expect("write repository ignore rules");
+            #[cfg(unix)]
             std::fs::write(&outside, "outside control\n").expect("write outside file");
-            std::os::unix::fs::symlink("../src/日本 語.rs", root.join("aliases/日本 語.rs"))
-                .expect("create file alias");
-            std::os::unix::fs::symlink("root-loop", root.join("root-loop"))
-                .expect("create self-referential symlink");
-            std::os::unix::fs::symlink(&root, &root_alias).expect("create root alias");
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink("../src/日本 語.rs", root.join("aliases/日本 語.rs"))
+                    .expect("create file alias");
+                std::os::unix::fs::symlink("root-loop", root.join("root-loop"))
+                    .expect("create self-referential symlink");
+                std::os::unix::fs::symlink(&root, &root_alias).expect("create root alias");
+            }
             Self {
                 directory,
                 root,
+                #[cfg(unix)]
                 root_alias,
+                #[cfg(unix)]
                 outside,
             }
         }
@@ -5261,7 +5304,7 @@ mod tests {
         assert!(relative.is_absolute());
         assert!(relative.ends_with("nested/file.rs"));
 
-        let absolute = PathBuf::from("/tmp/zec-save-as.rs");
+        let absolute = std::env::temp_dir().join("zec-save-as.rs");
         assert_eq!(resolve_path(absolute.to_str().unwrap()).unwrap(), absolute);
         assert!(
             resolve_path("~/notes.txt")
@@ -5350,6 +5393,7 @@ mod tests {
         assert_eq!(disk, "DISK_ONLY\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn repository_startup_uses_one_root_identity_and_exact_outside_worktree() {
         let fixture = TemporaryRepository::new();
@@ -5359,7 +5403,7 @@ mod tests {
         let expected_root = std::fs::canonicalize(&root).expect("canonicalize fixture root");
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let services = file_services(cx);
 
@@ -5537,6 +5581,10 @@ mod tests {
         assert!(continued_saved);
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn captures_only_the_terminal_viewport_from_a_hundred_thousand_lines() {
         use std::fmt::Write as _;
@@ -5550,7 +5598,7 @@ mod tests {
         }
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let buffer = cx.new(|cx| Buffer::local(text, cx));
             let window = open_editor(buffer, cx).expect("open large editor");
@@ -5660,6 +5708,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn clean_file_auto_reloads_without_project_and_reload_is_undoable() {
         use std::time::{Duration, Instant};
@@ -5671,7 +5723,7 @@ mod tests {
         let path = file.path.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let services = file_services(cx);
             let document = open_document(Some(path.clone()), services.clone(), cx);
@@ -5765,6 +5817,10 @@ mod tests {
         assert!(dirty_after_undo);
         assert!(!conflict_after_undo);
     }
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn file_identity_follows_external_rename_and_delete_requires_confirmation() {
         use std::time::{Duration, Instant};
@@ -5777,7 +5833,7 @@ mod tests {
         let expected_renamed_path = renamed_path.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let services = file_services(cx);
             let document = open_document(Some(original_path.clone()), services.clone(), cx);
@@ -5899,6 +5955,10 @@ mod tests {
         assert!(!old_path_exists);
         assert!(status.contains("renamed.txt!"), "status was {status:?}");
     }
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn failed_zed_save_keeps_the_buffer_dirty_and_preserves_the_backup() {
         const INITIAL: &str = "disk original\n";
@@ -5909,7 +5969,7 @@ mod tests {
         let backup_path = file.directory.join("original.backup");
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let services = file_services(cx);
             let document = open_document(Some(path.clone()), services.clone(), cx);
@@ -5983,13 +6043,17 @@ mod tests {
         assert_eq!(backup, INITIAL);
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn go_to_location_uses_zed_buffer_coordinates_and_preserves_buffer_undo() {
         use language::{Point, Selection, SelectionGoal};
 
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let original = "first\n日本語abc\nlast\n";
             let buffer = cx.new(|cx| Buffer::local(original.to_owned(), cx));
@@ -6125,11 +6189,15 @@ mod tests {
         assert_eq!(final_point, Point::new(3, 0));
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn mouse_caret_position_uses_zed_display_anchors_without_editing() {
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let original = "first\n日本語abc\nlast\n";
             let buffer = cx.new(|cx| Buffer::local(original.to_owned(), cx));
@@ -6171,11 +6239,15 @@ mod tests {
         assert!(!dirty);
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn search_replace_uses_zed_anchors_and_undo_transactions() {
         let (sender, receiver) = mpsc::sync_channel(1);
 
-        gpui_platform::headless().run(move |cx| {
+        editor_application().run(move |cx| {
             init_zed(cx);
             let original = "one two one";
             let buffer = cx.new(|cx| Buffer::local(original.to_owned(), cx));

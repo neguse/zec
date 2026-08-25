@@ -132,3 +132,60 @@ jobs:
           budget_kib="$((14 * 1024 * 1024))"
           echo "CI-generated disk: $((generated_kib / 1024)) MiB (budget: $((budget_kib / 1024)) MiB)"
           test "$generated_kib" -lt "$budget_kib"
+
+  windows:
+    name: Windows native
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          rustc --version --verbose
+          cargo --version
+          rustfmt --version
+
+      - name: Verify lockfile and formatting
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps | Out-Null
+          cargo fmt --all -- --check
+
+      - name: Build zec
+        timeout-minutes: 60
+        run: cargo build --locked --bin zec
+
+      - name: Run portable unit tests
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          cargo test --locked --bin zec -- --test-threads=1
+          cargo test --locked --test repository -- --test-threads=1
+
+      - name: Run Windows GPUI smoke
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $output = @(& .\target\debug\zec.exe --smoke)
+          $output | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+            throw "zec --smoke exited with $LASTEXITCODE"
+          }
+          $expected = @(
+            'initial: ""'
+            'after insert: "hello from zec"'
+            'after undo: ""'
+          )
+          $difference = Compare-Object -ReferenceObject $expected -DifferenceObject $output
+          if ($difference) {
+            throw "unexpected smoke output: $($output -join ' | ')"
+          }

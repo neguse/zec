@@ -1797,8 +1797,16 @@ mod tests {
     use super::*;
     use std::{collections::HashSet, sync::mpsc};
 
+    fn absolute_test_path(path: &str) -> PathBuf {
+        path.trim_start_matches('/').split('/').fold(
+            std::env::temp_dir().join("zec-repository-unit"),
+            |path, part| path.join(part),
+        )
+    }
+
     fn root(requested: &str, canonical: &str) -> RepositoryRoot {
-        RepositoryRoot::from_paths(requested.into(), canonical.into()).unwrap()
+        RepositoryRoot::from_paths(absolute_test_path(requested), absolute_test_path(canonical))
+            .unwrap()
     }
 
     #[test]
@@ -1823,10 +1831,10 @@ mod tests {
                     .ignored(true)
                     .always_included(true),
                 RepositoryEntry::file("outside", 3)
-                    .with_canonical_path("/control/outside")
+                    .with_canonical_path(absolute_test_path("/control/outside"))
                     .external(true),
                 RepositoryEntry::file("unmarked-outside", 4)
-                    .with_canonical_path("/control/unmarked-outside"),
+                    .with_canonical_path(absolute_test_path("/control/unmarked-outside")),
             ],
         )
         .unwrap();
@@ -1868,9 +1876,11 @@ mod tests {
         let index = RepositoryIndex::from_entries(
             root("/repo", "/repo"),
             [
-                RepositoryEntry::file("z-alias.rs", 20).with_canonical_path("/repo/src/real.rs"),
+                RepositoryEntry::file("z-alias.rs", 20)
+                    .with_canonical_path(absolute_test_path("/repo/src/real.rs")),
                 RepositoryEntry::file("src/real.rs", 20),
-                RepositoryEntry::file("a-alias.rs", 20).with_canonical_path("/repo/src/real.rs"),
+                RepositoryEntry::file("a-alias.rs", 20)
+                    .with_canonical_path(absolute_test_path("/repo/src/real.rs")),
             ],
         )
         .unwrap();
@@ -1888,7 +1898,7 @@ mod tests {
         ));
         assert_eq!(
             index
-                .file_for_canonical_path(Path::new("/repo/src/real.rs"))
+                .file_for_canonical_path(&absolute_test_path("/repo/src/real.rs"))
                 .unwrap()
                 .relative_path(),
             "src/real.rs"

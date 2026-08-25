@@ -187,6 +187,10 @@ mod tests {
         (entry.into_text(), metadata)
     }
 
+    #[cfg_attr(
+        windows,
+        ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
+    )]
     #[test]
     fn matches_zed_copy_and_cut_line_semantics() {
         let (sender, receiver) = mpsc::sync_channel(1);

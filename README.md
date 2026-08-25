@@ -5,9 +5,9 @@ data/terminal lifecycle、viewport-bounded rendering、actual-binary PTY試験�
 clean-build再現性の全gateを2026-08-23に通過しました。production-readyではなく、
 ここからalpha editorとして開発します。
 
-現在は、GPUI の headless runtime 上で `editor::Editor` を動かし、Crossterm から
-Zed の keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを
-描画します。
+現在は、GPUI runtime 上で `editor::Editor` を動かし、Crossterm から Zed の
+keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを描画します。
+Linuxではheadless platformを、Windowsでは非表示windowを作るnative platformを使います。
 
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に、
 PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
@@ -106,3 +106,24 @@ cargo run -- --smoke
 ```
 
 初回はZedの依存一式をビルドするため、時間とディスク容量を使います。
+
+## Windows
+
+WindowsではMSVCのC++ build toolsとWindows SDKが必要です。Windows Terminalなどの
+ConPTY対応端末からPowerShellを開き、次のようにbuild、smoke、起動を行います。
+Zed依存の初回buildは大きいため、空き容量が限られる環境ではdebug infoとincremental buildを
+無効にしてください。
+
+```powershell
+$env:CARGO_INCREMENTAL = "0"
+$env:CARGO_PROFILE_DEV_DEBUG = "0"
+$env:CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG = "0"
+
+cargo build --locked --bin zec
+.\target\debug\zec.exe --smoke
+.\target\debug\zec.exe .
+```
+
+通常の編集、repository mode、保存、検索などはWindowsでも利用できます。
+POSIX signal/job controlとLinux PTY acceptance、Alpha 1の機械判定gateは引き続きLinux専用です。
+Linux専用のAlpha 1補助binaryをbuildする場合は`--features alpha-1-linux`が必要です。

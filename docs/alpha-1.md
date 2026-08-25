@@ -25,6 +25,7 @@ export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
 rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
 /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 cargo build --locked --release \
+  --features alpha-1-linux \
   --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
 cargo test --locked --release --bin zec -- --test-threads=1
 cargo test --locked --release --test pty_acceptance -- --test-threads=1

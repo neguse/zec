@@ -107,7 +107,7 @@ jobs:
 
       - name: Build the release gate binaries
         timeout-minutes: 60
-        run: cargo build --locked --release --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
+        run: cargo build --locked --release --features alpha-1-linux --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
 
       - name: Run PoC regression tests
         timeout-minutes: 30
