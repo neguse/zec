@@ -52,7 +52,6 @@ impl LinePrompt {
     }
 
     /// Creates a prompt containing `text`, with its cursor at the end.
-    #[cfg(test)]
     pub fn with_text(text: impl Into<String>) -> Self {
         let text = text.into();
         Self {

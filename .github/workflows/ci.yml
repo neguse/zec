@@ -27,6 +27,10 @@ jobs:
     name: Linux graduation gate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+      TERM: xterm-256color
 
     steps:
       - name: Checkout
@@ -97,17 +101,24 @@ jobs:
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
           cargo fmt --all -- --check
 
-      - name: Build zec
+      - name: Build zec and Alpha 2 gate binaries
         timeout-minutes: 60
-        run: cargo build --locked --bin zec
+        run: >-
+          cargo build --locked
+          --bin zec --bin alpha_2_fixture_lsp
+          --bin alpha_2_acceptance --bin alpha_2_bench
 
       - name: Run unit and headless tests
         timeout-minutes: 30
-        run: cargo test --locked --bin zec
+        run: cargo test --locked --bin zec -- --test-threads=1
 
-      - name: Run PTY acceptance tests
-        timeout-minutes: 10
-        run: cargo test --locked --test pty_acceptance -- --test-threads=1
+      - name: Run parity, PTY, and Alpha 2 integration tests
+        timeout-minutes: 30
+        run: >-
+          cargo test --locked
+          --test parity_contract --test pty_acceptance
+          --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures
+          -- --test-threads=1
 
       - name: Run headless smoke
         timeout-minutes: 5

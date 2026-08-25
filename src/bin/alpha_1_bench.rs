@@ -87,6 +87,13 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
     )?;
     let save = save_metric(&zec, &generated.root, &mut resources)?;
 
+    if resources.max_descendant_count > 0 {
+        eprintln!(
+            "Alpha 1 descendant diagnostics ({} observed): {:?}",
+            resources.max_descendant_count, resources.descendant_commands
+        );
+    }
+
     let assertions = BTreeMap::from([
         ("startup_latency".to_owned(), startup.assertion_passed),
         ("quick_open_latency".to_owned(), quick_open.assertion_passed),
@@ -454,6 +461,10 @@ fn parse_proc_events(
 }
 
 fn observed_descendant_count(root: i32, edges: &[(i32, i32)]) -> usize {
+    observed_descendant_pids(root, edges).len()
+}
+
+fn observed_descendant_pids(root: i32, edges: &[(i32, i32)]) -> BTreeSet<i32> {
     let mut descendants = BTreeSet::new();
     loop {
         let before = descendants.len();
@@ -463,7 +474,30 @@ fn observed_descendant_count(root: i32, edges: &[(i32, i32)]) -> usize {
             }
         }
         if descendants.len() == before {
-            return descendants.len();
+            return descendants;
+        }
+    }
+}
+
+fn record_descendant_commands(root: i32, edges: &[(i32, i32)], commands: &mut BTreeSet<String>) {
+    for pid in observed_descendant_pids(root, edges) {
+        let command_line = fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .replace('\0', " ")
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|command| !command.is_empty());
+        let command = command_line.or_else(|| {
+            fs::read_to_string(format!("/proc/{pid}/comm"))
+                .ok()
+                .map(|command| command.trim().to_owned())
+                .filter(|command| !command.is_empty())
+        });
+        if let Some(command) = command {
+            commands.insert(command);
         }
     }
 }
@@ -498,6 +532,7 @@ fn read_i32(bytes: &[u8], offset: usize) -> Result<i32> {
 struct ResourceTracker {
     max_vm_hwm_bytes: u64,
     max_descendant_count: usize,
+    descendant_commands: BTreeSet<String>,
 }
 
 impl ResourceTracker {
@@ -507,6 +542,8 @@ impl ResourceTracker {
         self.max_descendant_count = self
             .max_descendant_count
             .max(observation.max_descendant_count);
+        self.descendant_commands
+            .extend(observation.descendant_commands);
         Ok(())
     }
 }
@@ -515,6 +552,7 @@ impl ResourceTracker {
 struct ResourceObservation {
     max_vm_hwm_bytes: u64,
     max_descendant_count: usize,
+    descendant_commands: BTreeSet<String>,
 }
 
 struct ResourceMonitor {
@@ -535,9 +573,15 @@ impl ArmedResourceMonitor {
                 let mut observation = ResourceObservation {
                     max_vm_hwm_bytes: initial_vm_hwm_bytes,
                     max_descendant_count: initial_descendant_count,
+                    descendant_commands: BTreeSet::new(),
                 };
                 loop {
                     events.drain_fork_edges(&mut fork_edges)?;
+                    record_descendant_commands(
+                        pid,
+                        &fork_edges,
+                        &mut observation.descendant_commands,
+                    );
                     observation.max_descendant_count = observation
                         .max_descendant_count
                         .max(observed_descendant_count(pid, &fork_edges));
@@ -564,6 +608,11 @@ impl ArmedResourceMonitor {
                     };
                     if stopping {
                         events.drain_fork_edges(&mut fork_edges)?;
+                        record_descendant_commands(
+                            pid,
+                            &fork_edges,
+                            &mut observation.descendant_commands,
+                        );
                         observation.max_descendant_count = observation
                             .max_descendant_count
                             .max(observed_descendant_count(pid, &fork_edges));

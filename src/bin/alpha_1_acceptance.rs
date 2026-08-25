@@ -1147,10 +1147,7 @@ fn signal_exit(zec: &Path, signal: Signal) -> Result<String> {
             PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
         session.wait_ready("repo", fixture::READY_SENTINEL)?;
         session.assert_raw(&baseline)?;
-        ensure!(
-            alpha_1_support::descendant_process_count(session.pid()?)? == 0,
-            "zec has a descendant process"
-        );
+        alpha_1_support::wait_for_no_descendant_processes(session.pid()?)?;
         session.send_signal(signal)?;
         let status = session.wait_exit()?;
         ensure!(status.success(), "{signal:?} exit was not normal: {status}");

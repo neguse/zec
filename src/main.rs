@@ -1,3 +1,4 @@
+mod actions;
 mod clipboard;
 mod input;
 mod prompt;
@@ -7,37 +8,94 @@ mod tabs;
 mod terminal;
 mod tracing_fs;
 
+// Key bindings resolve to presentation-neutral terminal actions first. User
+// keymaps may keep using the familiar Zed action IDs; the loader aliases those
+// IDs to these actions so an Editor handler cannot perform the operation once
+// in GPUI and then a second time in the terminal workspace reducer.
+mod terminal_gpui_actions {
+    gpui::actions!(
+        zec,
+        [
+            CommandPalette,
+            NewFile,
+            OpenFile,
+            QuickOpen,
+            ProjectSearch,
+            CloseTab,
+            PreviousTab,
+            NextTab,
+            Find,
+            Replace,
+            GoToLine,
+            Reload,
+            Save,
+            Quit,
+            ShowCompletions,
+            Hover,
+            ProjectDiagnostics,
+            GoToDefinition,
+            GoToTypeDefinition,
+            FindReferences,
+            ProjectSymbols,
+            NavigateBack,
+            NavigateForward,
+            RenameSymbol,
+            CodeActions,
+            FormatDocument,
+            FormatSelection,
+            Undo,
+            Redo,
+            Copy,
+            Cut
+        ]
+    );
+}
+
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     env,
     ffi::OsString,
     io::{self, IsTerminal as _},
     ops::Range,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
-    time::Duration,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        mpsc,
+    },
+    time::{Duration, Instant},
 };
 
+use actions::{ActionContext, ActionMatch};
 use anyhow::{Context as _, Result, bail, ensure};
+use client::{Client, UserStore};
 use editor::{
-    Anchor, Bias, Editor, EditorStyle, SelectionEffects,
-    actions::{Cut, SelectAll, Undo},
+    Anchor, Bias, CompletionProvider, Editor, EditorStyle, MultiBufferOffset, SelectionEffects,
+    actions::{ConfirmCompletion, Cut, Redo, SelectAll, ShowCompletions, Undo},
     display_map::{DisplayPoint, DisplayRow, DisplaySnapshot},
     scroll::Autoscroll,
 };
+use futures::StreamExt as _;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Task, WindowBounds,
-    WindowHandle, WindowOptions,
+    AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, KeyBinding, Keystroke, Task,
+    UpdateGlobal as _, WindowBounds, WindowHandle, WindowOptions,
 };
 use language::{
-    Buffer, BufferEvent, LanguageAwareStyling, LanguageNotFound, LanguageRegistry, LoadedLanguage,
-    language_settings::SoftWrap,
+    Buffer, BufferEvent, Capability, LanguageAwareStyling, LanguageNotFound, LanguageRegistry,
+    ToPointUtf16 as _,
+    language_settings::{FormatOnSave, LanguageSettings, SoftWrap},
 };
+use multi_buffer::MultiBuffer;
 use project::{
-    ProjectPath,
+    CodeAction, LocalProjectFlags, LspAction, PrepareRenameResponse, Project, ProjectPath,
+    ProjectTransaction,
     buffer_store::BufferStore,
+    lsp_store::{FormatTrigger, LspFormatTarget},
     search::SearchQuery,
-    worktree_store::{WorktreeIdCounter, WorktreeStore},
+    trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent},
+    worktree_store::WorktreeStore,
 };
 use prompt::{LinePrompt, PromptAction};
 use ratatui::{
@@ -45,34 +103,88 @@ use ratatui::{
     style::{Color as TerminalColor, Modifier as TerminalModifier, Style as TerminalStyle},
 };
 use render::{
-    BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan, TextPosition,
-    Viewport,
+    BackgroundRange, Cursor, EditorWidget, OverlayRow, OverlaySnapshot, RenderSnapshot,
+    SelectionRange, StyleSpan, TextPosition, Viewport,
 };
 use repository::{
     CompletionDisposition, LatestSearch, LatestSearchState, ProjectSearchOutput, QuickOpenMatch,
     RepositoryIndex, RepositoryRoot, RunningLiteralSearchCancellation, SearchGeneration,
     start_literal_project_search,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tabs::{Direction as TabDirection, TabLabel};
-use terminal::{InputReader, ScrollDirection, TerminalEvent, TerminalSession};
+use terminal::{
+    DiagnosticPresentation, HoverPresentation, InputReader, LocationPresentation,
+    LocationRequestKind, RenamePreparation, ScrollDirection, TerminalEvent, TerminalSession,
+};
+use text::{ToOffset as _, ToPoint as _};
 use theme::ActiveTheme as _;
-use tracing_fs::{FsPathKind, RecordingFs, classify_single_file_accesses};
+use tracing_fs::{FsPathKind, ZecFs, classify_single_file_accesses};
 use unicode_width::UnicodeWidthStr as _;
 use workspace::searchable::{Direction, SearchToken, SearchableItem as _};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [DIRECTORY | FILE ...]\n       zec --smoke\n\nKeys: Ctrl-N new, Ctrl-O open, Ctrl-P quick open, Alt-F project search, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z undo";
+const USAGE: &str = "Usage: zec [DIRECTORY | FILE ...]\n       zec --smoke\n\nKeys: F1/Ctrl-Shift-P commands, Ctrl-Space/Alt-/ completion, F2 hover, F6 rename, F8 diagnostics, F12 definition, Alt-F12 type definition, Shift-F12 references, Ctrl-. code actions, Shift-Alt-F format, Ctrl-Alt-F format selection, Ctrl-T symbols, Alt-Left/Right history, Ctrl-N new, Ctrl-O open, Ctrl-P quick open, Alt-F project search, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z/Y undo/redo";
 const QUICK_OPEN_LIMIT: usize = 100;
+const PROJECT_SYMBOL_LIMIT: usize = 100;
 const MAX_CONCURRENT_PROJECT_SEARCHES: usize = 2;
 const PROJECT_SEARCH_DEBOUNCE: Duration = Duration::from_millis(16);
+const RENAME_PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_RENAME_PREVIEW_OPERATIONS: usize = 10_000;
+const MAX_RENAME_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LANGUAGE_RESPONSE_ITEMS: usize = 10_000;
+const MAX_LANGUAGE_TEXT_BYTES: usize = 64 * 1024;
+const MAX_OVERLAY_SNAPSHOT_ROWS: usize = 200;
+const TERMINAL_DEFAULT_KEYMAP: &str = r#"
+[
+  {
+    "context": "Editor",
+    "bindings": {
+      "f1": "command_palette::Toggle",
+      "ctrl-shift-p": "command_palette::Toggle",
+      "ctrl-n": "workspace::NewFile",
+      "ctrl-o": "workspace::Open",
+      "ctrl-p": "file_finder::Toggle",
+      "alt-f": "project_search::ToggleFocus",
+      "ctrl-w": "pane::CloseActiveItem",
+      "ctrl-pageup": "pane::ActivatePreviousItem",
+      "ctrl-pagedown": "pane::ActivateNextItem",
+      "ctrl-f": "buffer_search::Deploy",
+      "ctrl-h": "buffer_search::DeployReplace",
+      "ctrl-g": "go_to_line::Toggle",
+      "ctrl-r": "workspace::ReloadActiveItem",
+      "ctrl-s": "workspace::Save",
+      "ctrl-q": "zed::Quit",
+      "ctrl-space": "editor::ShowCompletions",
+      "alt-/": "editor::ShowCompletions",
+      "f2": "editor::Hover",
+      "f8": "diagnostics::Deploy",
+      "f12": "editor::GoToDefinition",
+      "alt-f12": "editor::GoToTypeDefinition",
+      "shift-f12": "editor::FindAllReferences",
+      "ctrl-t": "project_symbols::Toggle",
+      "alt-left": "pane::GoBack",
+      "alt-right": "pane::GoForward",
+      "f6": "editor::Rename",
+      "ctrl-.": "editor::ToggleCodeActions",
+      "shift-alt-f": "editor::Format",
+      "ctrl-alt-f": "editor::FormatSelections",
+      "ctrl-z": "editor::Undo",
+      "ctrl-y": "editor::Redo",
+      "ctrl-c": "editor::Copy",
+      "ctrl-x": "editor::Cut"
+    }
+  }
+]
+"#;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
     Edit(Vec<PathBuf>),
     Alpha1Probe(Alpha1Probe),
+    Alpha2Probe(Alpha2Probe),
     Smoke,
     Help,
 }
@@ -89,6 +201,23 @@ enum Alpha1Probe {
     },
     StaleResult(PathBuf),
     SearchFailure(PathBuf),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Alpha2Probe {
+    LanguageService {
+        root: PathBuf,
+        file: PathBuf,
+    },
+    SettingsReload {
+        root: PathBuf,
+        file: PathBuf,
+    },
+    LspFailure {
+        root: PathBuf,
+        file: PathBuf,
+        scenario: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -205,6 +334,1491 @@ impl QuickOpenPrompt {
         }
         (status, cursor_column)
     }
+}
+
+fn bounded_terminal_text(text: &str) -> String {
+    if text.len() <= MAX_LANGUAGE_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_LANGUAGE_TEXT_BYTES.saturating_sub('…'.len_utf8());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = text[..end].to_owned();
+    bounded.push('…');
+    bounded
+}
+
+fn language_service_unavailable_message(action: &str) -> String {
+    format!("{action} unavailable: no ready language server")
+}
+
+fn overlay_window(len: usize, selected: usize, budget: usize) -> Range<usize> {
+    let budget = budget.max(1).min(len);
+    let selected = selected.min(len.saturating_sub(1));
+    let start = selected
+        .saturating_sub(budget / 2)
+        .min(len.saturating_sub(budget));
+    start..start.saturating_add(budget)
+}
+
+fn bounded_overlay_rows(
+    rows: Vec<OverlayRow>,
+    selected: Option<usize>,
+) -> (Vec<OverlayRow>, Option<usize>) {
+    if rows.len() <= MAX_OVERLAY_SNAPSHOT_ROWS {
+        let len = rows.len();
+        return (rows, selected.filter(|selected| *selected < len));
+    }
+    let selected = selected
+        .filter(|selected| *selected < rows.len())
+        .unwrap_or_default();
+    let window = overlay_window(rows.len(), selected, MAX_OVERLAY_SNAPSHOT_ROWS);
+    let local_selected = selected.saturating_sub(window.start);
+    (
+        rows.into_iter()
+            .skip(window.start)
+            .take(window.len())
+            .collect(),
+        Some(local_selected),
+    )
+}
+
+#[derive(Debug)]
+struct CommandPalettePrompt {
+    prompt: LinePrompt,
+    context: ActionContext,
+    matches: Vec<ActionMatch>,
+    selected: usize,
+    feedback: Option<String>,
+}
+
+impl CommandPalettePrompt {
+    fn new(context: ActionContext) -> Self {
+        let mut this = Self {
+            prompt: LinePrompt::new(),
+            context,
+            matches: Vec::new(),
+            selected: 0,
+            feedback: None,
+        };
+        this.refresh();
+        this
+    }
+
+    fn refresh(&mut self) {
+        self.matches = actions::search(self.context, self.prompt.text());
+        self.selected = 0;
+        self.feedback = None;
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let Some(next) = tabs::adjacent_index(self.selected, self.matches.len(), direction) else {
+            return;
+        };
+        self.selected = next;
+        self.feedback = None;
+    }
+
+    fn selected_action(&self) -> Option<actions::ActionDescriptor> {
+        self.matches.get(self.selected).map(|item| item.descriptor)
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Command palette: ");
+        let cursor_column = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let mut status = format!(
+            "{prefix}{}  {}/{}  Enter run  ↑/↓ select  Esc cancel",
+            self.prompt.text(),
+            usize::from(!self.matches.is_empty()).saturating_mul(self.selected.saturating_add(1)),
+            self.matches.len(),
+        );
+        if let Some(feedback) = &self.feedback {
+            status.push_str("  |  ");
+            status.push_str(feedback);
+        }
+        (status, cursor_column)
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        OverlaySnapshot {
+            title: " Commands ".to_owned(),
+            rows: self
+                .matches
+                .iter()
+                .map(|item| {
+                    let descriptor = item.descriptor;
+                    let disabled = (!descriptor.enabled)
+                        .then_some("  [disabled]")
+                        .unwrap_or("");
+                    OverlayRow {
+                        text: format!(
+                            "{}  {}  {}{}",
+                            descriptor.name, descriptor.key_binding, descriptor.id, disabled
+                        ),
+                        enabled: descriptor.enabled,
+                    }
+                })
+                .collect(),
+            selected: (!self.matches.is_empty()).then_some(self.selected),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CompletionPromptState {
+    Running,
+    Ready {
+        items: Vec<terminal::CompletionPresentation>,
+        visible: Vec<usize>,
+    },
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct CompletionPrompt {
+    buffer_id: u64,
+    generation: u64,
+    prompt: LinePrompt,
+    selected: usize,
+    state: CompletionPromptState,
+}
+
+impl CompletionPrompt {
+    fn running(buffer_id: u64, generation: u64) -> Self {
+        Self {
+            buffer_id,
+            generation,
+            prompt: LinePrompt::new(),
+            selected: 0,
+            state: CompletionPromptState::Running,
+        }
+    }
+
+    fn complete(
+        &mut self,
+        buffer_id: u64,
+        generation: u64,
+        result: std::result::Result<Vec<terminal::CompletionPresentation>, String>,
+    ) -> bool {
+        if self.buffer_id != buffer_id || self.generation != generation {
+            return false;
+        }
+        self.selected = 0;
+        self.state = match result {
+            Ok(mut items) => {
+                items.truncate(MAX_LANGUAGE_RESPONSE_ITEMS);
+                for item in &mut items {
+                    item.label = bounded_terminal_text(&item.label);
+                    item.detail = item.detail.as_deref().map(bounded_terminal_text);
+                    item.kind = item.kind.as_deref().map(bounded_terminal_text);
+                    item.documentation = item.documentation.as_deref().map(bounded_terminal_text);
+                }
+                CompletionPromptState::Ready {
+                    visible: (0..items.len()).collect(),
+                    items,
+                }
+            }
+            Err(error) => CompletionPromptState::Failed(error),
+        };
+        self.refresh();
+        true
+    }
+
+    fn refresh(&mut self) {
+        let CompletionPromptState::Ready { items, visible } = &mut self.state else {
+            return;
+        };
+        let query = self.prompt.text().to_lowercase();
+        *visible = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                query.is_empty()
+                    || item.label.to_lowercase().contains(&query)
+                    || item
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.to_lowercase().contains(&query))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = 0;
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let len = match &self.state {
+            CompletionPromptState::Ready { visible, .. } => visible.len(),
+            CompletionPromptState::Running | CompletionPromptState::Failed(_) => 0,
+        };
+        let Some(next) = tabs::adjacent_index(self.selected, len, direction) else {
+            return;
+        };
+        self.selected = next;
+    }
+
+    fn selected_item_index(&self) -> Option<usize> {
+        match &self.state {
+            CompletionPromptState::Ready { visible, .. } => visible.get(self.selected).copied(),
+            CompletionPromptState::Running | CompletionPromptState::Failed(_) => None,
+        }
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Completion filter: ");
+        let cursor = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let detail = match &self.state {
+            CompletionPromptState::Running => "requesting…".to_owned(),
+            CompletionPromptState::Ready { visible, .. } => format!(
+                "{}/{}",
+                usize::from(!visible.is_empty()).saturating_mul(self.selected.saturating_add(1)),
+                visible.len()
+            ),
+            CompletionPromptState::Failed(error) => format!("failed: {error}"),
+        };
+        (
+            format!(
+                "{prefix}{}  {detail}  Enter apply  ↑/↓ select  Esc cancel",
+                self.prompt.text()
+            ),
+            cursor,
+        )
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        let (rows, selected) = match &self.state {
+            CompletionPromptState::Running => (
+                vec![OverlayRow {
+                    text: "Waiting for language server…".to_owned(),
+                    enabled: false,
+                }],
+                None,
+            ),
+            CompletionPromptState::Failed(error) => (
+                vec![OverlayRow {
+                    text: format!("Completion failed: {error}"),
+                    enabled: false,
+                }],
+                None,
+            ),
+            CompletionPromptState::Ready { items, visible } => {
+                let documentation = visible
+                    .get(self.selected)
+                    .and_then(|index| items.get(*index))
+                    .and_then(|item| item.documentation.as_deref());
+                let item_budget = MAX_OVERLAY_SNAPSHOT_ROWS
+                    .saturating_sub(usize::from(documentation.is_some()))
+                    .max(1);
+                let window = overlay_window(visible.len(), self.selected, item_budget);
+                let mut rows = visible[window.clone()]
+                    .iter()
+                    .filter_map(|index| items.get(*index))
+                    .map(|item| {
+                        let kind = item
+                            .kind
+                            .as_deref()
+                            .map(|kind| format!(" [{kind}]"))
+                            .unwrap_or_default();
+                        let detail = item
+                            .detail
+                            .as_deref()
+                            .filter(|detail| !item.label.contains(*detail))
+                            .map(|detail| format!(" — {detail}"))
+                            .unwrap_or_default();
+                        OverlayRow {
+                            text: format!("{}{}{}", item.label, kind, detail),
+                            enabled: true,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(documentation) = documentation {
+                    rows.push(OverlayRow {
+                        text: format!(
+                            "Docs: {}",
+                            documentation
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ),
+                        enabled: false,
+                    });
+                }
+                (
+                    rows,
+                    (!visible.is_empty()).then_some(self.selected.saturating_sub(window.start)),
+                )
+            }
+        };
+        OverlaySnapshot {
+            title: " Completions ".to_owned(),
+            rows,
+            selected,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum HoverPromptState {
+    Running,
+    Ready(Vec<HoverPresentation>),
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct HoverPrompt {
+    buffer_id: u64,
+    generation: u64,
+    selected_row: usize,
+    state: HoverPromptState,
+}
+
+impl HoverPrompt {
+    fn running(buffer_id: u64, generation: u64) -> Self {
+        Self {
+            buffer_id,
+            generation,
+            selected_row: 0,
+            state: HoverPromptState::Running,
+        }
+    }
+
+    fn complete(
+        &mut self,
+        buffer_id: u64,
+        generation: u64,
+        result: std::result::Result<Vec<HoverPresentation>, String>,
+    ) -> bool {
+        if self.buffer_id != buffer_id || self.generation != generation {
+            return false;
+        }
+        self.selected_row = 0;
+        self.state = match result {
+            Ok(mut items) => {
+                items.truncate(MAX_LANGUAGE_RESPONSE_ITEMS);
+                for item in &mut items {
+                    item.kind = bounded_terminal_text(&item.kind);
+                    item.text = bounded_terminal_text(&item.text);
+                }
+                HoverPromptState::Ready(items)
+            }
+            Err(error) => HoverPromptState::Failed(error),
+        };
+        true
+    }
+
+    fn presentation_rows(&self) -> Vec<OverlayRow> {
+        match &self.state {
+            HoverPromptState::Running => vec![OverlayRow {
+                text: "Waiting for language server…".to_owned(),
+                enabled: false,
+            }],
+            HoverPromptState::Failed(error) => vec![OverlayRow {
+                text: format!("Hover failed: {error}"),
+                enabled: false,
+            }],
+            HoverPromptState::Ready(items) if items.is_empty() => vec![OverlayRow {
+                text: "No hover information at the cursor".to_owned(),
+                enabled: false,
+            }],
+            HoverPromptState::Ready(items) => items
+                .iter()
+                .flat_map(|item| {
+                    let mut lines = Vec::new();
+                    lines.push(OverlayRow {
+                        text: format!("[{}]", item.kind),
+                        enabled: false,
+                    });
+                    if item.text.is_empty() {
+                        lines.push(OverlayRow {
+                            text: String::new(),
+                            enabled: true,
+                        });
+                    } else {
+                        lines.extend(item.text.lines().map(|line| OverlayRow {
+                            text: line.replace('\t', "    "),
+                            enabled: true,
+                        }));
+                    }
+                    lines
+                })
+                .collect(),
+        }
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let len = self.presentation_rows().len();
+        let Some(next) = tabs::adjacent_index(self.selected_row, len, direction) else {
+            return;
+        };
+        self.selected_row = next;
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let detail = match &self.state {
+            HoverPromptState::Running => "requesting…".to_owned(),
+            HoverPromptState::Failed(error) => format!("failed: {error}"),
+            HoverPromptState::Ready(_) => {
+                let count = self.presentation_rows().len();
+                format!(
+                    "{}/{}",
+                    self.selected_row.saturating_add(1).min(count),
+                    count
+                )
+            }
+        };
+        (format!("{prefix}Hover  {detail}  ↑/↓ scroll  Esc close"), 0)
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        let rows = self.presentation_rows();
+        let selected =
+            matches!(self.state, HoverPromptState::Ready(ref items) if !items.is_empty())
+                .then_some(self.selected_row.min(rows.len().saturating_sub(1)));
+        let (rows, selected) = bounded_overlay_rows(rows, selected);
+        OverlaySnapshot {
+            title: " Hover ".to_owned(),
+            rows,
+            selected,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DiagnosticsPromptState {
+    Running,
+    Ready {
+        items: Vec<DiagnosticPresentation>,
+        visible: Vec<usize>,
+    },
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct DiagnosticsPrompt {
+    generation: u64,
+    prompt: LinePrompt,
+    selected: usize,
+    feedback: Option<String>,
+    state: DiagnosticsPromptState,
+}
+
+impl DiagnosticsPrompt {
+    fn running(generation: u64) -> Self {
+        Self {
+            generation,
+            prompt: LinePrompt::new(),
+            selected: 0,
+            feedback: None,
+            state: DiagnosticsPromptState::Running,
+        }
+    }
+
+    fn complete(
+        &mut self,
+        generation: u64,
+        result: std::result::Result<Vec<DiagnosticPresentation>, String>,
+    ) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.selected = 0;
+        self.feedback = None;
+        self.state = match result {
+            Ok(mut items) => {
+                items.truncate(MAX_LANGUAGE_RESPONSE_ITEMS);
+                for item in &mut items {
+                    item.label = bounded_terminal_text(&item.label);
+                    item.severity = bounded_terminal_text(&item.severity);
+                    item.message = bounded_terminal_text(&item.message);
+                    item.source = item.source.as_deref().map(bounded_terminal_text);
+                }
+                DiagnosticsPromptState::Ready {
+                    visible: (0..items.len()).collect(),
+                    items,
+                }
+            }
+            Err(error) => DiagnosticsPromptState::Failed(error),
+        };
+        self.refresh();
+        true
+    }
+
+    fn refresh(&mut self) {
+        let DiagnosticsPromptState::Ready { items, visible } = &mut self.state else {
+            return;
+        };
+        let query = self.prompt.text().to_lowercase();
+        *visible = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                query.is_empty()
+                    || item.label.to_lowercase().contains(&query)
+                    || item.message.to_lowercase().contains(&query)
+                    || item.severity.to_lowercase().contains(&query)
+                    || item
+                        .source
+                        .as_deref()
+                        .is_some_and(|source| source.to_lowercase().contains(&query))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = 0;
+        self.feedback = None;
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let len = match &self.state {
+            DiagnosticsPromptState::Ready { visible, .. } => visible.len(),
+            DiagnosticsPromptState::Running | DiagnosticsPromptState::Failed(_) => 0,
+        };
+        let Some(next) = tabs::adjacent_index(self.selected, len, direction) else {
+            return;
+        };
+        self.selected = next;
+        self.feedback = None;
+    }
+
+    fn selected_item(&self) -> Option<DiagnosticPresentation> {
+        let DiagnosticsPromptState::Ready { items, visible } = &self.state else {
+            return None;
+        };
+        visible
+            .get(self.selected)
+            .and_then(|index| items.get(*index))
+            .cloned()
+    }
+
+    fn visible_items(&self) -> Vec<DiagnosticPresentation> {
+        let DiagnosticsPromptState::Ready { items, visible } = &self.state else {
+            return Vec::new();
+        };
+        visible
+            .iter()
+            .filter_map(|index| items.get(*index))
+            .cloned()
+            .collect()
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Diagnostics filter: ");
+        let cursor = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let detail = match &self.state {
+            DiagnosticsPromptState::Running => "collecting…".to_owned(),
+            DiagnosticsPromptState::Ready { visible, .. } => format!(
+                "{}/{}",
+                usize::from(!visible.is_empty()).saturating_mul(self.selected.saturating_add(1)),
+                visible.len()
+            ),
+            DiagnosticsPromptState::Failed(error) => format!("failed: {error}"),
+        };
+        let feedback = self
+            .feedback
+            .as_deref()
+            .map(|feedback| format!("  |  {feedback}"))
+            .unwrap_or_default();
+        (
+            format!(
+                "{prefix}{}  {detail}  Enter open  F9 MultiBuffer  ↑/↓ select  Esc close{feedback}",
+                self.prompt.text()
+            ),
+            cursor,
+        )
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        let (rows, selected) = match &self.state {
+            DiagnosticsPromptState::Running => (
+                vec![OverlayRow {
+                    text: "Collecting project diagnostics…".to_owned(),
+                    enabled: false,
+                }],
+                None,
+            ),
+            DiagnosticsPromptState::Failed(error) => (
+                vec![OverlayRow {
+                    text: format!("Diagnostics failed: {error}"),
+                    enabled: false,
+                }],
+                None,
+            ),
+            DiagnosticsPromptState::Ready { items: _, visible } if visible.is_empty() => (
+                vec![OverlayRow {
+                    text: "No matching diagnostics".to_owned(),
+                    enabled: false,
+                }],
+                None,
+            ),
+            DiagnosticsPromptState::Ready { items, visible } => {
+                let window =
+                    overlay_window(visible.len(), self.selected, MAX_OVERLAY_SNAPSHOT_ROWS);
+                (
+                    visible[window.clone()]
+                        .iter()
+                        .filter_map(|index| items.get(*index))
+                        .map(|item| {
+                            let source = item
+                                .source
+                                .as_deref()
+                                .map(|source| format!(" [{source}]"))
+                                .unwrap_or_default();
+                            OverlayRow {
+                                text: format!(
+                                    "{} {}:{}:{} {}{}",
+                                    item.severity,
+                                    item.label,
+                                    item.row.saturating_add(1),
+                                    item.column.saturating_add(1),
+                                    item.message
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" "),
+                                    source
+                                ),
+                                enabled: true,
+                            }
+                        })
+                        .collect(),
+                    Some(self.selected.saturating_sub(window.start)),
+                )
+            }
+        };
+        OverlaySnapshot {
+            title: " Diagnostics ".to_owned(),
+            rows,
+            selected,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LocationsPromptState {
+    Running,
+    Ready {
+        items: Vec<LocationPresentation>,
+        visible: Vec<usize>,
+    },
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct LocationsPrompt {
+    buffer_id: u64,
+    generation: u64,
+    kind: LocationRequestKind,
+    prompt: LinePrompt,
+    selected: usize,
+    feedback: Option<String>,
+    state: LocationsPromptState,
+}
+
+impl LocationsPrompt {
+    fn running(buffer_id: u64, generation: u64, kind: LocationRequestKind) -> Self {
+        Self {
+            buffer_id,
+            generation,
+            kind,
+            prompt: LinePrompt::new(),
+            selected: 0,
+            feedback: None,
+            state: LocationsPromptState::Running,
+        }
+    }
+
+    fn complete(
+        &mut self,
+        buffer_id: u64,
+        generation: u64,
+        kind: LocationRequestKind,
+        result: std::result::Result<Vec<LocationPresentation>, String>,
+    ) -> bool {
+        if self.buffer_id != buffer_id || self.generation != generation || self.kind != kind {
+            return false;
+        }
+        self.selected = 0;
+        self.feedback = None;
+        self.state = match result {
+            Ok(mut items) => {
+                items.truncate(MAX_LANGUAGE_RESPONSE_ITEMS);
+                for item in &mut items {
+                    item.label = bounded_terminal_text(&item.label);
+                    item.snippet = bounded_terminal_text(&item.snippet);
+                }
+                LocationsPromptState::Ready {
+                    visible: (0..items.len()).collect(),
+                    items,
+                }
+            }
+            Err(error) => LocationsPromptState::Failed(error),
+        };
+        self.refresh();
+        true
+    }
+
+    fn begin_request(&mut self, generation: u64) {
+        self.generation = generation;
+        self.selected = 0;
+        self.feedback = None;
+        self.state = LocationsPromptState::Running;
+    }
+
+    fn refresh(&mut self) {
+        let LocationsPromptState::Ready { items, visible } = &mut self.state else {
+            return;
+        };
+        let query = self.prompt.text().to_lowercase();
+        *visible = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                query.is_empty()
+                    || item.label.to_lowercase().contains(&query)
+                    || item.snippet.to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = 0;
+        self.feedback = None;
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let len = match &self.state {
+            LocationsPromptState::Ready { visible, .. } => visible.len(),
+            LocationsPromptState::Running | LocationsPromptState::Failed(_) => 0,
+        };
+        let Some(next) = tabs::adjacent_index(self.selected, len, direction) else {
+            return;
+        };
+        self.selected = next;
+        self.feedback = None;
+    }
+
+    fn selected_item(&self) -> Option<LocationPresentation> {
+        let LocationsPromptState::Ready { items, visible } = &self.state else {
+            return None;
+        };
+        visible
+            .get(self.selected)
+            .and_then(|index| items.get(*index))
+            .cloned()
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}{} filter: ", self.kind.title());
+        let cursor = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let detail = match &self.state {
+            LocationsPromptState::Running => "requesting…".to_owned(),
+            LocationsPromptState::Ready { visible, .. } => format!(
+                "{}/{}",
+                usize::from(!visible.is_empty()).saturating_mul(self.selected.saturating_add(1)),
+                visible.len()
+            ),
+            LocationsPromptState::Failed(error) => format!("failed: {error}"),
+        };
+        let feedback = self
+            .feedback
+            .as_deref()
+            .map(|feedback| format!("  |  {feedback}"))
+            .unwrap_or_default();
+        (
+            format!(
+                "{prefix}{}  {detail}  Enter open  ↑/↓ select  Esc close{feedback}",
+                self.prompt.text()
+            ),
+            cursor,
+        )
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        let (rows, selected) = match &self.state {
+            LocationsPromptState::Running => (
+                vec![OverlayRow {
+                    text: format!("Requesting {}…", self.kind.title().to_lowercase()),
+                    enabled: false,
+                }],
+                None,
+            ),
+            LocationsPromptState::Failed(error) => (
+                vec![OverlayRow {
+                    text: format!("{} failed: {error}", self.kind.title()),
+                    enabled: false,
+                }],
+                None,
+            ),
+            LocationsPromptState::Ready { visible, .. } if visible.is_empty() => (
+                vec![OverlayRow {
+                    text: format!("No matching {}", self.kind.title().to_lowercase()),
+                    enabled: false,
+                }],
+                None,
+            ),
+            LocationsPromptState::Ready { items, visible } => {
+                let window =
+                    overlay_window(visible.len(), self.selected, MAX_OVERLAY_SNAPSHOT_ROWS);
+                (
+                    visible[window.clone()]
+                        .iter()
+                        .filter_map(|index| items.get(*index))
+                        .map(|item| OverlayRow {
+                            text: format!(
+                                "{}:{}:{}  {}",
+                                item.label,
+                                item.row.saturating_add(1),
+                                item.column.saturating_add(1),
+                                item.snippet
+                            ),
+                            enabled: true,
+                        })
+                        .collect(),
+                    Some(self.selected.saturating_sub(window.start)),
+                )
+            }
+        };
+        OverlaySnapshot {
+            title: format!(" {} ", self.kind.title()),
+            rows,
+            selected,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum RenamePromptState {
+    Running,
+    Ready(RenamePreparation),
+    Previewing(RenamePreparation),
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct RenamePrompt {
+    buffer: Entity<Buffer>,
+    buffer_id: u64,
+    generation: u64,
+    point: language::Point,
+    prompt: LinePrompt,
+    feedback: Option<String>,
+    state: RenamePromptState,
+}
+
+impl RenamePrompt {
+    fn running(
+        buffer: Entity<Buffer>,
+        buffer_id: u64,
+        generation: u64,
+        point: language::Point,
+    ) -> Self {
+        Self {
+            buffer,
+            buffer_id,
+            generation,
+            point,
+            prompt: LinePrompt::new(),
+            feedback: None,
+            state: RenamePromptState::Running,
+        }
+    }
+
+    fn complete(
+        &mut self,
+        buffer_id: u64,
+        generation: u64,
+        result: std::result::Result<RenamePreparation, String>,
+    ) -> bool {
+        if self.buffer_id != buffer_id || self.generation != generation {
+            return false;
+        }
+        self.feedback = None;
+        self.state = match result {
+            Ok(preparation) => {
+                self.prompt = LinePrompt::with_text(preparation.placeholder.clone());
+                RenamePromptState::Ready(preparation)
+            }
+            Err(error) => RenamePromptState::Failed(error),
+        };
+        true
+    }
+
+    fn can_submit(&self) -> bool {
+        matches!(self.state, RenamePromptState::Ready(_)) && !self.prompt.text().trim().is_empty()
+    }
+
+    fn begin_preview(&mut self) -> bool {
+        let RenamePromptState::Ready(preparation) = &self.state else {
+            return false;
+        };
+        let preparation = preparation.clone();
+        self.feedback = None;
+        self.state = RenamePromptState::Previewing(preparation);
+        true
+    }
+
+    fn finish_preview(
+        &mut self,
+        buffer_id: u64,
+        generation: u64,
+        new_name: &str,
+        result: &std::result::Result<(lsp::LanguageServerId, lsp::WorkspaceEdit), String>,
+    ) -> bool {
+        if self.buffer_id != buffer_id
+            || self.generation != generation
+            || self.prompt.text() != new_name
+        {
+            return false;
+        }
+        let RenamePromptState::Previewing(preparation) = &self.state else {
+            return false;
+        };
+        if let Err(error) = result {
+            let preparation = preparation.clone();
+            self.state = RenamePromptState::Ready(preparation);
+            self.feedback = Some(format!("preview failed: {error}"));
+        }
+        true
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Rename: ");
+        let cursor = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let state = match &self.state {
+            RenamePromptState::Running => "preparing…".to_owned(),
+            RenamePromptState::Ready(_) => "Enter preview  Esc cancel".to_owned(),
+            RenamePromptState::Previewing(_) => "building safe preview…  Esc cancel".to_owned(),
+            RenamePromptState::Failed(error) => format!("failed: {error}  Esc close"),
+        };
+        let feedback = self
+            .feedback
+            .as_deref()
+            .map(|feedback| format!("  |  {feedback}"))
+            .unwrap_or_default();
+        (
+            format!("{prefix}{}  {state}{feedback}", self.prompt.text()),
+            cursor,
+        )
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        let row = match &self.state {
+            RenamePromptState::Running => OverlayRow {
+                text: "Checking whether the symbol can be renamed…".to_owned(),
+                enabled: false,
+            },
+            RenamePromptState::Ready(preparation) => OverlayRow {
+                text: format!(
+                    "{}  bytes {}..{} → {}",
+                    preparation.placeholder,
+                    preparation.start,
+                    preparation.end,
+                    self.prompt.text()
+                ),
+                enabled: self.can_submit(),
+            },
+            RenamePromptState::Previewing(preparation) => OverlayRow {
+                text: format!(
+                    "Validating WorkspaceEdit for {} → {}…",
+                    preparation.placeholder,
+                    self.prompt.text()
+                ),
+                enabled: false,
+            },
+            RenamePromptState::Failed(error) => OverlayRow {
+                text: format!("Rename unavailable: {error}"),
+                enabled: false,
+            },
+        };
+        OverlaySnapshot {
+            title: " Rename Symbol ".to_owned(),
+            rows: vec![row],
+            selected: matches!(self.state, RenamePromptState::Ready(_)).then_some(0),
+        }
+    }
+}
+
+fn code_action_title(action: &CodeAction) -> &str {
+    action.lsp_action.title()
+}
+
+fn code_action_kind(action: &CodeAction) -> Option<String> {
+    action
+        .lsp_action
+        .action_kind()
+        .map(|kind| kind.as_str().to_owned())
+}
+
+fn code_action_preferred(action: &CodeAction) -> bool {
+    matches!(
+        &action.lsp_action,
+        LspAction::Action(action) if action.is_preferred.unwrap_or(false)
+    )
+}
+
+fn code_action_disabled_reason(action: &CodeAction) -> Option<&str> {
+    match &action.lsp_action {
+        LspAction::Action(action) => action
+            .disabled
+            .as_ref()
+            .map(|disabled| disabled.reason.as_str()),
+        LspAction::Command(_) | LspAction::CodeLens(_) => None,
+    }
+}
+
+#[derive(Debug)]
+enum CodeActionsPromptState {
+    Running,
+    Ready {
+        items: Vec<CodeAction>,
+        visible: Vec<usize>,
+    },
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct CodeActionsPrompt {
+    buffer: Entity<Buffer>,
+    buffer_id: u64,
+    generation: u64,
+    prompt: LinePrompt,
+    selected: usize,
+    feedback: Option<String>,
+    state: CodeActionsPromptState,
+}
+
+impl CodeActionsPrompt {
+    fn running(buffer: Entity<Buffer>, buffer_id: u64, generation: u64) -> Self {
+        Self {
+            buffer,
+            buffer_id,
+            generation,
+            prompt: LinePrompt::new(),
+            selected: 0,
+            feedback: None,
+            state: CodeActionsPromptState::Running,
+        }
+    }
+
+    fn complete(
+        &mut self,
+        buffer_id: u64,
+        generation: u64,
+        result: std::result::Result<Vec<CodeAction>, String>,
+    ) -> bool {
+        if self.buffer_id != buffer_id || self.generation != generation {
+            return false;
+        }
+        self.selected = 0;
+        self.feedback = None;
+        self.state = match result {
+            Ok(mut items) => {
+                items.truncate(MAX_LANGUAGE_RESPONSE_ITEMS);
+                CodeActionsPromptState::Ready {
+                    visible: (0..items.len()).collect(),
+                    items,
+                }
+            }
+            Err(error) => CodeActionsPromptState::Failed(error),
+        };
+        self.refresh();
+        true
+    }
+
+    fn refresh(&mut self) {
+        let CodeActionsPromptState::Ready { items, visible } = &mut self.state else {
+            return;
+        };
+        let query = self.prompt.text().to_lowercase();
+        *visible = items
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| {
+                query.is_empty()
+                    || code_action_title(action).to_lowercase().contains(&query)
+                    || code_action_kind(action)
+                        .is_some_and(|kind| kind.to_lowercase().contains(&query))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = 0;
+        self.feedback = None;
+    }
+
+    fn step(&mut self, direction: TabDirection) {
+        let len = match &self.state {
+            CodeActionsPromptState::Ready { visible, .. } => visible.len(),
+            CodeActionsPromptState::Running | CodeActionsPromptState::Failed(_) => 0,
+        };
+        let Some(next) = tabs::adjacent_index(self.selected, len, direction) else {
+            return;
+        };
+        self.selected = next;
+        self.feedback = None;
+    }
+
+    fn selected_action(&self) -> Option<CodeAction> {
+        let CodeActionsPromptState::Ready { items, visible } = &self.state else {
+            return None;
+        };
+        visible
+            .get(self.selected)
+            .and_then(|index| items.get(*index))
+            .filter(|action| code_action_disabled_reason(action).is_none())
+            .cloned()
+    }
+
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let message_prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        let prefix = format!("{message_prefix}Code actions: ");
+        let cursor = prefix.width().saturating_add(
+            self.prompt
+                .text()
+                .get(..self.prompt.cursor())
+                .unwrap_or_default()
+                .width(),
+        );
+        let detail = match &self.state {
+            CodeActionsPromptState::Running => "requesting…".to_owned(),
+            CodeActionsPromptState::Ready { visible, .. } => format!(
+                "{}/{}",
+                usize::from(!visible.is_empty()).saturating_mul(self.selected.saturating_add(1)),
+                visible.len()
+            ),
+            CodeActionsPromptState::Failed(error) => format!("failed: {error}"),
+        };
+        let feedback = self
+            .feedback
+            .as_deref()
+            .map(|feedback| format!("  |  {feedback}"))
+            .unwrap_or_default();
+        (
+            format!(
+                "{prefix}{}  {detail}  Enter apply  ↑/↓ select  Esc close{feedback}",
+                self.prompt.text()
+            ),
+            cursor,
+        )
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        let (rows, selected) = match &self.state {
+            CodeActionsPromptState::Running => (
+                vec![OverlayRow {
+                    text: "Requesting code actions…".to_owned(),
+                    enabled: false,
+                }],
+                None,
+            ),
+            CodeActionsPromptState::Failed(error) => (
+                vec![OverlayRow {
+                    text: format!("Code actions failed: {error}"),
+                    enabled: false,
+                }],
+                None,
+            ),
+            CodeActionsPromptState::Ready { visible, .. } if visible.is_empty() => (
+                vec![OverlayRow {
+                    text: "No matching code actions".to_owned(),
+                    enabled: false,
+                }],
+                None,
+            ),
+            CodeActionsPromptState::Ready { items, visible } => {
+                let window =
+                    overlay_window(visible.len(), self.selected, MAX_OVERLAY_SNAPSHOT_ROWS);
+                (
+                    visible[window.clone()]
+                        .iter()
+                        .filter_map(|index| items.get(*index))
+                        .map(|action| {
+                            let kind = code_action_kind(action)
+                                .map(|kind| format!(" [{kind}]"))
+                                .unwrap_or_default();
+                            let preferred = code_action_preferred(action)
+                                .then_some(" ★ preferred")
+                                .unwrap_or_default();
+                            let disabled = code_action_disabled_reason(action)
+                                .map(|reason| format!(" — disabled: {reason}"))
+                                .unwrap_or_default();
+                            OverlayRow {
+                                text: format!(
+                                    "{}{}{}{}",
+                                    code_action_title(action),
+                                    kind,
+                                    preferred,
+                                    disabled
+                                ),
+                                enabled: code_action_disabled_reason(action).is_none(),
+                            }
+                        })
+                        .collect(),
+                    Some(self.selected.saturating_sub(window.start)),
+                )
+            }
+        };
+        OverlaySnapshot {
+            title: " Code Actions ".to_owned(),
+            rows,
+            selected,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WorktreeTrustPrompt {
+    worktree_id: settings::WorktreeId,
+    path: PathBuf,
+}
+
+impl WorktreeTrustPrompt {
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        let prefix = message.map_or_else(String::new, |message| format!("{message}  |  "));
+        (
+            format!(
+                "{prefix}Restricted worktree: {}  Enter trust and enable project processes  Esc keep restricted",
+                self.path.display()
+            ),
+            0,
+        )
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        OverlaySnapshot {
+            title: " Worktree Trust ".to_owned(),
+            rows: vec![
+                OverlayRow {
+                    text: self.path.display().to_string(),
+                    enabled: false,
+                },
+                OverlayRow {
+                    text: "Trusting permits project settings, language servers, tasks, and other repository-controlled processes.".to_owned(),
+                    enabled: false,
+                },
+                OverlayRow {
+                    text: "Enter: trust for this session    Esc: keep restricted".to_owned(),
+                    enabled: true,
+                },
+            ],
+            selected: Some(2),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LanguageOverlay {
+    Trust(WorktreeTrustPrompt),
+    Hover(HoverPrompt),
+    Diagnostics(DiagnosticsPrompt),
+    Locations(LocationsPrompt),
+    Rename(RenamePrompt),
+    CodeActions(CodeActionsPrompt),
+}
+
+impl LanguageOverlay {
+    fn status(&self, message: Option<&str>) -> (String, usize) {
+        match self {
+            Self::Trust(prompt) => prompt.status(message),
+            Self::Hover(prompt) => prompt.status(message),
+            Self::Diagnostics(prompt) => prompt.status(message),
+            Self::Locations(prompt) => prompt.status(message),
+            Self::Rename(prompt) => prompt.status(message),
+            Self::CodeActions(prompt) => prompt.status(message),
+        }
+    }
+
+    fn overlay(&self) -> OverlaySnapshot {
+        match self {
+            Self::Trust(prompt) => prompt.overlay(),
+            Self::Hover(prompt) => prompt.overlay(),
+            Self::Diagnostics(prompt) => prompt.overlay(),
+            Self::Locations(prompt) => prompt.overlay(),
+            Self::Rename(prompt) => prompt.overlay(),
+            Self::CodeActions(prompt) => prompt.overlay(),
+        }
+    }
+
+    fn has_status_cursor(&self) -> bool {
+        matches!(
+            self,
+            Self::Diagnostics(_) | Self::Locations(_) | Self::Rename(_) | Self::CodeActions(_)
+        )
+    }
+}
+
+struct TerminalCompletionProvider {
+    project: Entity<Project>,
+    generation: Arc<AtomicU64>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+}
+
+impl CompletionProvider for TerminalCompletionProvider {
+    fn completions(
+        &self,
+        buffer: &Entity<Buffer>,
+        buffer_position: text::Anchor,
+        trigger: editor::CompletionContext,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Editor>,
+    ) -> Task<Result<Vec<project::CompletionResponse>>> {
+        let task = self.project.update(cx, |project, cx| {
+            let task = project.completions(buffer, buffer_position, trigger, cx);
+            cx.background_spawn(task)
+        });
+        let generation = self.generation.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        let buffer_id = buffer.read(cx).remote_id().to_proto();
+        let sender = self.event_sender.clone();
+        cx.spawn(async move |_editor, _cx| {
+            let result = task.await;
+            let presentation_result = result
+                .as_ref()
+                .map(|responses| completion_presentations(responses))
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender
+                .send(TerminalEvent::CompletionFinished {
+                    buffer_id,
+                    generation,
+                    menu_wait_attempt: 0,
+                    result: presentation_result,
+                })
+                .await;
+            result
+        })
+    }
+
+    fn resolve_completions(
+        &self,
+        buffer: Entity<Buffer>,
+        completion_indices: Vec<usize>,
+        completions: Rc<RefCell<Box<[project::Completion]>>>,
+        cx: &mut gpui::Context<Editor>,
+    ) -> Task<Result<bool>> {
+        CompletionProvider::resolve_completions(
+            &self.project,
+            buffer,
+            completion_indices,
+            completions,
+            cx,
+        )
+    }
+
+    fn apply_additional_edits_for_completion(
+        &self,
+        buffer: Entity<Buffer>,
+        completions: Rc<RefCell<Box<[project::Completion]>>>,
+        completion_index: usize,
+        push_to_history: bool,
+        all_commit_ranges: Vec<Range<language::Anchor>>,
+        cx: &mut gpui::Context<Editor>,
+    ) -> Task<Result<Option<language::Transaction>>> {
+        CompletionProvider::apply_additional_edits_for_completion(
+            &self.project,
+            buffer,
+            completions,
+            completion_index,
+            push_to_history,
+            all_commit_ranges,
+            cx,
+        )
+    }
+
+    fn is_completion_trigger(
+        &self,
+        buffer: &Entity<Buffer>,
+        position: language::Anchor,
+        text: &str,
+        trigger_in_words: bool,
+        cx: &mut gpui::Context<Editor>,
+    ) -> bool {
+        CompletionProvider::is_completion_trigger(
+            &self.project,
+            buffer,
+            position,
+            text,
+            trigger_in_words,
+            cx,
+        )
+    }
+
+    fn sort_completions(&self) -> bool {
+        false
+    }
+
+    fn filter_completions(&self) -> bool {
+        false
+    }
+
+    fn show_snippets(&self) -> bool {
+        false
+    }
+}
+
+fn completion_presentations(
+    responses: &[project::CompletionResponse],
+) -> Vec<terminal::CompletionPresentation> {
+    responses
+        .iter()
+        .flat_map(|response| &response.completions)
+        .take(MAX_LANGUAGE_RESPONSE_ITEMS)
+        .map(|completion| {
+            let lsp_completion = completion.source.lsp_completion(false);
+            let detail = lsp_completion
+                .as_ref()
+                .and_then(|completion| completion.detail.as_deref())
+                .map(bounded_terminal_text);
+            let kind = lsp_completion
+                .as_ref()
+                .and_then(|completion| completion.kind)
+                .map(|kind| bounded_terminal_text(&format!("{kind:?}")));
+            let documentation = lsp_completion
+                .as_ref()
+                .and_then(|completion| completion.documentation.as_ref())
+                .map(|documentation| match documentation {
+                    lsp::Documentation::String(text) => bounded_terminal_text(text),
+                    lsp::Documentation::MarkupContent(markup) => {
+                        bounded_terminal_text(&markup.value)
+                    }
+                });
+            terminal::CompletionPresentation {
+                label: bounded_terminal_text(&completion.label.text),
+                detail,
+                kind,
+                documentation,
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -805,6 +2419,7 @@ fn main() -> Result<()> {
     match parse_command(env::args_os().skip(1))? {
         Command::Edit(paths) => run_interactive(paths),
         Command::Alpha1Probe(probe) => run_alpha_1_probe(probe),
+        Command::Alpha2Probe(probe) => run_alpha_2_probe(probe),
         Command::Smoke => {
             run_smoke();
             Ok(())
@@ -882,6 +2497,50 @@ fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
             _ => bail!("unknown --alpha-1-probe case: {case}"),
         };
         return Ok(Command::Alpha1Probe(probe));
+    }
+    if first == "--alpha-2-probe" {
+        let case = arguments
+            .get(1)
+            .and_then(|case| case.to_str())
+            .context("--alpha-2-probe requires a UTF-8 case name")?;
+        let probe = match case {
+            "language-service" => {
+                ensure!(
+                    arguments.len() == 4,
+                    "--alpha-2-probe language-service requires ROOT FILE"
+                );
+                Alpha2Probe::LanguageService {
+                    root: arguments[2].clone().into(),
+                    file: arguments[3].clone().into(),
+                }
+            }
+            "settings-reload" => {
+                ensure!(
+                    arguments.len() == 4,
+                    "--alpha-2-probe settings-reload requires ROOT FILE"
+                );
+                Alpha2Probe::SettingsReload {
+                    root: arguments[2].clone().into(),
+                    file: arguments[3].clone().into(),
+                }
+            }
+            "lsp-failure" => {
+                ensure!(
+                    arguments.len() == 5,
+                    "--alpha-2-probe lsp-failure requires ROOT FILE SCENARIO"
+                );
+                Alpha2Probe::LspFailure {
+                    root: arguments[2].clone().into(),
+                    file: arguments[3].clone().into(),
+                    scenario: arguments[4]
+                        .clone()
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("lsp-failure scenario must be UTF-8"))?,
+                }
+            }
+            _ => bail!("unknown --alpha-2-probe case: {case}"),
+        };
+        return Ok(Command::Alpha2Probe(probe));
     }
 
     let mut paths = Vec::new();
@@ -963,10 +2622,9 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
         );
     }
 
-    // One pending event is enough: every event is followed by a fresh snapshot,
-    // and redundant redraw notifications can be dropped safely. Input applies
-    // backpressure to the reader thread instead of growing memory without bound.
-    let (event_sender, event_receiver) = async_channel::bounded(1);
+    // Keep action/configuration notifications lossless while retaining a hard
+    // queue bound. Redundant redraw notifications still use try_send.
+    let (event_sender, event_receiver) = async_channel::bounded(64);
     let redraw_sender = event_sender.clone();
     let mut input_reader = InputReader::spawn(event_sender)?;
     let terminal_session = TerminalSession::enter()?;
@@ -975,7 +2633,25 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
 
     editor_application().run(move |cx| {
         init_zed(cx);
+        let configuration_file_system = cx.global::<ProjectRuntime>().file_system.clone();
+        start_configuration_watchers(
+            configuration_file_system,
+            redraw_sender.clone(),
+            cx,
+        );
+        let pending_terminal_actions = Rc::new(RefCell::new(VecDeque::new()));
+        start_terminal_action_interceptor(pending_terminal_actions.clone(), None, cx);
         let services = file_services(cx);
+        start_project_configuration_notifications(
+            &services.project,
+            redraw_sender.clone(),
+            cx,
+        );
+        start_worktree_trust_notifications(
+            services.worktree_store.clone(),
+            redraw_sender.clone(),
+            cx,
+        );
         cx.spawn(async move |cx| {
             let startup = match prepare_startup(paths, implicit_root, &services, cx).await {
                 Ok(startup) => startup,
@@ -1016,7 +2692,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                 }
                 match create_document_tab(
                     document,
-                    services.buffer_store.clone(),
+                    &services,
                     redraw_sender.clone(),
                     cx,
                 ) {
@@ -1038,7 +2714,9 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
 
             let mut active_index = 0;
             let mut failure = None;
-            let mut message = (!startup_errors.is_empty()).then(|| startup_errors.join("  |  "));
+            let mut startup_notice =
+                (!startup_errors.is_empty()).then(|| startup_errors.join("  |  "));
+            let mut message: Option<String> = None;
             let mut quit_armed = false;
             let mut close_armed = false;
             let mut reload_armed = false;
@@ -1049,11 +2727,22 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
             let mut go_to_line_prompt: Option<GoToLinePrompt> = None;
             let mut quick_open_prompt: Option<QuickOpenPrompt> = None;
             let mut project_search_prompt: Option<ProjectSearchPrompt> = None;
+            let mut command_palette_prompt: Option<CommandPalettePrompt> = None;
+            let mut completion_prompt: Option<CompletionPrompt> = None;
+            let mut language_overlay: Option<LanguageOverlay> = None;
+            let mut language_request_generation = 0u64;
+            let mut navigation_history = NavigationHistory::default();
+            let mut project_edit_history = ProjectEditHistory::default();
             let mut project_search_coordinator = ProjectSearchCoordinator::default();
-
             loop {
                 let editor_window = tabs[active_index].editor_window;
                 let input_window: AnyWindowHandle = editor_window.into();
+                let display_message = match (startup_notice.as_deref(), message.as_deref()) {
+                    (Some(startup), Some(message)) => Some(format!("{startup}  |  {message}")),
+                    (Some(startup), None) => Some(startup.to_owned()),
+                    (None, Some(message)) => Some(message.to_owned()),
+                    (None, None) => None,
+                };
                 let mut status_label = tab_status(&tabs, active_index, cx);
                 if let Some(repository) = &repository {
                     status_label = format!("{}  {status_label}", repository.root.label());
@@ -1076,7 +2765,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     last_cursor,
                                     frame_area,
                                     &status_label,
-                                    message.as_deref(),
+                                    display_message.as_deref(),
+                                    completion_prompt.as_ref(),
+                                    command_palette_prompt.as_ref(),
+                                    language_overlay.as_ref(),
                                     quick_open_prompt
                                         .as_ref()
                                         .zip(repository.as_ref().map(|repository| repository.index.as_ref())),
@@ -1124,6 +2816,751 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         break;
                     }
                 };
+                let (mut event, action_from_keymap) = match event {
+                    TerminalEvent::Action(action) => {
+                        (TerminalEvent::Key(action.shortcut_event()), true)
+                    }
+                    event => (event, false),
+                };
+                if matches!(
+                    &event,
+                    TerminalEvent::Key(key)
+                        if key.kind != crossterm::event::KeyEventKind::Release
+                ) {
+                    startup_notice = None;
+                }
+
+                let pending_rename = tabs[active_index]
+                    .multi_buffer
+                    .as_ref()
+                    .and_then(|multi_buffer| multi_buffer.pending_rename.clone());
+                if let (Some(pending), TerminalEvent::Key(key)) = (pending_rename, &event)
+                    && key.kind != crossterm::event::KeyEventKind::Release
+                    && key.modifiers == crossterm::event::KeyModifiers::NONE
+                    && matches!(
+                        key.code,
+                        crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Esc
+                    )
+                {
+                    if key.code == crossterm::event::KeyCode::Esc {
+                        if let Err(error) = editor_window.update(cx, |_editor, window, _cx| {
+                            window.remove_window();
+                        }) {
+                            failure = Some(format!(
+                                "failed to close rejected rename preview: {error}"
+                            ));
+                            break;
+                        }
+                        tabs.remove(active_index);
+                        if tabs.is_empty() {
+                            break;
+                        }
+                        active_index = active_index.min(tabs.len().saturating_sub(1));
+                        message = Some(format!(
+                            "rename to {} rejected; no workspace edit was applied",
+                            pending.new_name
+                        ));
+                        quit_armed = false;
+                        close_armed = false;
+                        reload_armed = false;
+                        save_conflict_armed = false;
+                        continue;
+                    }
+
+                    let new_name = pending.new_name.clone();
+                    let accept_result: Result<ProjectTransaction> = async {
+                        validate_pending_rename_guards(&pending, cx)?;
+                        let (_, request) = request_rename_workspace_edit(
+                            &services.project,
+                            &pending.origin_buffer,
+                            pending.origin_point,
+                            pending.new_name.clone(),
+                            Some(pending.language_server_id),
+                            cx,
+                        )?;
+                        let latest_edit = request.await?;
+                        let latest_plan = normalize_rename_workspace_edit(
+                            &latest_edit,
+                            &pending.workspace_root,
+                        )?;
+                        ensure!(
+                            latest_plan.signature == pending.plan.signature,
+                            "language server changed the rename WorkspaceEdit after preview; preview again"
+                        );
+                        validate_pending_rename_guards(&pending, cx)?;
+                        services
+                            .project
+                            .update(cx, |project, cx| {
+                                project.perform_rename(
+                                    pending.origin_buffer.clone(),
+                                    pending.origin_point,
+                                    pending.new_name.clone(),
+                                    cx,
+                                )
+                            })
+                            .await
+                            .context("apply accepted rename through Project")
+                    }
+                    .await;
+                    match accept_result {
+                        Ok(transaction) => {
+                            let buffer_count = project_edit_history.push(transaction);
+                            let file_operation_count = pending.plan.file_operation_count;
+                            if let Err(error) =
+                                editor_window.update(cx, |_editor, window, _cx| {
+                                    window.remove_window();
+                                })
+                            {
+                                failure = Some(format!(
+                                    "rename applied but preview window could not close: {error}"
+                                ));
+                                break;
+                            }
+                            tabs.remove(active_index);
+                            if tabs.is_empty() {
+                                break;
+                            }
+                            active_index = active_index.min(tabs.len().saturating_sub(1));
+                            message = Some(format!(
+                                "renamed to {new_name}: {buffer_count} text buffer(s), {file_operation_count} file op(s); Ctrl-Z undoes text edits"
+                            ));
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                        }
+                        Err(error) => {
+                            message = Some(format!("rename acceptance failed: {error:#}"));
+                        }
+                    }
+                    continue;
+                }
+
+                let other_overlay_is_open = save_as_prompt.is_some()
+                    || open_prompt.is_some()
+                    || go_to_line_prompt.is_some()
+                    || quick_open_prompt.is_some()
+                    || project_search_prompt.is_some()
+                    || command_palette_prompt.is_some()
+                    || active_search.is_some()
+                    || completion_prompt.is_some()
+                    || language_overlay.is_some();
+                if !action_from_keymap
+                    && !other_overlay_is_open
+                    && let TerminalEvent::Key(key) = &event
+                    && !input::is_scroll_page_up(key)
+                    && !input::is_scroll_page_down(key)
+                    && let Some(keystroke) = input::to_gpui_keystroke(*key)
+                {
+                    if let Err(error) = cx.update_window(input_window, |_root, window, cx| {
+                        window.activate_window();
+                        window.dispatch_keystroke(keystroke, cx)
+                    }) {
+                        failure = Some(format!("failed to dispatch keymap input: {error}"));
+                        break;
+                    }
+                    let Some(action) = pending_terminal_actions.borrow_mut().pop_front() else {
+                        continue;
+                    };
+                    event = TerminalEvent::Key(action.shortcut_event());
+                }
+                if command_palette_prompt.is_none()
+                    && !other_overlay_is_open
+                    && matches!(&event, TerminalEvent::Key(key) if input::is_command_palette(key))
+                {
+                    command_palette_prompt = Some(CommandPalettePrompt::new(action_context(
+                        repository.as_ref(),
+                        &tabs[active_index].document,
+                        &services,
+                        &navigation_history,
+                        cx,
+                    )));
+                    message = None;
+                    continue;
+                }
+
+                let mut palette_consumed_input = false;
+                let mut close_palette = false;
+                let mut invoke_palette_action = None;
+                if let Some(palette) = command_palette_prompt.as_mut() {
+                    match &event {
+                        TerminalEvent::Key(key) => {
+                            palette_consumed_input = true;
+                            match palette.prompt.handle_key(key) {
+                                PromptAction::Changed => palette.refresh(),
+                                PromptAction::Next => palette.step(TabDirection::Next),
+                                PromptAction::Previous => palette.step(TabDirection::Previous),
+                                PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                    match palette.selected_action() {
+                                        Some(descriptor) if descriptor.enabled => {
+                                            invoke_palette_action = Some(descriptor.action);
+                                        }
+                                        Some(descriptor) => {
+                                            palette.feedback = Some(format!(
+                                                "{} is unavailable in the current focus",
+                                                descriptor.name
+                                            ));
+                                        }
+                                        None => {
+                                            palette.feedback = Some("no matching action".to_owned());
+                                        }
+                                    }
+                                }
+                                PromptAction::Cancel => close_palette = true,
+                                PromptAction::CursorMoved | PromptAction::Ignored => {}
+                            }
+                        }
+                        TerminalEvent::Paste(text) => {
+                            palette_consumed_input = true;
+                            if palette.prompt.handle_paste(text) == PromptAction::Changed {
+                                palette.refresh();
+                            }
+                        }
+                        TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_) => {
+                            palette_consumed_input = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if close_palette {
+                    command_palette_prompt = None;
+                    message = None;
+                    continue;
+                }
+                if let Some(action) = invoke_palette_action {
+                    command_palette_prompt = None;
+                    message = None;
+                    event = TerminalEvent::Key(action.shortcut_event());
+                } else if palette_consumed_input {
+                    continue;
+                }
+
+                let mut completion_consumed_input = false;
+                let mut cancel_completion = false;
+                let mut confirm_completion = None;
+                if let Some(completion) = completion_prompt.as_mut() {
+                    match &event {
+                        TerminalEvent::Key(key) => {
+                            completion_consumed_input = true;
+                            match completion.prompt.handle_key(key) {
+                                PromptAction::Changed => completion.refresh(),
+                                PromptAction::Next => completion.step(TabDirection::Next),
+                                PromptAction::Previous => completion.step(TabDirection::Previous),
+                                PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                    confirm_completion = completion.selected_item_index();
+                                }
+                                PromptAction::Cancel => cancel_completion = true,
+                                PromptAction::CursorMoved | PromptAction::Ignored => {}
+                            }
+                        }
+                        TerminalEvent::Paste(text) => {
+                            completion_consumed_input = true;
+                            if completion.prompt.handle_paste(text) == PromptAction::Changed {
+                                completion.refresh();
+                            }
+                        }
+                        TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_) => {
+                            completion_consumed_input = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if cancel_completion {
+                    completion_prompt = None;
+                    message = None;
+                    // Forward Escape to Zed so its hidden completion menu is also closed.
+                } else if let Some(item_index) = confirm_completion {
+                    completion_prompt = None;
+                    let task = match editor_window.update(cx, |editor, window, cx| {
+                        editor.confirm_completion(
+                            &ConfirmCompletion {
+                                item_ix: Some(item_index),
+                            },
+                            window,
+                            cx,
+                        )
+                    }) {
+                        Ok(task) => task,
+                        Err(error) => {
+                            failure = Some(format!("failed to confirm completion: {error}"));
+                            break;
+                        }
+                    };
+                    match task {
+                        Some(task) => match task.await {
+                            Ok(()) => message = Some("completion applied".to_owned()),
+                            Err(error) => {
+                                message = Some(format!("completion failed: {error:#}"));
+                            }
+                        },
+                        None => message = Some("completion is no longer available".to_owned()),
+                    }
+                    continue;
+                } else if completion_consumed_input && !cancel_completion {
+                    continue;
+                }
+
+                let mut language_consumed_input = false;
+                let mut close_language_overlay = false;
+                let mut diagnostic_to_open = None;
+                let mut diagnostics_multibuffer_to_open = None;
+                let mut location_to_open = None;
+                let mut project_symbol_request = None;
+                let mut rename_to_preview = None;
+                let mut code_action_to_apply = None;
+                let mut worktree_to_trust = None;
+                if let Some(overlay) = language_overlay.as_mut() {
+                    match overlay {
+                        LanguageOverlay::Trust(prompt) => match &event {
+                            TerminalEvent::Key(key)
+                                if key.kind != crossterm::event::KeyEventKind::Release
+                                    && key.modifiers
+                                        == crossterm::event::KeyModifiers::NONE =>
+                            {
+                                language_consumed_input = true;
+                                match key.code {
+                                    crossterm::event::KeyCode::Enter => {
+                                        worktree_to_trust = Some(prompt.worktree_id)
+                                    }
+                                    crossterm::event::KeyCode::Esc => {
+                                        close_language_overlay = true
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            TerminalEvent::Key(_)
+                            | TerminalEvent::Paste(_)
+                            | TerminalEvent::Mouse(_)
+                            | TerminalEvent::MouseScroll(_) => {
+                                language_consumed_input = true;
+                            }
+                            _ => {}
+                        },
+                        LanguageOverlay::Hover(prompt) => match &event {
+                            TerminalEvent::Key(key) => {
+                                language_consumed_input = true;
+                                if input::is_hover(key)
+                                    || (key.kind != crossterm::event::KeyEventKind::Release
+                                        && key.modifiers
+                                            == crossterm::event::KeyModifiers::NONE
+                                        && matches!(
+                                            key.code,
+                                            crossterm::event::KeyCode::Esc
+                                                | crossterm::event::KeyCode::Enter
+                                        ))
+                                {
+                                    close_language_overlay = true;
+                                } else if key.kind
+                                    != crossterm::event::KeyEventKind::Release
+                                    && key.modifiers == crossterm::event::KeyModifiers::NONE
+                                {
+                                    match key.code {
+                                        crossterm::event::KeyCode::Down => {
+                                            prompt.step(TabDirection::Next)
+                                        }
+                                        crossterm::event::KeyCode::Up => {
+                                            prompt.step(TabDirection::Previous)
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            TerminalEvent::Paste(_)
+                            | TerminalEvent::Mouse(_)
+                            | TerminalEvent::MouseScroll(_) => {
+                                language_consumed_input = true;
+                            }
+                            _ => {}
+                        },
+                        LanguageOverlay::Diagnostics(prompt) => match &event {
+                            TerminalEvent::Key(key) => {
+                                language_consumed_input = true;
+                                if key.kind != crossterm::event::KeyEventKind::Release
+                                    && key.code == crossterm::event::KeyCode::F(9)
+                                    && key.modifiers == crossterm::event::KeyModifiers::NONE
+                                {
+                                    let items = prompt.visible_items();
+                                    if items.is_empty() {
+                                        prompt.feedback =
+                                            Some("no matching diagnostics".to_owned());
+                                    } else {
+                                        diagnostics_multibuffer_to_open = Some(items);
+                                    }
+                                } else {
+                                    match prompt.prompt.handle_key(key) {
+                                    PromptAction::Changed => prompt.refresh(),
+                                    PromptAction::Next => prompt.step(TabDirection::Next),
+                                    PromptAction::Previous => {
+                                        prompt.step(TabDirection::Previous)
+                                    }
+                                    PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                        if let Some(item) = prompt.selected_item() {
+                                            diagnostic_to_open = Some(item);
+                                        } else {
+                                            prompt.feedback =
+                                                Some("no matching diagnostic".to_owned());
+                                        }
+                                    }
+                                    PromptAction::Cancel => close_language_overlay = true,
+                                    PromptAction::CursorMoved | PromptAction::Ignored => {}
+                                    }
+                                }
+                            }
+                            TerminalEvent::Paste(text) => {
+                                language_consumed_input = true;
+                                if prompt.prompt.handle_paste(text) == PromptAction::Changed {
+                                    prompt.refresh();
+                                }
+                            }
+                            TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_) => {
+                                language_consumed_input = true;
+                            }
+                            _ => {}
+                        },
+                        LanguageOverlay::Locations(prompt) => match &event {
+                            TerminalEvent::Key(key) => {
+                                language_consumed_input = true;
+                                match prompt.prompt.handle_key(key) {
+                                    PromptAction::Changed
+                                        if prompt.kind
+                                            == LocationRequestKind::ProjectSymbols =>
+                                    {
+                                        language_request_generation =
+                                            language_request_generation.wrapping_add(1).max(1);
+                                        prompt.begin_request(language_request_generation);
+                                        project_symbol_request = Some((
+                                            prompt.buffer_id,
+                                            language_request_generation,
+                                            prompt.prompt.text().to_owned(),
+                                        ));
+                                    }
+                                    PromptAction::Changed => prompt.refresh(),
+                                    PromptAction::Next => prompt.step(TabDirection::Next),
+                                    PromptAction::Previous => {
+                                        prompt.step(TabDirection::Previous)
+                                    }
+                                    PromptAction::Submit | PromptAction::AlternateSubmit => {
+                                        if let Some(item) = prompt.selected_item() {
+                                            location_to_open = Some(item);
+                                        } else {
+                                            prompt.feedback =
+                                                Some("no matching location".to_owned());
+                                        }
+                                    }
+                                    PromptAction::Cancel => close_language_overlay = true,
+                                    PromptAction::CursorMoved | PromptAction::Ignored => {}
+                                }
+                            }
+                            TerminalEvent::Paste(text) => {
+                                language_consumed_input = true;
+                                if prompt.prompt.handle_paste(text) == PromptAction::Changed {
+                                    if prompt.kind == LocationRequestKind::ProjectSymbols {
+                                        language_request_generation =
+                                            language_request_generation.wrapping_add(1).max(1);
+                                        prompt.begin_request(language_request_generation);
+                                        project_symbol_request = Some((
+                                            prompt.buffer_id,
+                                            language_request_generation,
+                                            prompt.prompt.text().to_owned(),
+                                        ));
+                                    } else {
+                                        prompt.refresh();
+                                    }
+                                }
+                            }
+                            TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_) => {
+                                language_consumed_input = true;
+                            }
+                            _ => {}
+                        },
+                        LanguageOverlay::Rename(prompt) => match &event {
+                            TerminalEvent::Key(key) => {
+                                language_consumed_input = true;
+                                if matches!(
+                                    &prompt.state,
+                                    RenamePromptState::Running
+                                        | RenamePromptState::Previewing(_)
+                                        | RenamePromptState::Failed(_)
+                                ) {
+                                    if key.kind != crossterm::event::KeyEventKind::Release
+                                        && key.code == crossterm::event::KeyCode::Esc
+                                        && key.modifiers
+                                            == crossterm::event::KeyModifiers::NONE
+                                    {
+                                        close_language_overlay = true;
+                                    }
+                                } else {
+                                    match prompt.prompt.handle_key(key) {
+                                        PromptAction::Changed => prompt.feedback = None,
+                                        PromptAction::Submit
+                                        | PromptAction::AlternateSubmit => {
+                                            if prompt.can_submit() {
+                                                rename_to_preview = Some((
+                                                    prompt.buffer.clone(),
+                                                    prompt.point,
+                                                    prompt.buffer_id,
+                                                    prompt.generation,
+                                                    prompt.prompt.text().to_owned(),
+                                                ));
+                                                let _ = prompt.begin_preview();
+                                            } else {
+                                                prompt.feedback =
+                                                    Some("new name must not be empty".to_owned());
+                                            }
+                                        }
+                                        PromptAction::Cancel => close_language_overlay = true,
+                                        PromptAction::CursorMoved
+                                        | PromptAction::Next
+                                        | PromptAction::Previous
+                                        | PromptAction::Ignored => {}
+                                    }
+                                }
+                            }
+                            TerminalEvent::Paste(text) => {
+                                language_consumed_input = true;
+                                if matches!(&prompt.state, RenamePromptState::Ready(_))
+                                    && prompt.prompt.handle_paste(text) == PromptAction::Changed
+                                {
+                                    prompt.feedback = None;
+                                }
+                            }
+                            TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_) => {
+                                language_consumed_input = true;
+                            }
+                            _ => {}
+                        },
+                        LanguageOverlay::CodeActions(prompt) => match &event {
+                            TerminalEvent::Key(key) => {
+                                language_consumed_input = true;
+                                match prompt.prompt.handle_key(key) {
+                                    PromptAction::Changed => prompt.refresh(),
+                                    PromptAction::Next => prompt.step(TabDirection::Next),
+                                    PromptAction::Previous => {
+                                        prompt.step(TabDirection::Previous)
+                                    }
+                                    PromptAction::Submit
+                                    | PromptAction::AlternateSubmit => {
+                                        if let Some(action) = prompt.selected_action() {
+                                            code_action_to_apply = Some((
+                                                prompt.buffer.clone(),
+                                                action,
+                                            ));
+                                        } else {
+                                            prompt.feedback = Some(
+                                                "no enabled matching code action".to_owned(),
+                                            );
+                                        }
+                                    }
+                                    PromptAction::Cancel => close_language_overlay = true,
+                                    PromptAction::CursorMoved | PromptAction::Ignored => {}
+                                }
+                            }
+                            TerminalEvent::Paste(text) => {
+                                language_consumed_input = true;
+                                if prompt.prompt.handle_paste(text) == PromptAction::Changed {
+                                    prompt.refresh();
+                                }
+                            }
+                            TerminalEvent::Mouse(_) | TerminalEvent::MouseScroll(_) => {
+                                language_consumed_input = true;
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+                if let Some(worktree_id) = worktree_to_trust {
+                    let Some(trusted_worktrees) =
+                        cx.update(|cx| TrustedWorktrees::try_get_global(cx))
+                    else {
+                        failure = Some("worktree trust service is unavailable".to_owned());
+                        break;
+                    };
+                    trusted_worktrees.update(cx, |trusted_worktrees, cx| {
+                        trusted_worktrees.trust(
+                            &services.worktree_store,
+                            [PathTrust::Worktree(worktree_id)].into_iter().collect(),
+                            cx,
+                        );
+                    });
+                    language_overlay = None;
+                    message = Some("worktree trusted for this session; project processes enabled".to_owned());
+                    continue;
+                }
+                if let Some((buffer_id, generation, query)) = project_symbol_request {
+                    let root = repository
+                        .as_ref()
+                        .map(|repository| repository.root.canonical_path().to_path_buf());
+                    start_project_symbols_request(
+                        &services.project,
+                        buffer_id,
+                        generation,
+                        query,
+                        root,
+                        redraw_sender.clone(),
+                        cx,
+                    );
+                }
+                if close_language_overlay {
+                    language_overlay = None;
+                    message = None;
+                    continue;
+                }
+                if let Some((buffer, point, buffer_id, generation, new_name)) = rename_to_preview {
+                    if let Err(error) = start_rename_preview_request(
+                        &services.project,
+                        buffer,
+                        point,
+                        buffer_id,
+                        generation,
+                        new_name.clone(),
+                        redraw_sender.clone(),
+                        cx,
+                    ) {
+                        let result = Err(format!("{error:#}"));
+                        if let Some(LanguageOverlay::Rename(prompt)) = language_overlay.as_mut() {
+                            let _ = prompt.finish_preview(
+                                buffer_id,
+                                generation,
+                                &new_name,
+                                &result,
+                            );
+                        }
+                    } else {
+                        message = Some("building rename preview…".to_owned());
+                    }
+                    continue;
+                }
+                if let Some((buffer, action)) = code_action_to_apply {
+                    let title = code_action_title(&action).to_owned();
+                    let task = services.project.update(cx, |project, cx| {
+                        project.apply_code_action(buffer, action, true, cx)
+                    });
+                    match task.await {
+                        Ok(transaction) => {
+                            let buffer_count = project_edit_history.push(transaction);
+                            language_overlay = None;
+                            message = Some(format!(
+                                "applied {title} in {buffer_count} buffer(s); Ctrl-Z undoes all"
+                            ));
+                        }
+                        Err(error) => {
+                            if let Some(LanguageOverlay::CodeActions(prompt)) =
+                                language_overlay.as_mut()
+                            {
+                                prompt.feedback =
+                                    Some(format!("code action failed: {error:#}"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(items) = diagnostics_multibuffer_to_open {
+                    let locations = items
+                        .iter()
+                        .map(|item| LocationPresentation {
+                            path: item.path.clone(),
+                            label: item.label.clone(),
+                            row: item.row,
+                            column: item.column,
+                            end_row: item.row,
+                            end_column: item.column.saturating_add(1),
+                            snippet: item.message.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    match create_locations_multibuffer_tab(
+                        "Project Diagnostics".to_owned(),
+                        &locations,
+                        repository.as_ref(),
+                        &services,
+                        redraw_sender.clone(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Ok(tab) => {
+                            tabs.push(tab);
+                            active_index = tabs.len().saturating_sub(1);
+                            language_overlay = None;
+                            message = Some(format!(
+                                "opened {} diagnostic(s) in an editable MultiBuffer",
+                                locations.len()
+                            ));
+                        }
+                        Err(error) => {
+                            if let Some(LanguageOverlay::Diagnostics(prompt)) =
+                                language_overlay.as_mut()
+                            {
+                                prompt.feedback =
+                                    Some(format!("MultiBuffer open failed: {error:#}"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(item) = diagnostic_to_open {
+                    let origin = current_navigation_point(&tabs, active_index, cx).ok();
+                    match navigate_to_diagnostic(
+                        &item,
+                        repository.as_ref(),
+                        &services,
+                        &mut tabs,
+                        &mut active_index,
+                        redraw_sender.clone(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Ok(opened) => {
+                            if let Some(origin) = origin {
+                                navigation_history.record_jump(origin);
+                            }
+                            language_overlay = None;
+                            message = Some(opened);
+                        }
+                        Err(error) => {
+                            if let Some(LanguageOverlay::Diagnostics(prompt)) =
+                                language_overlay.as_mut()
+                            {
+                                prompt.feedback =
+                                    Some(format!("open failed: {error:#}"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(item) = location_to_open {
+                    let origin = current_navigation_point(&tabs, active_index, cx).ok();
+                    match navigate_to_location(
+                        &item,
+                        repository.as_ref(),
+                        &services,
+                        &mut tabs,
+                        &mut active_index,
+                        redraw_sender.clone(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Ok(opened) => {
+                            if let Some(origin) = origin {
+                                navigation_history.record_jump(origin);
+                            }
+                            language_overlay = None;
+                            message = Some(opened);
+                        }
+                        Err(error) => {
+                            if let Some(LanguageOverlay::Locations(prompt)) =
+                                language_overlay.as_mut()
+                            {
+                                prompt.feedback = Some(format!("open failed: {error:#}"));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if language_consumed_input {
+                    continue;
+                }
 
                 let reset_close = resets_confirmation(&event, input::is_close_tab);
                 let reset_quit = resets_confirmation(&event, input::is_quit);
@@ -1153,9 +3590,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     TerminalEvent::Key(event) if input::is_quit(&event) => {
                         let guarded_count = tabs
                             .iter()
-                            .filter(|tab| {
-                                document_state(&tab.document, cx).needs_discard_confirmation()
-                            })
+                            .filter(|tab| tab_state(tab, cx).needs_discard_confirmation())
                             .count();
                         if guarded_count == 0 || quit_armed {
                             break;
@@ -1169,8 +3604,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                     TerminalEvent::Key(event) if input::is_close_tab(&event) => {
                         quit_armed = false;
                         let needs_confirmation =
-                            document_state(&tabs[active_index].document, cx)
-                                .needs_discard_confirmation();
+                            tab_state(&tabs[active_index], cx).needs_discard_confirmation();
                         if needs_confirmation && !close_armed {
                             close_armed = true;
                             message = Some(
@@ -1273,7 +3707,18 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             && quick_open_prompt.is_none()
                             && project_search_prompt.is_none()
                         {
-                            let state = document_state(&tabs[active_index].document, cx);
+                            if tabs[active_index]
+                                .multi_buffer
+                                .as_ref()
+                                .is_some_and(|multi_buffer| multi_buffer.pending_rename.is_some())
+                            {
+                                message = Some(
+                                    "rename preview cannot be reloaded; Enter accepts or Esc rejects"
+                                        .to_owned(),
+                                );
+                                continue;
+                            }
+                            let state = tab_state(&tabs[active_index], cx);
                             if !state.has_file() {
                                 reload_armed = false;
                                 message = Some("reload failed: buffer has no file path".to_owned());
@@ -1291,13 +3736,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
 
                             reload_armed = false;
                             save_conflict_armed = false;
-                            match reload_document(&tabs[active_index].document, &services, cx).await
+                            match reload_tab(&tabs[active_index], &services, cx).await
                             {
                                 Ok(()) => {
-                                    let conflict = tabs[active_index]
-                                        .document
-                                        .buffer
-                                        .read_with(cx, |buffer, _| buffer.has_conflict());
+                                    let conflict = tab_state(&tabs[active_index], cx).conflict;
                                     if conflict {
                                         message = Some(
                                             "file changed again while reloading; local edits were kept"
@@ -1330,7 +3772,18 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             && quick_open_prompt.is_none()
                             && project_search_prompt.is_none()
                         {
-                            let state = document_state(&tabs[active_index].document, cx);
+                            if tabs[active_index]
+                                .multi_buffer
+                                .as_ref()
+                                .is_some_and(|multi_buffer| multi_buffer.pending_rename.is_some())
+                            {
+                                message = Some(
+                                    "rename preview cannot be saved; Enter accepts or Esc rejects"
+                                        .to_owned(),
+                                );
+                                continue;
+                            }
+                            let state = tab_state(&tabs[active_index], cx);
                             if state.has_file() {
                                 if state.has_external_change() && !save_conflict_armed {
                                     save_conflict_armed = true;
@@ -1344,8 +3797,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     continue;
                                 }
                                 save_conflict_armed = false;
-                                match save_document(&tabs[active_index].document, &services, cx)
-                                    .await
+                                match save_tab(&tabs[active_index], &services, cx).await
                                 {
                                     Ok(()) => message = Some("saved".to_owned()),
                                     Err(error) => message = Some(format!("save failed: {error:#}")),
@@ -1538,7 +3990,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         document.untitled_label = Some(untitled_label(next_untitled_id));
                         match create_document_tab(
                             document,
-                            services.buffer_store.clone(),
+                            &services,
                             redraw_sender.clone(),
                             cx,
                         ) {
@@ -1696,7 +4148,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 {
                                     Ok(document) => {
                                         if let Some(index) = tabs.iter().position(|tab| {
-                                            tab.document.buffer == document.buffer
+                                            tab.multi_buffer.is_none()
+                                                && tab.document.buffer == document.buffer
                                         }) {
                                             active_index = index;
                                             quick_open_prompt = None;
@@ -1704,7 +4157,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                         } else {
                                             match create_document_tab(
                                                 document,
-                                                services.buffer_store.clone(),
+                                                &services,
                                                 redraw_sender.clone(),
                                                 cx,
                                             ) {
@@ -1830,7 +4283,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
 
                                 let already_open = tabs
                                     .iter()
-                                    .position(|tab| tab.document.buffer == hit.buffer);
+                                    .position(|tab| {
+                                        tab.multi_buffer.is_none()
+                                            && tab.document.buffer == hit.buffer
+                                    });
                                 if let Some(index) = already_open {
                                     active_index = index;
                                 } else {
@@ -1841,7 +4297,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     };
                                     match create_document_tab(
                                         document,
-                                        services.buffer_store.clone(),
+                                        &services,
                                         redraw_sender.clone(),
                                         cx,
                                     ) {
@@ -1881,6 +4337,494 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                 message = Some("project search cancelled".to_owned());
                             }
                             PromptAction::CursorMoved | PromptAction::Ignored => {}
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_completion(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_language_server {
+                            message = Some(language_service_unavailable_message("completion"));
+                            continue;
+                        }
+                        let buffer_id = tabs[active_index]
+                            .document
+                            .buffer
+                            .read_with(cx, |buffer, _| buffer.remote_id().to_proto());
+                        let generation = tabs[active_index]
+                            .completion_generation
+                            .load(AtomicOrdering::SeqCst)
+                            .saturating_add(1);
+                        completion_prompt =
+                            Some(CompletionPrompt::running(buffer_id, generation));
+                        if let Err(error) = editor_window.update(cx, |editor, window, cx| {
+                            editor.show_completions(&ShowCompletions, window, cx);
+                        }) {
+                            completion_prompt = None;
+                            message = Some(format!("completion failed: {error}"));
+                        } else {
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_hover(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_language_server {
+                            message = Some(language_service_unavailable_message("hover"));
+                            continue;
+                        }
+                        language_request_generation =
+                            language_request_generation.wrapping_add(1).max(1);
+                        match start_hover_request(
+                            &editor_window,
+                            &services.project,
+                            language_request_generation,
+                            redraw_sender.clone(),
+                            cx,
+                        ) {
+                            Ok(buffer_id) => {
+                                language_overlay = Some(LanguageOverlay::Hover(
+                                    HoverPrompt::running(
+                                        buffer_id,
+                                        language_request_generation,
+                                    ),
+                                ));
+                                message = None;
+                            }
+                            Err(error) => {
+                                message = Some(format!("hover failed: {error:#}"));
+                            }
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_project_diagnostics(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        language_request_generation =
+                            language_request_generation.wrapping_add(1).max(1);
+                        let generation = language_request_generation;
+                        language_overlay = Some(LanguageOverlay::Diagnostics(
+                            DiagnosticsPrompt::running(generation),
+                        ));
+                        message = None;
+                        let project = services.project.clone();
+                        let root = repository
+                            .as_ref()
+                            .map(|repository| repository.root.canonical_path().to_path_buf());
+                            let open_buffers = open_file_buffers(&tabs, cx);
+                        let sender = redraw_sender.clone();
+                        cx.spawn(async move |cx| {
+                            let result = collect_project_diagnostics(
+                                project,
+                                root,
+                                open_buffers,
+                                cx,
+                            )
+                            .await
+                            .map_err(|error| format!("{error:#}"));
+                            let _ = sender
+                                .send(TerminalEvent::DiagnosticsFinished {
+                                    generation,
+                                    result,
+                                })
+                                .await;
+                        })
+                        .detach();
+                    }
+                    TerminalEvent::Key(event)
+                        if (input::is_go_to_definition(&event)
+                            || input::is_go_to_type_definition(&event)
+                            || input::is_find_references(&event))
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_language_server {
+                            message = Some(language_service_unavailable_message(
+                                "semantic navigation",
+                            ));
+                            continue;
+                        }
+                        let kind = if input::is_go_to_type_definition(&event) {
+                            LocationRequestKind::TypeDefinition
+                        } else if input::is_find_references(&event) {
+                            LocationRequestKind::References
+                        } else {
+                            LocationRequestKind::Definition
+                        };
+                        language_request_generation =
+                            language_request_generation.wrapping_add(1).max(1);
+                        let root = repository
+                            .as_ref()
+                            .map(|repository| repository.root.canonical_path().to_path_buf());
+                        match start_locations_request(
+                            kind,
+                            &editor_window,
+                            &services.project,
+                            language_request_generation,
+                            root,
+                            redraw_sender.clone(),
+                            cx,
+                        ) {
+                            Ok(buffer_id) => {
+                                language_overlay = Some(LanguageOverlay::Locations(
+                                    LocationsPrompt::running(
+                                        buffer_id,
+                                        language_request_generation,
+                                        kind,
+                                    ),
+                                ));
+                                message = None;
+                            }
+                            Err(error) => {
+                                message = Some(format!(
+                                    "{} failed: {error:#}",
+                                    kind.title().to_lowercase()
+                                ));
+                            }
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_project_symbols(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_repository || !context.has_language_server {
+                            message = Some(
+                                "project symbols unavailable: repository or language server is not ready"
+                                    .to_owned(),
+                            );
+                            continue;
+                        }
+                        let (_, _, buffer_id) = match active_editor_buffer_point(
+                            &editor_window,
+                            cx,
+                        ) {
+                            Ok(location) => location,
+                            Err(error) => {
+                                message = Some(format!("project symbols failed: {error:#}"));
+                                continue;
+                            }
+                        };
+                        language_request_generation =
+                            language_request_generation.wrapping_add(1).max(1);
+                        let generation = language_request_generation;
+                        language_overlay = Some(LanguageOverlay::Locations(
+                            LocationsPrompt::running(
+                                buffer_id,
+                                generation,
+                                LocationRequestKind::ProjectSymbols,
+                            ),
+                        ));
+                        let root = repository
+                            .as_ref()
+                            .map(|repository| repository.root.canonical_path().to_path_buf());
+                        start_project_symbols_request(
+                            &services.project,
+                            buffer_id,
+                            generation,
+                            String::new(),
+                            root,
+                            redraw_sender.clone(),
+                            cx,
+                        );
+                        message = None;
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_rename_symbol(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_language_server {
+                            message = Some(language_service_unavailable_message("rename"));
+                            continue;
+                        }
+                        language_request_generation =
+                            language_request_generation.wrapping_add(1).max(1);
+                        match start_rename_request(
+                            &editor_window,
+                            &services.project,
+                            language_request_generation,
+                            redraw_sender.clone(),
+                            cx,
+                        ) {
+                            Ok((buffer, point, buffer_id)) => {
+                                language_overlay = Some(LanguageOverlay::Rename(
+                                    RenamePrompt::running(
+                                        buffer,
+                                        buffer_id,
+                                        language_request_generation,
+                                        point,
+                                    ),
+                                ));
+                                message = None;
+                            }
+                            Err(error) => {
+                                message = Some(format!("rename failed: {error:#}"));
+                            }
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_code_actions(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_language_server {
+                            message = Some(language_service_unavailable_message("code actions"));
+                            continue;
+                        }
+                        language_request_generation =
+                            language_request_generation.wrapping_add(1).max(1);
+                        match start_code_actions_request(
+                            &editor_window,
+                            &services.project,
+                            language_request_generation,
+                            redraw_sender.clone(),
+                            cx,
+                        ) {
+                            Ok((buffer, buffer_id)) => {
+                                language_overlay = Some(LanguageOverlay::CodeActions(
+                                    CodeActionsPrompt::running(
+                                        buffer,
+                                        buffer_id,
+                                        language_request_generation,
+                                    ),
+                                ));
+                                message = None;
+                            }
+                            Err(error) => {
+                                message = Some(format!("code actions failed: {error:#}"));
+                            }
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if (input::is_format_document(&event)
+                            || input::is_format_selection(&event))
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        let selection_only = input::is_format_selection(&event);
+                        let context = action_context(
+                            repository.as_ref(),
+                            &tabs[active_index].document,
+                            &services,
+                            &navigation_history,
+                            cx,
+                        );
+                        if !context.has_language_server {
+                            message = Some(language_service_unavailable_message("format"));
+                            continue;
+                        }
+                        let task = match format_active_editor(
+                            &editor_window,
+                            &services.project,
+                            selection_only,
+                            cx,
+                        ) {
+                            Ok(task) => task,
+                            Err(error) => {
+                                message = Some(format!("format failed: {error:#}"));
+                                continue;
+                            }
+                        };
+                        match task.await {
+                            Ok(transaction) => {
+                                let buffer_count = project_edit_history.push(transaction);
+                                let scope = if selection_only { "selection" } else { "document" };
+                                message = Some(format!(
+                                    "formatted {scope} in {buffer_count} buffer(s)"
+                                ));
+                            }
+                            Err(error) => {
+                                message = Some(format!("format failed: {error:#}"));
+                            }
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_undo(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        if project_edit_history.can_undo() {
+                            match project_edit_history.undo_latest(cx) {
+                                Ok(buffer_count) => {
+                                    message = Some(format!(
+                                        "undid project edit in {buffer_count} buffer(s)"
+                                    ));
+                                }
+                                Err(error) => {
+                                    message = Some(format!("project undo failed: {error:#}"));
+                                }
+                            }
+                        } else if let Err(error) = editor_window.update(cx, |editor, window, cx| {
+                            editor.undo(&Undo, window, cx)
+                        }) {
+                            message = Some(format!("undo failed: {error}"));
+                        } else {
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_redo(&event)
+                            && save_as_prompt.is_none()
+                            && open_prompt.is_none()
+                            && go_to_line_prompt.is_none()
+                            && quick_open_prompt.is_none()
+                            && project_search_prompt.is_none()
+                            && active_search.is_none() =>
+                    {
+                        quit_armed = false;
+                        if project_edit_history.can_redo() {
+                            match project_edit_history.redo_latest(cx) {
+                                Ok(buffer_count) => {
+                                    message = Some(format!(
+                                        "redid project edit in {buffer_count} buffer(s)"
+                                    ));
+                                }
+                                Err(error) => {
+                                    message = Some(format!("project redo failed: {error:#}"));
+                                }
+                            }
+                        } else if let Err(error) = editor_window.update(cx, |editor, window, cx| {
+                            editor.redo(&Redo, window, cx)
+                        }) {
+                            message = Some(format!("redo failed: {error}"));
+                        } else {
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::Key(event)
+                        if input::is_navigation_back(&event)
+                            || input::is_navigation_forward(&event) =>
+                    {
+                        quit_armed = false;
+                        let current = match current_navigation_point(&tabs, active_index, cx) {
+                            Ok(current) => current,
+                            Err(error) => {
+                                message = Some(format!("navigation failed: {error:#}"));
+                                continue;
+                            }
+                        };
+                        let previous_history = navigation_history.clone();
+                        let target = if input::is_navigation_back(&event) {
+                            navigation_history.go_back(current)
+                        } else {
+                            navigation_history.go_forward(current)
+                        };
+                        let Some(target) = target else {
+                            message = Some(if input::is_navigation_back(&event) {
+                                "no previous location".to_owned()
+                            } else {
+                                "no next location".to_owned()
+                            });
+                            continue;
+                        };
+                        match navigate_to_history_point(
+                            &target,
+                            repository.as_ref(),
+                            &services,
+                            &mut tabs,
+                            &mut active_index,
+                            redraw_sender.clone(),
+                            cx,
+                        )
+                        .await
+                        {
+                            Ok(status) => message = Some(status),
+                            Err(error) => {
+                                navigation_history = previous_history;
+                                message = Some(format!("navigation failed: {error:#}"));
+                            }
                         }
                     }
                     TerminalEvent::Key(event) if input::is_intercepted_shortcut(&event) => {}
@@ -2023,7 +4967,10 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                     Ok(document) => {
                                         if let Some(index) = tabs
                                             .iter()
-                                            .position(|tab| tab.document.buffer == document.buffer)
+                                            .position(|tab| {
+                                                tab.multi_buffer.is_none()
+                                                    && tab.document.buffer == document.buffer
+                                            })
                                         {
                                             active_index = index;
                                             open_prompt = None;
@@ -2031,7 +4978,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                                         } else {
                                             match create_document_tab(
                                                 document,
-                                                services.buffer_store.clone(),
+                                                &services,
                                                 redraw_sender.clone(),
                                                 cx,
                                             ) {
@@ -2251,7 +5198,8 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         if let Some(keystroke) = input::to_gpui_keystroke(event) {
                             quit_armed = false;
                             message = None;
-                            if let Err(error) = input_window.update(cx, |_root, window, cx| {
+                            if let Err(error) = cx.update_window(input_window, |_root, window, cx| {
+                                window.activate_window();
                                 window.dispatch_keystroke(keystroke, cx)
                             }) {
                                 failure = Some(format!("failed to dispatch keystroke: {error}"));
@@ -2477,12 +5425,378 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                             }
                         }
                     }
+                    TerminalEvent::CompletionFinished {
+                        buffer_id,
+                        generation,
+                        menu_wait_attempt,
+                        result,
+                    } => {
+                        let prompt_is_current = completion_prompt.as_ref().is_some_and(|prompt| {
+                            prompt.buffer_id == buffer_id && prompt.generation == generation
+                        });
+                        if !prompt_is_current {
+                            continue;
+                        }
+                        let menu_ready = if result.is_err() {
+                            true
+                        } else {
+                            match editor_window.update(cx, |editor, _window, _cx| {
+                                editor.has_visible_completions_menu()
+                            }) {
+                                Ok(menu_ready) => menu_ready,
+                                Err(error) => {
+                                    failure = Some(format!(
+                                        "failed to inspect Zed completion menu readiness: {error}"
+                                    ));
+                                    break;
+                                }
+                            }
+                        };
+                        if !menu_ready && menu_wait_attempt < 500 {
+                            let sender = redraw_sender.clone();
+                            cx.spawn(async move |cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(2))
+                                    .await;
+                                let _ = sender
+                                    .send(TerminalEvent::CompletionFinished {
+                                        buffer_id,
+                                        generation,
+                                        menu_wait_attempt: menu_wait_attempt + 1,
+                                        result,
+                                    })
+                                    .await;
+                            })
+                            .detach();
+                            continue;
+                        }
+                        if let Some(prompt) = completion_prompt.as_mut()
+                            && prompt.complete(
+                                buffer_id,
+                                generation,
+                                if menu_ready {
+                                    result
+                                } else {
+                                    Err("Zed completion menu did not become ready within one second"
+                                        .to_owned())
+                                },
+                            )
+                        {
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::HoverFinished {
+                        buffer_id,
+                        generation,
+                        result,
+                    } => {
+                        if let Some(LanguageOverlay::Hover(prompt)) =
+                            language_overlay.as_mut()
+                            && prompt.complete(buffer_id, generation, result)
+                        {
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::DiagnosticsFinished { generation, result } => {
+                        if let Some(LanguageOverlay::Diagnostics(prompt)) =
+                            language_overlay.as_mut()
+                            && prompt.complete(generation, result)
+                        {
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::LocationsFinished {
+                        buffer_id,
+                        generation,
+                        kind,
+                        result,
+                        } => {
+                            let mut accepted = false;
+                            let mut automatic_target = None;
+                            let mut multibuffer_targets = None;
+                            if let Some(LanguageOverlay::Locations(prompt)) =
+                                language_overlay.as_mut()
+                            {
+                                accepted = prompt.complete(buffer_id, generation, kind, result);
+                            if accepted
+                                && matches!(
+                                    kind,
+                                    LocationRequestKind::Definition
+                                        | LocationRequestKind::TypeDefinition
+                                )
+                            {
+                                    automatic_target = match &prompt.state {
+                                    LocationsPromptState::Ready { items, .. }
+                                        if items.len() == 1 => items.first().cloned(),
+                                        _ => None,
+                                    };
+                                }
+                                if accepted {
+                                    multibuffer_targets = match &prompt.state {
+                                        LocationsPromptState::Ready { items, .. }
+                                            if !items.is_empty()
+                                                && (kind == LocationRequestKind::References
+                                                    || (matches!(
+                                                        kind,
+                                                        LocationRequestKind::Definition
+                                                            | LocationRequestKind::TypeDefinition
+                                                    ) && items.len() > 1)) =>
+                                        {
+                                            Some(items.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                }
+                            }
+                        if accepted {
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                                message = None;
+                            }
+                            if let Some(items) = multibuffer_targets {
+                                match create_locations_multibuffer_tab(
+                                    kind.title().to_owned(),
+                                    &items,
+                                    repository.as_ref(),
+                                    &services,
+                                    redraw_sender.clone(),
+                                    cx,
+                                )
+                                .await
+                                {
+                                    Ok(tab) => {
+                                        tabs.push(tab);
+                                        active_index = tabs.len().saturating_sub(1);
+                                        language_overlay = None;
+                                        message = Some(format!(
+                                            "opened {} in an editable MultiBuffer ({} target(s))",
+                                            kind.title().to_lowercase(),
+                                            items.len()
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        if let Some(LanguageOverlay::Locations(prompt)) =
+                                            language_overlay.as_mut()
+                                        {
+                                            prompt.feedback = Some(format!(
+                                                "MultiBuffer open failed: {error:#}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            if let Some(item) = automatic_target {
+                            let origin = current_navigation_point(&tabs, active_index, cx).ok();
+                            match navigate_to_location(
+                                &item,
+                                repository.as_ref(),
+                                &services,
+                                &mut tabs,
+                                &mut active_index,
+                                redraw_sender.clone(),
+                                cx,
+                            )
+                            .await
+                            {
+                                Ok(opened) => {
+                                    if let Some(origin) = origin {
+                                        navigation_history.record_jump(origin);
+                                    }
+                                    language_overlay = None;
+                                    message = Some(opened);
+                                }
+                                Err(error) => {
+                                    if let Some(LanguageOverlay::Locations(prompt)) =
+                                        language_overlay.as_mut()
+                                    {
+                                        prompt.feedback =
+                                            Some(format!("open failed: {error:#}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TerminalEvent::RenamePrepared {
+                        buffer_id,
+                        generation,
+                        result,
+                    } => {
+                        if let Some(LanguageOverlay::Rename(prompt)) =
+                            language_overlay.as_mut()
+                            && prompt.complete(buffer_id, generation, result)
+                        {
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::RenamePreviewFinished {
+                        buffer_id,
+                        generation,
+                        new_name,
+                        result,
+                    } => {
+                        let origin = if let Some(LanguageOverlay::Rename(prompt)) =
+                            language_overlay.as_mut()
+                            && prompt.finish_preview(
+                                buffer_id,
+                                generation,
+                                &new_name,
+                                &result,
+                            )
+                        {
+                            Some((prompt.buffer.clone(), prompt.point))
+                        } else {
+                            None
+                        };
+                        let Some((origin_buffer, origin_point)) = origin else {
+                            continue;
+                        };
+                        let Ok((language_server_id, edit)) = result else {
+                            message = None;
+                            continue;
+                        };
+                        let preview = rename_workspace_root(
+                            repository.as_ref(),
+                            &origin_buffer,
+                            cx,
+                        )
+                        .and_then(|workspace_root| {
+                            Ok((
+                                workspace_root.clone(),
+                                create_rename_preview_tab(
+                                    origin_buffer,
+                                    origin_point,
+                                    new_name.clone(),
+                                    language_server_id,
+                                    edit,
+                                    workspace_root,
+                                    repository.as_ref(),
+                                    &services,
+                                    cx,
+                                ),
+                            ))
+                        });
+                        let preview = match preview {
+                            Ok((_, preview)) => preview.await,
+                            Err(error) => Err(error),
+                        };
+                        match preview {
+                            Ok(tab) => {
+                                let (edit_count, file_operation_count) = tab
+                                    .multi_buffer
+                                    .as_ref()
+                                    .and_then(|multi_buffer| multi_buffer.pending_rename.as_ref())
+                                    .map(|pending| {
+                                        (
+                                            pending.plan.edit_count,
+                                            pending.plan.file_operation_count,
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                tabs.push(tab);
+                                active_index = tabs.len().saturating_sub(1);
+                                language_overlay = None;
+                                quit_armed = false;
+                                close_armed = false;
+                                reload_armed = false;
+                                save_conflict_armed = false;
+                                message = Some(format!(
+                                    "rename preview: {edit_count} edit(s), {file_operation_count} file op(s); Enter accepts, Esc rejects"
+                                ));
+                            }
+                            Err(error) => {
+                                let failure = Err(format!("{error:#}"));
+                                if let Some(LanguageOverlay::Rename(prompt)) =
+                                    language_overlay.as_mut()
+                                {
+                                    let _ = prompt.finish_preview(
+                                        buffer_id,
+                                        generation,
+                                        &new_name,
+                                        &failure,
+                                    );
+                                }
+                                message = None;
+                            }
+                        }
+                    }
+                    TerminalEvent::CodeActionsFinished {
+                        buffer_id,
+                        generation,
+                        result,
+                    } => {
+                        if let Some(LanguageOverlay::CodeActions(prompt)) =
+                            language_overlay.as_mut()
+                            && prompt.complete(buffer_id, generation, result)
+                        {
+                            quit_armed = false;
+                            close_armed = false;
+                            reload_armed = false;
+                            save_conflict_armed = false;
+                            message = None;
+                        }
+                    }
+                    TerminalEvent::WorktreeTrustRequired { worktree_id, path } => {
+                        quit_armed = false;
+                        close_armed = false;
+                        reload_armed = false;
+                        save_conflict_armed = false;
+                        completion_prompt = None;
+                        command_palette_prompt = None;
+                        language_overlay = Some(LanguageOverlay::Trust(WorktreeTrustPrompt {
+                            worktree_id,
+                            path,
+                        }));
+                        message = None;
+                    }
+                    TerminalEvent::ConfigurationReloaded { kind, result } => {
+                        quit_armed = false;
+                        close_armed = false;
+                        reload_armed = false;
+                        save_conflict_armed = false;
+                        message = Some(match result {
+                            Ok(status) => format!("{kind} {status}"),
+                            Err(error) => format!("{kind} reload failed: {error}"),
+                        });
+                    }
+                    TerminalEvent::LanguageServiceNotice { level, message: notice } => {
+                        quit_armed = false;
+                        close_armed = false;
+                        reload_armed = false;
+                        save_conflict_armed = false;
+                        message = Some(format!("language service {level}: {notice}"));
+                    }
                     TerminalEvent::ReloadFinished { buffer_id, result } => {
                         let Some(reloaded_index) = tabs.iter().position(|tab| {
-                            tab.document
-                                .buffer
-                                .read_with(cx, |buffer, _| buffer.remote_id().to_proto())
-                                == buffer_id
+                            let primary_matches = tab.document.buffer.read_with(cx, |buffer, _| {
+                                buffer.remote_id().to_proto() == buffer_id
+                            });
+                            primary_matches
+                                || tab.multi_buffer.as_ref().is_some_and(|multi_buffer| {
+                                    multi_buffer.source_buffers.iter().any(|buffer| {
+                                        buffer.read_with(cx, |buffer, _| {
+                                            buffer.remote_id().to_proto() == buffer_id
+                                        })
+                                    })
+                                })
                         }) else {
                             continue;
                         };
@@ -2493,8 +5807,11 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         close_armed = false;
                         reload_armed = false;
                         save_conflict_armed = false;
-                        let label = document_label(&tabs[reloaded_index].document, true, cx);
-                        let state = document_state(&tabs[reloaded_index].document, cx);
+                        let label = tabs[reloaded_index].multi_buffer.as_ref().map_or_else(
+                            || document_label(&tabs[reloaded_index].document, true, cx),
+                            |multi_buffer| multi_buffer.title.clone(),
+                        );
+                        let state = tab_state(&tabs[reloaded_index], cx);
 
                         match result {
                             Ok(()) if state.has_external_change() => {
@@ -2538,6 +5855,7 @@ fn run_interactive(paths: Vec<PathBuf>) -> Result<()> {
                         failure = Some(format!("failed to read terminal input: {error}"));
                         break;
                     }
+                    TerminalEvent::Action(_) => unreachable!("actions are normalized before dispatch"),
                 }
             }
 
@@ -2600,8 +5918,10 @@ fn is_replace_all(event: &crossterm::event::KeyEvent) -> bool {
 
 #[derive(Clone)]
 struct FileServices {
+    project: Entity<Project>,
     buffer_store: Entity<BufferStore>,
     worktree_store: Entity<WorktreeStore>,
+    _lsp_store: Entity<project::lsp_store::LspStore>,
     file_system: Arc<dyn Fs>,
     language_registry: Arc<LanguageRegistry>,
 }
@@ -2639,10 +5959,317 @@ impl DocumentState {
 
 struct DocumentTab {
     document: OpenDocument,
+    multi_buffer: Option<MultiBufferTab>,
     editor_window: WindowHandle<Editor>,
+    completion_generation: Arc<AtomicU64>,
     viewport: Viewport,
     manual_vertical_scroll: bool,
     last_cursor: Option<Cursor>,
+}
+
+struct MultiBufferTab {
+    title: String,
+    buffer: Entity<MultiBuffer>,
+    source_buffers: Vec<Entity<Buffer>>,
+    pending_rename: Option<PendingRename>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct RenamePreviewEdit {
+    start_line: u32,
+    start_character: u32,
+    end_line: u32,
+    end_character: u32,
+    new_text: String,
+    annotation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RenamePreviewOperation {
+    Text {
+        path: PathBuf,
+        version: Option<i32>,
+        edits: Vec<RenamePreviewEdit>,
+    },
+    Create {
+        path: PathBuf,
+        overwrite: bool,
+        ignore_if_exists: bool,
+        annotation_id: Option<String>,
+    },
+    Rename {
+        old_path: PathBuf,
+        new_path: PathBuf,
+        overwrite: bool,
+        ignore_if_exists: bool,
+        annotation_id: Option<String>,
+    },
+    Delete {
+        path: PathBuf,
+        recursive: bool,
+        ignore_if_not_exists: bool,
+        annotation_id: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct RenamePreviewAnnotation {
+    label: String,
+    needs_confirmation: bool,
+    description: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct RenamePreviewPlan {
+    operations: Vec<RenamePreviewOperation>,
+    annotations: BTreeMap<String, RenamePreviewAnnotation>,
+    signature: String,
+    edit_count: usize,
+    file_operation_count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RenameBufferGuard {
+    path: PathBuf,
+    buffer: Entity<Buffer>,
+    text_hash: String,
+}
+
+#[derive(Clone, Debug)]
+struct RenamePathGuard {
+    path: PathBuf,
+    fingerprint: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRename {
+    origin_buffer: Entity<Buffer>,
+    origin_point: language::Point,
+    new_name: String,
+    language_server_id: lsp::LanguageServerId,
+    workspace_root: PathBuf,
+    plan: RenamePreviewPlan,
+    buffer_guards: Vec<RenameBufferGuard>,
+    path_guards: Vec<RenamePathGuard>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NavigationPoint {
+    buffer_id: u64,
+    path: Option<PathBuf>,
+    row: u32,
+    column: u32,
+    viewport: Viewport,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NavigationHistory {
+    back: Vec<NavigationPoint>,
+    forward: Vec<NavigationPoint>,
+}
+
+#[derive(Debug, Default)]
+struct ProjectEditHistory {
+    undo: Vec<ProjectTransaction>,
+    redo: Vec<ProjectTransaction>,
+}
+
+impl ProjectEditHistory {
+    fn push(&mut self, transaction: ProjectTransaction) -> usize {
+        let buffer_count = transaction.0.len();
+        if buffer_count > 0 {
+            if self.undo.len() == 100 {
+                self.undo.remove(0);
+            }
+            self.undo.push(transaction);
+            self.redo.clear();
+        }
+        buffer_count
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    fn undo_latest(&mut self, cx: &mut gpui::AsyncApp) -> Result<usize> {
+        let transaction = self
+            .undo
+            .last()
+            .cloned()
+            .context("no project edit transaction to undo")?;
+        ensure!(
+            transaction.0.iter().all(|(buffer, edit)| {
+                buffer.read_with(cx, |buffer, _| buffer.get_transaction(edit.id).is_some())
+            }),
+            "one or more project edit transactions are no longer in buffer history"
+        );
+        for (buffer, edit) in &transaction.0 {
+            ensure!(
+                buffer.update(cx, |buffer, cx| buffer.undo_transaction(edit.id, cx)),
+                "failed to undo project edit for buffer {:?}",
+                buffer.entity_id()
+            );
+        }
+        let buffer_count = transaction.0.len();
+        self.undo.pop();
+        self.redo.push(transaction);
+        Ok(buffer_count)
+    }
+
+    fn redo_latest(&mut self, cx: &mut gpui::AsyncApp) -> Result<usize> {
+        let transaction = self
+            .redo
+            .last()
+            .cloned()
+            .context("no project edit transaction to redo")?;
+        for (buffer, edit) in &transaction.0 {
+            ensure!(
+                buffer.update(cx, |buffer, cx| buffer.redo_to_transaction(edit.id, cx)),
+                "failed to redo project edit for buffer {:?}",
+                buffer.entity_id()
+            );
+        }
+        let buffer_count = transaction.0.len();
+        self.redo.pop();
+        if self.undo.len() == 100 {
+            self.undo.remove(0);
+        }
+        self.undo.push(transaction);
+        Ok(buffer_count)
+    }
+}
+
+impl NavigationHistory {
+    const LIMIT: usize = 100;
+
+    fn record_jump(&mut self, origin: NavigationPoint) {
+        if self.back.last() != Some(&origin) {
+            self.back.push(origin);
+            if self.back.len() > Self::LIMIT {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
+
+    fn go_back(&mut self, current: NavigationPoint) -> Option<NavigationPoint> {
+        let target = self.back.pop()?;
+        if self.forward.last() != Some(&current) {
+            self.forward.push(current);
+        }
+        Some(target)
+    }
+
+    fn go_forward(&mut self, current: NavigationPoint) -> Option<NavigationPoint> {
+        let target = self.forward.pop()?;
+        if self.back.last() != Some(&current) {
+            self.back.push(current);
+        }
+        Some(target)
+    }
+
+    fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+}
+
+fn current_navigation_point(
+    tabs: &[DocumentTab],
+    active_index: usize,
+    cx: &mut gpui::AsyncApp,
+) -> Result<NavigationPoint> {
+    let tab = tabs.get(active_index).context("active tab is missing")?;
+    let (buffer, point, buffer_id) = active_editor_buffer_point(&tab.editor_window, cx)?;
+    let path = buffer.read_with(cx, |buffer, cx| {
+        buffer.file().map(|file| {
+            file.as_local()
+                .map(|file| file.abs_path(cx))
+                .unwrap_or_else(|| file.full_path(cx))
+        })
+    });
+    Ok(NavigationPoint {
+        buffer_id,
+        path,
+        row: point.row,
+        column: point.column,
+        viewport: tab.viewport,
+    })
+}
+
+async fn navigate_to_history_point(
+    point: &NavigationPoint,
+    repository: Option<&RepositorySession>,
+    services: &FileServices,
+    tabs: &mut Vec<DocumentTab>,
+    active_index: &mut usize,
+    redraw_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<String> {
+    if let Some(index) = tabs.iter().position(|tab| {
+        tab.multi_buffer.is_none()
+            && tab
+                .document
+                .buffer
+                .read_with(cx, |buffer, _| buffer.remote_id().to_proto())
+                == point.buffer_id
+    }) {
+        *active_index = index;
+        move_caret_to_text_position(
+            &tabs[index].editor_window,
+            TextPosition {
+                row: usize::try_from(point.row).unwrap_or(usize::MAX),
+                byte_column: usize::try_from(point.column).unwrap_or(usize::MAX),
+            },
+            cx,
+        )?;
+    } else {
+        let path = point
+            .path
+            .as_deref()
+            .context("navigation target buffer is closed and has no path")?;
+        navigate_to_path_position(
+            path,
+            &path.display().to_string(),
+            point.row,
+            point.column,
+            repository,
+            services,
+            tabs,
+            active_index,
+            redraw_sender,
+            cx,
+        )
+        .await?;
+    }
+
+    let cursor = tabs[*active_index]
+        .editor_window
+        .update(cx, |editor, _window, cx| {
+            let display = editor.display_snapshot(cx);
+            display_cursor_at(&display, editor.selections.newest_display(&display).head())
+        })?;
+    tabs[*active_index].viewport = point.viewport;
+    tabs[*active_index].manual_vertical_scroll = true;
+    tabs[*active_index].last_cursor = Some(cursor);
+    Ok(format!(
+        "navigated to {}:{}:{}",
+        point
+            .path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "untitled buffer".to_owned()),
+        point.row.saturating_add(1),
+        point.column.saturating_add(1)
+    ))
 }
 
 struct CapturedEditorFrame {
@@ -2652,25 +6279,1701 @@ struct CapturedEditorFrame {
 }
 
 fn project_searchable_buffers(tabs: &[DocumentTab]) -> Vec<Entity<Buffer>> {
+    let mut seen = HashSet::new();
     tabs.iter()
         .filter(|tab| tab.document.project_searchable)
-        .map(|tab| tab.document.buffer.clone())
+        .flat_map(|tab| {
+            tab.multi_buffer.as_ref().map_or_else(
+                || vec![tab.document.buffer.clone()],
+                |multi_buffer| multi_buffer.source_buffers.clone(),
+            )
+        })
+        .filter(|buffer| seen.insert(buffer.entity_id()))
         .collect()
 }
 
-fn file_services(cx: &mut App) -> FileServices {
-    let file_system: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
-    file_services_with_fs(cx, file_system)
+fn open_file_buffers(tabs: &[DocumentTab], cx: &gpui::AsyncApp) -> Vec<(PathBuf, Entity<Buffer>)> {
+    let mut seen = HashSet::new();
+    tabs.iter()
+        .flat_map(|tab| {
+            tab.multi_buffer.as_ref().map_or_else(
+                || vec![tab.document.buffer.clone()],
+                |multi_buffer| multi_buffer.source_buffers.clone(),
+            )
+        })
+        .filter(|buffer| seen.insert(buffer.entity_id()))
+        .filter_map(|buffer| {
+            let path = buffer.read_with(cx, |buffer, cx| {
+                buffer.file().map(|file| {
+                    file.as_local()
+                        .map(|file| file.abs_path(cx))
+                        .unwrap_or_else(|| file.full_path(cx))
+                })
+            })?;
+            Some((path, buffer))
+        })
+        .collect()
 }
 
-fn file_services_with_fs(cx: &mut App, file_system: Arc<dyn Fs>) -> FileServices {
-    let language_registry = native_language_registry(cx);
-    let worktree_store =
-        cx.new(|cx| WorktreeStore::local(true, file_system.clone(), WorktreeIdCounter::get(cx)));
-    let buffer_store = cx.new(|cx| BufferStore::local(worktree_store.clone(), cx));
+fn action_context(
+    repository: Option<&RepositorySession>,
+    document: &OpenDocument,
+    services: &FileServices,
+    navigation_history: &NavigationHistory,
+    cx: &gpui::AsyncApp,
+) -> ActionContext {
+    let adapter_names = document.buffer.read_with(cx, |buffer, _| {
+        buffer
+            .language()
+            .map(|language| {
+                services
+                    .language_registry
+                    .lsp_adapters(&language.name())
+                    .into_iter()
+                    .map(|adapter| adapter.name().to_string())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default()
+    });
+    let has_language_server = services.project.read_with(cx, |project, cx| {
+        project.language_server_statuses(cx).any(|(_, status)| {
+            status.process_id.is_some() && adapter_names.contains(&status.name.to_string())
+        })
+    });
+    ActionContext {
+        has_repository: repository.is_some(),
+        has_file: document_state(document, cx).has_file(),
+        has_language_server,
+        can_navigate_back: navigation_history.can_go_back(),
+        can_navigate_forward: navigation_history.can_go_forward(),
+    }
+}
+
+fn active_editor_buffer_point(
+    editor_window: &WindowHandle<Editor>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(Entity<Buffer>, language::Point, u64)> {
+    editor_window.update(cx, |editor, _window, cx| -> Result<_> {
+        let display = editor.display_snapshot(cx);
+        let head = editor
+            .selections
+            .newest::<MultiBufferOffset>(&display)
+            .head();
+        let (buffer, point) = editor
+            .buffer()
+            .read(cx)
+            .point_to_buffer_point(head, cx)
+            .context("cursor does not belong to an editor buffer")?;
+        let buffer_id = buffer.read(cx).remote_id().to_proto();
+        Ok((buffer, point, buffer_id))
+    })?
+}
+
+fn start_hover_request(
+    editor_window: &WindowHandle<Editor>,
+    project: &Entity<Project>,
+    generation: u64,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<u64> {
+    let (buffer, point, buffer_id) = active_editor_buffer_point(editor_window, cx)?;
+    let request = project.update(cx, |project, cx| project.hover(&buffer, point, cx));
+    cx.spawn(async move |_cx| {
+        let items = request
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|hover| hover.contents)
+            .take(MAX_LANGUAGE_RESPONSE_ITEMS)
+            .map(|block| {
+                let kind = match block.kind {
+                    project::HoverBlockKind::PlainText => "PlainText".to_owned(),
+                    project::HoverBlockKind::Markdown => "Markdown".to_owned(),
+                    project::HoverBlockKind::Code { language } => format!("Code: {language}"),
+                };
+                HoverPresentation {
+                    kind: bounded_terminal_text(&kind),
+                    text: bounded_terminal_text(&block.text),
+                }
+            })
+            .collect();
+        let _ = event_sender
+            .send(TerminalEvent::HoverFinished {
+                buffer_id,
+                generation,
+                result: Ok(items),
+            })
+            .await;
+    })
+    .detach();
+    Ok(buffer_id)
+}
+
+fn rename_preparation(
+    buffer: &Entity<Buffer>,
+    point: language::Point,
+    response: PrepareRenameResponse,
+    cx: &gpui::AsyncApp,
+) -> Result<RenamePreparation> {
+    buffer.read_with(cx, |buffer, _| {
+        let snapshot = buffer.snapshot();
+        let mut range = match response {
+            PrepareRenameResponse::Success(range) => {
+                range.start.to_offset(&snapshot)..range.end.to_offset(&snapshot)
+            }
+            PrepareRenameResponse::OnlyUnpreparedRenameSupported => {
+                snapshot.surrounding_word(point, None).0
+            }
+            PrepareRenameResponse::InvalidPosition => {
+                bail!("the language server rejected this cursor position")
+            }
+        };
+        if range.is_empty() {
+            range = snapshot.surrounding_word(point, None).0;
+        }
+        ensure!(
+            range.start <= range.end && range.end <= snapshot.len(),
+            "language server returned an invalid rename range"
+        );
+        let placeholder = snapshot.text_for_range(range.clone()).collect::<String>();
+        ensure!(!placeholder.is_empty(), "rename target is empty");
+        Ok(RenamePreparation {
+            placeholder,
+            start: range.start,
+            end: range.end,
+        })
+    })
+}
+
+fn start_rename_request(
+    editor_window: &WindowHandle<Editor>,
+    project: &Entity<Project>,
+    generation: u64,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(Entity<Buffer>, language::Point, u64)> {
+    let (buffer, point, buffer_id) = active_editor_buffer_point(editor_window, cx)?;
+    let request = project.update(cx, |project, cx| {
+        project.prepare_rename(buffer.clone(), point, cx)
+    });
+    let result_buffer = buffer.clone();
+    cx.spawn(async move |cx| {
+        let result = match request.await {
+            Ok(response) => rename_preparation(&result_buffer, point, response, cx)
+                .map_err(|error| format!("{error:#}")),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        let _ = event_sender
+            .send(TerminalEvent::RenamePrepared {
+                buffer_id,
+                generation,
+                result,
+            })
+            .await;
+    })
+    .detach();
+    Ok((buffer, point, buffer_id))
+}
+
+fn request_rename_workspace_edit(
+    project: &Entity<Project>,
+    buffer: &Entity<Buffer>,
+    point: language::Point,
+    new_name: String,
+    expected_server_id: Option<lsp::LanguageServerId>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(lsp::LanguageServerId, Task<Result<lsp::WorkspaceEdit>>)> {
+    let (path, position) = buffer.read_with(cx, |buffer, cx| -> Result<_> {
+        let path = buffer
+            .file()
+            .map(|file| {
+                file.as_local()
+                    .map(|file| file.abs_path(cx))
+                    .unwrap_or_else(|| file.full_path(cx))
+            })
+            .context("rename requires a file-backed buffer")?;
+        Ok((path, point.to_point_utf16(buffer)))
+    })?;
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+    let server = lsp_store.update(cx, |lsp_store, cx| {
+        if let Some(server_id) = expected_server_id {
+            lsp_store
+                .language_server_for_id(server_id)
+                .with_context(|| {
+                    format!("language server {server_id} stopped before rename acceptance")
+                })
+        } else {
+            buffer.update(cx, |buffer, cx| {
+                lsp_store
+                    .running_language_servers_for_local_buffer(buffer, cx)
+                    .next()
+                    .map(|(_, server)| server.clone())
+                    .context("no running language server serves the rename buffer")
+            })
+        }
+    })?;
+    let server_id = server.server_id();
+    let params = lsp::RenameParams {
+        text_document_position: lsp::TextDocumentPositionParams {
+            text_document: lsp::TextDocumentIdentifier {
+                uri: project::lsp_command::file_path_to_lsp_url(&path)?,
+            },
+            position: language::point_to_lsp(position),
+        },
+        new_name,
+        work_done_progress_params: Default::default(),
+    };
+    let task = cx.background_spawn(async move {
+        server
+            .request::<lsp::request::Rename>(params, RENAME_PREVIEW_TIMEOUT)
+            .await
+            .into_response()
+            .context("request rename WorkspaceEdit preview")
+            .map(Option::unwrap_or_default)
+    });
+    Ok((server_id, task))
+}
+
+fn start_rename_preview_request(
+    project: &Entity<Project>,
+    buffer: Entity<Buffer>,
+    point: language::Point,
+    buffer_id: u64,
+    generation: u64,
+    new_name: String,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let (server_id, request) =
+        request_rename_workspace_edit(project, &buffer, point, new_name.clone(), None, cx)?;
+    cx.spawn(async move |_cx| {
+        let result = request
+            .await
+            .map(|edit| (server_id, edit))
+            .map_err(|error| format!("{error:#}"));
+        let _ = event_sender
+            .send(TerminalEvent::RenamePreviewFinished {
+                buffer_id,
+                generation,
+                new_name,
+                result,
+            })
+            .await;
+        drop(buffer);
+    })
+    .detach();
+    Ok(())
+}
+
+fn start_code_actions_request(
+    editor_window: &WindowHandle<Editor>,
+    project: &Entity<Project>,
+    generation: u64,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(Entity<Buffer>, u64)> {
+    let (buffer, point, buffer_id) = active_editor_buffer_point(editor_window, cx)?;
+    let request = project.update(cx, |project, cx| {
+        project.code_actions(&buffer, point..point, None, cx)
+    });
+    let result_buffer = buffer.clone();
+    cx.spawn(async move |_cx| {
+        let result = request
+            .await
+            .map(|actions| actions.unwrap_or_default())
+            .map_err(|error| format!("{error:#}"));
+        let _ = event_sender
+            .send(TerminalEvent::CodeActionsFinished {
+                buffer_id,
+                generation,
+                result,
+            })
+            .await;
+        drop(result_buffer);
+    })
+    .detach();
+    Ok((buffer, buffer_id))
+}
+
+fn format_active_editor(
+    editor_window: &WindowHandle<Editor>,
+    project: &Entity<Project>,
+    selection_only: bool,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Task<Result<ProjectTransaction>>> {
+    let (buffers, target) = editor_window.update(cx, |editor, _window, cx| -> Result<_> {
+        if !selection_only {
+            let buffers = editor
+                .buffer()
+                .read(cx)
+                .all_buffers_iter()
+                .collect::<Vec<_>>();
+            ensure!(!buffers.is_empty(), "editor has no buffers to format");
+            return Ok((buffers, LspFormatTarget::Buffers));
+        }
+
+        let display = editor.display_snapshot(cx);
+        let selection = editor.selections.newest::<MultiBufferOffset>(&display);
+        ensure!(!selection.is_empty(), "select a range before formatting it");
+        let multi_buffer = editor.buffer().read(cx);
+        let (start_buffer, start) = multi_buffer
+            .point_to_buffer_point(selection.start, cx)
+            .context("selection start does not belong to an editor buffer")?;
+        let (end_buffer, end) = multi_buffer
+            .point_to_buffer_point(selection.end, cx)
+            .context("selection end does not belong to an editor buffer")?;
+        ensure!(
+            start_buffer == end_buffer,
+            "range formatting cannot span multiple buffers"
+        );
+        let (buffer_id, range) = start_buffer.read_with(cx, |buffer, _| {
+            let snapshot = buffer.snapshot();
+            (
+                buffer.remote_id(),
+                snapshot.anchor_before(start)..snapshot.anchor_after(end),
+            )
+        });
+        let mut ranges = BTreeMap::new();
+        ranges.insert(buffer_id, vec![range]);
+        Ok((vec![start_buffer], LspFormatTarget::Ranges(ranges)))
+    })??;
+    let buffers = buffers.into_iter().collect();
+    Ok(project.update(cx, |project, cx| {
+        project.format(buffers, target, true, FormatTrigger::Manual, cx)
+    }))
+}
+
+fn location_presentations(
+    locations: Vec<language::Location>,
+    root: Option<&Path>,
+    cx: &gpui::AsyncApp,
+) -> Vec<LocationPresentation> {
+    locations
+        .into_iter()
+        .take(MAX_LANGUAGE_RESPONSE_ITEMS)
+        .map(|location| {
+            location.buffer.read_with(cx, |buffer, cx| {
+                let snapshot = buffer.snapshot();
+                let start = location.range.start.to_point(&snapshot);
+                let end = location.range.end.to_point(&snapshot);
+                let path = buffer
+                    .file()
+                    .map(|file| {
+                        file.as_local()
+                            .map(|file| file.abs_path(cx))
+                            .unwrap_or_else(|| file.full_path(cx))
+                    })
+                    .unwrap_or_else(|| PathBuf::from("<untitled>"));
+                let line_len = snapshot.line_len(start.row);
+                let snippet = snapshot
+                    .text_for_range(
+                        language::Point::new(start.row, 0)
+                            ..language::Point::new(start.row, line_len),
+                    )
+                    .flat_map(|chunk| chunk.chars())
+                    .skip_while(|character| character.is_whitespace())
+                    .take(200)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned();
+                LocationPresentation {
+                    label: bounded_terminal_text(&diagnostic_label(&path, root)),
+                    path,
+                    row: start.row,
+                    column: start.column,
+                    end_row: end.row,
+                    end_column: end.column,
+                    snippet,
+                }
+            })
+        })
+        .collect()
+}
+
+fn spawn_location_links_request(
+    request: Task<Result<Option<Vec<project::LocationLink>>>>,
+    kind: LocationRequestKind,
+    buffer_id: u64,
+    generation: u64,
+    root: Option<PathBuf>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) {
+    cx.spawn(async move |cx| {
+        let result = request
+            .await
+            .map(|links| {
+                location_presentations(
+                    links
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|link| link.target)
+                        .collect(),
+                    root.as_deref(),
+                    cx,
+                )
+            })
+            .map_err(|error| format!("{error:#}"));
+        let _ = event_sender
+            .send(TerminalEvent::LocationsFinished {
+                buffer_id,
+                generation,
+                kind,
+                result,
+            })
+            .await;
+    })
+    .detach();
+}
+
+fn spawn_locations_request(
+    request: Task<Result<Option<Vec<language::Location>>>>,
+    kind: LocationRequestKind,
+    buffer_id: u64,
+    generation: u64,
+    root: Option<PathBuf>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) {
+    cx.spawn(async move |cx| {
+        let result = request
+            .await
+            .map(|locations| {
+                location_presentations(locations.unwrap_or_default(), root.as_deref(), cx)
+            })
+            .map_err(|error| format!("{error:#}"));
+        let _ = event_sender
+            .send(TerminalEvent::LocationsFinished {
+                buffer_id,
+                generation,
+                kind,
+                result,
+            })
+            .await;
+    })
+    .detach();
+}
+
+fn start_locations_request(
+    kind: LocationRequestKind,
+    editor_window: &WindowHandle<Editor>,
+    project: &Entity<Project>,
+    generation: u64,
+    root: Option<PathBuf>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<u64> {
+    let (buffer, point, buffer_id) = active_editor_buffer_point(editor_window, cx)?;
+    match kind {
+        LocationRequestKind::Definition => {
+            let request = project.update(cx, |project, cx| project.definitions(&buffer, point, cx));
+            spawn_location_links_request(
+                request,
+                kind,
+                buffer_id,
+                generation,
+                root,
+                event_sender,
+                cx,
+            );
+        }
+        LocationRequestKind::TypeDefinition => {
+            let request = project.update(cx, |project, cx| {
+                project.type_definitions(&buffer, point, cx)
+            });
+            spawn_location_links_request(
+                request,
+                kind,
+                buffer_id,
+                generation,
+                root,
+                event_sender,
+                cx,
+            );
+        }
+        LocationRequestKind::References => {
+            let request = project.update(cx, |project, cx| project.references(&buffer, point, cx));
+            spawn_locations_request(request, kind, buffer_id, generation, root, event_sender, cx);
+        }
+        LocationRequestKind::ProjectSymbols => {
+            bail!("project symbols require a query request")
+        }
+    }
+    Ok(buffer_id)
+}
+
+fn start_project_symbols_request(
+    project: &Entity<Project>,
+    buffer_id: u64,
+    generation: u64,
+    query: String,
+    root: Option<PathBuf>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let request = project.update(cx, |project, cx| project.symbols(&query, cx));
+    let project = project.clone();
+    cx.spawn(async move |cx| {
+        let result: Result<Vec<LocationPresentation>> = async {
+            let symbols = request.await.context("request project symbols")?;
+            let mut items = Vec::with_capacity(symbols.len().min(PROJECT_SYMBOL_LIMIT));
+            for symbol in symbols.into_iter().take(PROJECT_SYMBOL_LIMIT) {
+                let buffer = project
+                    .update(cx, |project, cx| {
+                        project.open_buffer_for_symbol(&symbol, cx)
+                    })
+                    .await
+                    .with_context(|| format!("open project symbol {}", symbol.name))?;
+                let item = buffer.read_with(cx, |buffer, cx| {
+                    let snapshot = buffer.snapshot();
+                    let start = snapshot.unclipped_point_utf16_to_point(symbol.range.start);
+                    let end = snapshot.unclipped_point_utf16_to_point(symbol.range.end);
+                    let path = buffer
+                        .file()
+                        .map(|file| {
+                            file.as_local()
+                                .map(|file| file.abs_path(cx))
+                                .unwrap_or_else(|| file.full_path(cx))
+                        })
+                        .unwrap_or_else(|| PathBuf::from("<untitled>"));
+                    let line_len = snapshot.line_len(start.row);
+                    let line = snapshot
+                        .text_for_range(
+                            language::Point::new(start.row, 0)
+                                ..language::Point::new(start.row, line_len),
+                        )
+                        .flat_map(|chunk| chunk.chars())
+                        .skip_while(|character| character.is_whitespace())
+                        .take(160)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned();
+                    LocationPresentation {
+                        label: diagnostic_label(&path, root.as_deref()),
+                        path,
+                        row: start.row,
+                        column: start.column,
+                        end_row: end.row,
+                        end_column: end.column,
+                        snippet: if line.is_empty() {
+                            symbol.name.clone()
+                        } else {
+                            format!("{} — {line}", symbol.name)
+                        },
+                    }
+                });
+                items.push(item);
+            }
+            Ok(items)
+        }
+        .await;
+        let _ = event_sender
+            .send(TerminalEvent::LocationsFinished {
+                buffer_id,
+                generation,
+                kind: LocationRequestKind::ProjectSymbols,
+                result: result.map_err(|error| format!("{error:#}")),
+            })
+            .await;
+    })
+    .detach();
+}
+
+fn diagnostic_severity_name(severity: lsp::DiagnosticSeverity) -> &'static str {
+    if severity == lsp::DiagnosticSeverity::ERROR {
+        "E"
+    } else if severity == lsp::DiagnosticSeverity::WARNING {
+        "W"
+    } else if severity == lsp::DiagnosticSeverity::INFORMATION {
+        "I"
+    } else {
+        "H"
+    }
+}
+
+fn diagnostic_severity_rank(severity: &str) -> u8 {
+    match severity {
+        "E" => 0,
+        "W" => 1,
+        "I" => 2,
+        _ => 3,
+    }
+}
+
+fn diagnostic_label(path: &Path, root: Option<&Path>) -> String {
+    root.and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn diagnostic_presentations(
+    path: &Path,
+    root: Option<&Path>,
+    buffer: &Buffer,
+    limit: usize,
+) -> Vec<DiagnosticPresentation> {
+    let label = bounded_terminal_text(&diagnostic_label(path, root));
+    let snapshot = buffer.snapshot();
+    snapshot
+        .diagnostics_in_range::<_, language::Point>(0..buffer.len(), false)
+        .filter(|entry| entry.diagnostic.is_primary)
+        .take(limit)
+        .map(|entry| DiagnosticPresentation {
+            path: path.to_path_buf(),
+            label: label.clone(),
+            row: entry.range.start.row,
+            column: entry.range.start.column,
+            severity: diagnostic_severity_name(entry.diagnostic.severity).to_owned(),
+            message: bounded_terminal_text(&entry.diagnostic.message),
+            source: entry
+                .diagnostic
+                .source
+                .as_deref()
+                .map(bounded_terminal_text),
+        })
+        .collect()
+}
+
+async fn collect_project_diagnostics(
+    project: Entity<Project>,
+    root: Option<PathBuf>,
+    open_buffers: Vec<(PathBuf, Entity<Buffer>)>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Vec<DiagnosticPresentation>> {
+    let mut items = Vec::new();
+    let mut visited = HashSet::new();
+    for (path, buffer) in open_buffers {
+        if items.len() >= MAX_LANGUAGE_RESPONSE_ITEMS {
+            break;
+        }
+        visited.insert(path.clone());
+        let remaining = MAX_LANGUAGE_RESPONSE_ITEMS.saturating_sub(items.len());
+        items.extend(buffer.read_with(cx, |buffer, _| {
+            diagnostic_presentations(&path, root.as_deref(), buffer, remaining)
+        }));
+    }
+
+    let targets = project.read_with(cx, |project, cx| {
+        let mut targets = BTreeMap::new();
+        for (project_path, _, summary) in project.diagnostic_summaries(false, cx) {
+            if summary.error_count == 0 && summary.warning_count == 0 {
+                continue;
+            }
+            if let Some(path) = project.absolute_path(&project_path, cx) {
+                targets.entry(path).or_insert(project_path);
+            }
+        }
+        targets.into_iter().collect::<Vec<_>>()
+    });
+    for (path, project_path) in targets {
+        if items.len() >= MAX_LANGUAGE_RESPONSE_ITEMS {
+            break;
+        }
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await
+            .with_context(|| format!("open diagnostic buffer {}", path.display()))?;
+        let remaining = MAX_LANGUAGE_RESPONSE_ITEMS.saturating_sub(items.len());
+        items.extend(buffer.read_with(cx, |buffer, _| {
+            diagnostic_presentations(&path, root.as_deref(), buffer, remaining)
+        }));
+    }
+
+    items.sort_by(|left, right| {
+        diagnostic_severity_rank(&left.severity)
+            .cmp(&diagnostic_severity_rank(&right.severity))
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.row.cmp(&right.row))
+            .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.message.cmp(&right.message))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    items.dedup();
+    items.truncate(MAX_LANGUAGE_RESPONSE_ITEMS);
+    Ok(items)
+}
+
+fn confined_workspace_path(canonical_root: &Path, path: &Path) -> Result<PathBuf> {
+    ensure!(
+        canonical_root.is_absolute() && path.is_absolute(),
+        "rename paths must be absolute"
+    );
+    ensure!(
+        !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir)),
+        "rename path contains a parent traversal: {}",
+        path.display()
+    );
+
+    let mut existing_ancestor = path;
+    while std::fs::symlink_metadata(existing_ancestor).is_err() {
+        existing_ancestor = existing_ancestor.parent().with_context(|| {
+            format!("rename target has no existing ancestor: {}", path.display())
+        })?;
+    }
+    let canonical_ancestor = std::fs::canonicalize(existing_ancestor).with_context(|| {
+        format!(
+            "could not resolve rename path ancestor {}",
+            existing_ancestor.display()
+        )
+    })?;
+    ensure!(
+        canonical_ancestor.starts_with(canonical_root),
+        "language server proposed a path outside the workspace: {}",
+        path.display()
+    );
+    if path.exists() {
+        let canonical_path = std::fs::canonicalize(path)
+            .with_context(|| format!("could not resolve rename path {}", path.display()))?;
+        ensure!(
+            canonical_path.starts_with(canonical_root),
+            "language server proposed a symlink escape outside the workspace: {}",
+            path.display()
+        );
+    }
+    Ok(path.to_path_buf())
+}
+
+fn workspace_path_from_uri(canonical_root: &Path, uri: &lsp::Uri) -> Result<PathBuf> {
+    let path = uri
+        .to_file_path()
+        .map_err(|()| anyhow::anyhow!("rename WorkspaceEdit contains a non-file URI: {uri}"))?;
+    confined_workspace_path(canonical_root, &path)
+}
+
+fn rename_preview_edit(edit: &lsp::Edit) -> Result<RenamePreviewEdit> {
+    let (edit, annotation_id) = match edit {
+        lsp::Edit::Plain(edit) => (edit, None),
+        lsp::Edit::Annotated(edit) => (&edit.text_edit, Some(edit.annotation_id.clone())),
+        lsp::Edit::Snippet(_) => {
+            bail!("rename preview rejects snippet edits because their expansion is focus-dependent")
+        }
+    };
+    ensure!(
+        (edit.range.start.line, edit.range.start.character)
+            <= (edit.range.end.line, edit.range.end.character),
+        "rename WorkspaceEdit contains an inverted text range"
+    );
+    Ok(RenamePreviewEdit {
+        start_line: edit.range.start.line,
+        start_character: edit.range.start.character,
+        end_line: edit.range.end.line,
+        end_character: edit.range.end.character,
+        new_text: edit.new_text.clone(),
+        annotation_id,
+    })
+}
+
+fn normalize_rename_workspace_edit(
+    edit: &lsp::WorkspaceEdit,
+    workspace_root: &Path,
+) -> Result<RenamePreviewPlan> {
+    let canonical_root = std::fs::canonicalize(workspace_root).with_context(|| {
+        format!(
+            "could not resolve rename workspace root {}",
+            workspace_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_root.is_dir(),
+        "rename workspace root is not a directory: {}",
+        canonical_root.display()
+    );
+
+    let annotations = edit
+        .change_annotations
+        .as_ref()
+        .map(|annotations| {
+            annotations
+                .iter()
+                .map(|(id, annotation)| {
+                    (
+                        id.clone(),
+                        RenamePreviewAnnotation {
+                            label: annotation.label.clone(),
+                            needs_confirmation: annotation.needs_confirmation.unwrap_or(false),
+                            description: annotation.description.clone(),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let text_operation = |text_edit: &lsp::TextDocumentEdit| -> Result<_> {
+        let path = workspace_path_from_uri(&canonical_root, &text_edit.text_document.uri)?;
+        let edits = text_edit
+            .edits
+            .iter()
+            .map(rename_preview_edit)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(RenamePreviewOperation::Text {
+            path,
+            version: text_edit.text_document.version,
+            edits,
+        })
+    };
+
+    let mut operations = Vec::new();
+    if let Some(document_changes) = &edit.document_changes {
+        let document_changes = match document_changes {
+            lsp::DocumentChanges::Edits(edits) => edits
+                .iter()
+                .cloned()
+                .map(lsp::DocumentChangeOperation::Edit)
+                .collect::<Vec<_>>(),
+            lsp::DocumentChanges::Operations(operations) => operations.clone(),
+        };
+        for operation in &document_changes {
+            let operation = match operation {
+                lsp::DocumentChangeOperation::Edit(edit) => text_operation(edit)?,
+                lsp::DocumentChangeOperation::Op(lsp::ResourceOp::Create(create)) => {
+                    let path = workspace_path_from_uri(&canonical_root, &create.uri)?;
+                    ensure!(
+                        path != canonical_root,
+                        "rename may not create the workspace root"
+                    );
+                    RenamePreviewOperation::Create {
+                        path,
+                        overwrite: create
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.overwrite)
+                            .unwrap_or(false),
+                        ignore_if_exists: create
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.ignore_if_exists)
+                            .unwrap_or(false),
+                        annotation_id: create.annotation_id.clone(),
+                    }
+                }
+                lsp::DocumentChangeOperation::Op(lsp::ResourceOp::Rename(rename)) => {
+                    let old_path = workspace_path_from_uri(&canonical_root, &rename.old_uri)?;
+                    let new_path = workspace_path_from_uri(&canonical_root, &rename.new_uri)?;
+                    ensure!(
+                        old_path != canonical_root && new_path != canonical_root,
+                        "rename may not move the workspace root"
+                    );
+                    RenamePreviewOperation::Rename {
+                        old_path,
+                        new_path,
+                        overwrite: rename
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.overwrite)
+                            .unwrap_or(false),
+                        ignore_if_exists: rename
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.ignore_if_exists)
+                            .unwrap_or(false),
+                        annotation_id: rename.annotation_id.clone(),
+                    }
+                }
+                lsp::DocumentChangeOperation::Op(lsp::ResourceOp::Delete(delete)) => {
+                    let path = workspace_path_from_uri(&canonical_root, &delete.uri)?;
+                    ensure!(
+                        path != canonical_root,
+                        "rename may not delete the workspace root"
+                    );
+                    RenamePreviewOperation::Delete {
+                        path,
+                        recursive: delete
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.recursive)
+                            .unwrap_or(false),
+                        ignore_if_not_exists: delete
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.ignore_if_not_exists)
+                            .unwrap_or(false),
+                        annotation_id: delete
+                            .options
+                            .as_ref()
+                            .and_then(|options| options.annotation_id.clone()),
+                    }
+                }
+            };
+            operations.push(operation);
+        }
+    } else if let Some(changes) = &edit.changes {
+        let mut changes = changes
+            .iter()
+            .map(|(uri, edits)| {
+                let path = workspace_path_from_uri(&canonical_root, uri)?;
+                let edits = edits
+                    .iter()
+                    .cloned()
+                    .map(lsp::Edit::Plain)
+                    .collect::<Vec<_>>();
+                Ok((path, edits))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        changes.sort_by(|left, right| left.0.cmp(&right.0));
+        for (path, edits) in changes {
+            operations.push(RenamePreviewOperation::Text {
+                path,
+                version: None,
+                edits: edits
+                    .iter()
+                    .map(rename_preview_edit)
+                    .collect::<Result<Vec<_>>>()?,
+            });
+        }
+    }
+
+    ensure!(
+        !operations.is_empty(),
+        "language server returned an empty rename WorkspaceEdit"
+    );
+    ensure!(
+        operations.len() <= MAX_RENAME_PREVIEW_OPERATIONS,
+        "rename WorkspaceEdit has too many operations ({} > {})",
+        operations.len(),
+        MAX_RENAME_PREVIEW_OPERATIONS
+    );
+    let edit_count = operations
+        .iter()
+        .map(|operation| match operation {
+            RenamePreviewOperation::Text { edits, .. } => edits.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    ensure!(
+        edit_count <= MAX_RENAME_PREVIEW_OPERATIONS,
+        "rename WorkspaceEdit has too many text edits ({edit_count} > {MAX_RENAME_PREVIEW_OPERATIONS})"
+    );
+    let file_operation_count = operations
+        .iter()
+        .filter(|operation| !matches!(operation, RenamePreviewOperation::Text { .. }))
+        .count();
+    let serialized = serde_json::to_vec(&(&operations, &annotations))
+        .context("serialize normalized rename WorkspaceEdit")?;
+    ensure!(
+        serialized.len() <= MAX_RENAME_PREVIEW_BYTES,
+        "rename WorkspaceEdit preview is too large ({} bytes > {})",
+        serialized.len(),
+        MAX_RENAME_PREVIEW_BYTES
+    );
+    let signature = format!("{:x}", Sha256::digest(&serialized));
+    Ok(RenamePreviewPlan {
+        operations,
+        annotations,
+        signature,
+        edit_count,
+        file_operation_count,
+    })
+}
+
+fn utf16_position_to_byte(text: &str, line: u32, character: u32) -> Result<usize> {
+    let target_line = usize::try_from(line).context("LSP line does not fit usize")?;
+    let mut line_start = 0usize;
+    for _ in 0..target_line {
+        let newline = text[line_start..]
+            .find('\n')
+            .with_context(|| format!("LSP line {line} is past the end of the buffer"))?;
+        line_start = line_start.saturating_add(newline).saturating_add(1);
+    }
+    let line_end = text[line_start..]
+        .find('\n')
+        .map(|offset| line_start + offset)
+        .unwrap_or(text.len());
+    let line_text = &text[line_start..line_end];
+    let mut utf16_column = 0u32;
+    for (byte, scalar) in line_text.char_indices() {
+        if utf16_column == character {
+            return Ok(line_start + byte);
+        }
+        let next = utf16_column.saturating_add(scalar.len_utf16() as u32);
+        ensure!(
+            character >= next,
+            "LSP position splits a UTF-16 surrogate pair at {line}:{character}"
+        );
+        utf16_column = next;
+    }
+    ensure!(
+        utf16_column == character,
+        "LSP column {character} is past line {line} (UTF-16 length {utf16_column})"
+    );
+    Ok(line_end)
+}
+
+fn preview_fragment(text: &str) -> String {
+    let mut fragment = String::new();
+    let mut truncated = false;
+    for (index, character) in text.chars().enumerate() {
+        if index == 240 {
+            truncated = true;
+            break;
+        }
+        match character {
+            '\n' => fragment.push_str("\\n"),
+            '\r' => fragment.push_str("\\r"),
+            '\t' => fragment.push_str("\\t"),
+            character => fragment.push(character),
+        }
+    }
+    if truncated {
+        fragment.push('…');
+    }
+    fragment
+}
+
+fn apply_preview_text_edits(
+    text: &str,
+    edits: &[RenamePreviewEdit],
+) -> Result<(String, Vec<String>)> {
+    let mut resolved = edits
+        .iter()
+        .map(|edit| {
+            let start = utf16_position_to_byte(text, edit.start_line, edit.start_character)?;
+            let end = utf16_position_to_byte(text, edit.end_line, edit.end_character)?;
+            ensure!(start <= end, "rename text edit has an inverted byte range");
+            Ok((start, end, edit))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    resolved.sort_by_key(|(start, end, _)| (*start, *end));
+    for pair in resolved.windows(2) {
+        ensure!(
+            pair[0].1 <= pair[1].0,
+            "rename WorkspaceEdit contains overlapping text edits"
+        );
+    }
+    let summaries = resolved
+        .iter()
+        .map(|(start, end, edit)| {
+            format!(
+                "@@ {}:{}-{}:{} @@\n- {}\n+ {}{}",
+                edit.start_line.saturating_add(1),
+                edit.start_character.saturating_add(1),
+                edit.end_line.saturating_add(1),
+                edit.end_character.saturating_add(1),
+                preview_fragment(&text[*start..*end]),
+                preview_fragment(&edit.new_text),
+                edit.annotation_id
+                    .as_ref()
+                    .map(|id| format!("  [{id}]"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut updated = text.to_owned();
+    for (start, end, edit) in resolved.into_iter().rev() {
+        let replacement = edit.new_text.replace("\r\n", "\n").replace('\r', "\n");
+        updated.replace_range(start..end, &replacement);
+    }
+    Ok((updated, summaries))
+}
+
+fn rename_plan_paths(plan: &RenamePreviewPlan) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for operation in &plan.operations {
+        match operation {
+            RenamePreviewOperation::Text { path, .. }
+            | RenamePreviewOperation::Create { path, .. }
+            | RenamePreviewOperation::Delete { path, .. } => {
+                paths.insert(path.clone());
+            }
+            RenamePreviewOperation::Rename {
+                old_path, new_path, ..
+            } => {
+                paths.insert(old_path.clone());
+                paths.insert(new_path.clone());
+            }
+        }
+    }
+    paths
+}
+
+fn path_fingerprint(path: &Path) -> String {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let kind = if metadata.file_type().is_symlink() {
+                "symlink"
+            } else if metadata.is_dir() {
+                "directory"
+            } else if metadata.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let canonical = std::fs::canonicalize(path)
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            format!("{kind}:{}:{modified}:{canonical}", metadata.len())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => "missing".to_owned(),
+        Err(error) => format!("error:{:?}:{error}", error.kind()),
+    }
+}
+
+fn rename_workspace_root(
+    repository: Option<&RepositorySession>,
+    origin_buffer: &Entity<Buffer>,
+    cx: &gpui::AsyncApp,
+) -> Result<PathBuf> {
+    if let Some(repository) = repository {
+        return Ok(repository.root.canonical_path().to_path_buf());
+    }
+    let origin_path = origin_buffer.read_with(cx, |buffer, cx| {
+        buffer.file().map(|file| {
+            file.as_local()
+                .map(|file| file.abs_path(cx))
+                .unwrap_or_else(|| file.full_path(cx))
+        })
+    });
+    let parent = origin_path
+        .as_deref()
+        .and_then(Path::parent)
+        .context("rename origin has no workspace directory")?;
+    std::fs::canonicalize(parent)
+        .with_context(|| format!("could not resolve rename root {}", parent.display()))
+}
+
+async fn create_rename_preview_tab(
+    origin_buffer: Entity<Buffer>,
+    origin_point: language::Point,
+    new_name: String,
+    language_server_id: lsp::LanguageServerId,
+    edit: lsp::WorkspaceEdit,
+    workspace_root: PathBuf,
+    repository: Option<&RepositorySession>,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<DocumentTab> {
+    let plan = normalize_rename_workspace_edit(&edit, &workspace_root)?;
+    let paths = rename_plan_paths(&plan);
+    let path_guards = paths
+        .iter()
+        .map(|path| RenamePathGuard {
+            path: path.clone(),
+            fingerprint: path_fingerprint(path),
+        })
+        .collect::<Vec<_>>();
+
+    let mut source_by_path = BTreeMap::<PathBuf, Entity<Buffer>>::new();
+    for path in &paths {
+        let metadata = services
+            .file_system
+            .metadata(path)
+            .await
+            .with_context(|| format!("could not inspect rename target {}", path.display()))?;
+        let Some(metadata) = metadata else {
+            continue;
+        };
+        if metadata.is_dir {
+            continue;
+        }
+        let document = if let Some(repository) = repository {
+            open_repository_document(path, repository, services, cx).await?
+        } else {
+            cx.update(|cx| open_document(Some(path.clone()), services.clone(), cx))
+                .await?
+        };
+        source_by_path.insert(path.clone(), document.buffer);
+    }
+
+    let buffer_guards = source_by_path
+        .iter()
+        .map(|(path, buffer)| RenameBufferGuard {
+            path: path.clone(),
+            buffer: buffer.clone(),
+            text_hash: buffer.read_with(cx, |buffer, _| {
+                format!("{:x}", Sha256::digest(buffer.text().as_bytes()))
+            }),
+        })
+        .collect::<Vec<_>>();
+    let mut virtual_texts = source_by_path
+        .iter()
+        .map(|(path, buffer)| {
+            (
+                path.clone(),
+                buffer.read_with(cx, |buffer, _| buffer.text()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let path_label = |path: &Path| {
+        path.strip_prefix(&workspace_root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let mut preview_documents = Vec::with_capacity(plan.operations.len());
+    for operation in &plan.operations {
+        let preview = match operation {
+            RenamePreviewOperation::Text {
+                path,
+                version,
+                edits,
+            } => {
+                let text = virtual_texts.entry(path.clone()).or_default();
+                let (updated, summaries) = apply_preview_text_edits(text, edits)?;
+                *text = updated;
+                format!(
+                    "TEXT {}{}\n{}\n",
+                    path_label(path),
+                    version
+                        .map(|version| format!(" @ version {version}"))
+                        .unwrap_or_default(),
+                    summaries.join("\n")
+                )
+            }
+            RenamePreviewOperation::Create {
+                path,
+                overwrite,
+                ignore_if_exists,
+                annotation_id,
+            } => {
+                if *overwrite || !virtual_texts.contains_key(path) {
+                    virtual_texts.insert(path.clone(), String::new());
+                }
+                format!(
+                    "CREATE {}  overwrite={} ignore_if_exists={}{}\n",
+                    path_label(path),
+                    overwrite,
+                    ignore_if_exists,
+                    annotation_id
+                        .as_ref()
+                        .map(|id| format!("  [{id}]"))
+                        .unwrap_or_default()
+                )
+            }
+            RenamePreviewOperation::Rename {
+                old_path,
+                new_path,
+                overwrite,
+                ignore_if_exists,
+                annotation_id,
+            } => {
+                if let Some(text) = virtual_texts.remove(old_path) {
+                    virtual_texts.insert(new_path.clone(), text);
+                }
+                format!(
+                    "RENAME {} → {}  overwrite={} ignore_if_exists={}{}\n",
+                    path_label(old_path),
+                    path_label(new_path),
+                    overwrite,
+                    ignore_if_exists,
+                    annotation_id
+                        .as_ref()
+                        .map(|id| format!("  [{id}]"))
+                        .unwrap_or_default()
+                )
+            }
+            RenamePreviewOperation::Delete {
+                path,
+                recursive,
+                ignore_if_not_exists,
+                annotation_id,
+            } => {
+                virtual_texts.remove(path);
+                format!(
+                    "DELETE {}  recursive={} ignore_if_not_exists={}{}\n",
+                    path_label(path),
+                    recursive,
+                    ignore_if_not_exists,
+                    annotation_id
+                        .as_ref()
+                        .map(|id| format!("  [{id}]"))
+                        .unwrap_or_default()
+                )
+            }
+        };
+        preview_documents.push(preview);
+    }
+    if !plan.annotations.is_empty() {
+        let mut annotations = String::from("CHANGE ANNOTATIONS\n");
+        for (id, annotation) in &plan.annotations {
+            annotations.push_str(&format!(
+                "[{id}] {}  confirmation={}{}\n",
+                annotation.label,
+                annotation.needs_confirmation,
+                annotation
+                    .description
+                    .as_ref()
+                    .map(|description| format!(" — {description}"))
+                    .unwrap_or_default()
+            ));
+        }
+        preview_documents.push(annotations);
+    }
+    let preview_bytes = preview_documents.iter().map(String::len).sum::<usize>();
+    ensure!(
+        preview_bytes <= MAX_RENAME_PREVIEW_BYTES,
+        "rendered rename preview is too large ({preview_bytes} bytes > {MAX_RENAME_PREVIEW_BYTES})"
+    );
+
+    let preview_buffers = preview_documents
+        .into_iter()
+        .map(|text| {
+            cx.update(|cx| {
+                cx.new(|cx| {
+                    let mut buffer = Buffer::local(text, cx);
+                    buffer.set_capability(Capability::ReadOnly, cx);
+                    buffer
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let title = format!(
+        "Rename Preview: {new_name} ({} edit(s), {} file op(s))",
+        plan.edit_count, plan.file_operation_count
+    );
+    let multi_buffer_title = title.clone();
+    let preview_buffer_entities = preview_buffers.clone();
+    let multi_buffer = cx.update(|cx| {
+        cx.new(|cx| {
+            let mut multi_buffer =
+                MultiBuffer::new(Capability::ReadOnly).with_title(multi_buffer_title);
+            for buffer in preview_buffer_entities {
+                let max_point = buffer.read(cx).max_point();
+                multi_buffer.set_excerpts_for_buffer(
+                    buffer,
+                    vec![language::Point::zero()..max_point],
+                    0,
+                    cx,
+                );
+            }
+            multi_buffer
+        })
+    });
+    let editor_window = cx.update(|cx| {
+        open_multibuffer_editor_with_project(multi_buffer.clone(), services.project.clone(), cx)
+    })?;
+    let source_buffers = source_by_path.values().cloned().collect::<Vec<_>>();
+    let document = OpenDocument {
+        buffer: origin_buffer.clone(),
+        untitled_label: None,
+        project_searchable: false,
+    };
+    Ok(DocumentTab {
+        document,
+        multi_buffer: Some(MultiBufferTab {
+            title,
+            buffer: multi_buffer,
+            source_buffers,
+            pending_rename: Some(PendingRename {
+                origin_buffer,
+                origin_point,
+                new_name,
+                language_server_id,
+                workspace_root,
+                plan,
+                buffer_guards,
+                path_guards,
+            }),
+        }),
+        editor_window,
+        completion_generation: Arc::new(AtomicU64::new(0)),
+        viewport: Viewport::default(),
+        manual_vertical_scroll: false,
+        last_cursor: None,
+    })
+}
+
+fn validate_pending_rename_guards(pending: &PendingRename, cx: &gpui::AsyncApp) -> Result<()> {
+    for guard in &pending.buffer_guards {
+        let current_hash = guard.buffer.read_with(cx, |buffer, _| {
+            format!("{:x}", Sha256::digest(buffer.text().as_bytes()))
+        });
+        ensure!(
+            current_hash == guard.text_hash,
+            "{} changed after the rename preview was built; preview again",
+            guard.path.display()
+        );
+    }
+    for guard in &pending.path_guards {
+        ensure!(
+            path_fingerprint(&guard.path) == guard.fingerprint,
+            "{} changed on disk after the rename preview was built; preview again",
+            guard.path.display()
+        );
+    }
+    Ok(())
+}
+
+async fn create_locations_multibuffer_tab(
+    title: String,
+    items: &[LocationPresentation],
+    repository: Option<&RepositorySession>,
+    services: &FileServices,
+    redraw_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<DocumentTab> {
+    ensure!(
+        !items.is_empty(),
+        "cannot create an empty MultiBuffer result"
+    );
+    let mut grouped = BTreeMap::<PathBuf, Vec<Range<language::Point>>>::new();
+    for item in items {
+        grouped.entry(item.path.clone()).or_default().push(
+            language::Point::new(item.row, item.column)
+                ..language::Point::new(item.end_row, item.end_column),
+        );
+    }
+
+    let mut documents = Vec::with_capacity(grouped.len());
+    let mut excerpt_sources = Vec::with_capacity(grouped.len());
+    for (path, ranges) in grouped {
+        let document = if let Some(repository) = repository {
+            open_repository_document(&path, repository, services, cx).await?
+        } else {
+            cx.update(|cx| open_document(Some(path.clone()), services.clone(), cx))
+                .await?
+        };
+        let ranges = document.buffer.read_with(cx, |buffer, _| {
+            let snapshot = buffer.snapshot();
+            ranges
+                .into_iter()
+                .map(|range| {
+                    snapshot.clip_point(range.start, Bias::Left)
+                        ..snapshot.clip_point(range.end, Bias::Right)
+                })
+                .collect::<Vec<_>>()
+        });
+        excerpt_sources.push((document.buffer.clone(), ranges));
+        documents.push(document);
+    }
+
+    let source_buffers = excerpt_sources
+        .iter()
+        .map(|(buffer, _)| buffer.clone())
+        .collect::<Vec<_>>();
+    let multi_buffer_title = title.clone();
+    let multi_buffer = cx.update(|cx| {
+        cx.new(|cx| {
+            let mut multi_buffer =
+                MultiBuffer::new(Capability::ReadWrite).with_title(multi_buffer_title);
+            for (buffer, ranges) in excerpt_sources {
+                multi_buffer.set_excerpts_for_buffer(buffer, ranges, 2, cx);
+            }
+            multi_buffer
+        })
+    });
+    let editor_window = cx.update(|cx| {
+        open_multibuffer_editor_with_project(multi_buffer.clone(), services.project.clone(), cx)
+    })?;
+    let completion_generation = Arc::new(AtomicU64::new(0));
+    let completion_provider = Rc::new(TerminalCompletionProvider {
+        project: services.project.clone(),
+        generation: completion_generation.clone(),
+        event_sender: redraw_sender.clone(),
+    });
+    let buffer_store = services.buffer_store.clone();
+    editor_window.update(cx, |editor, _window, cx| {
+        editor.set_completion_provider(Some(completion_provider));
+        for source_buffer in &source_buffers {
+            let source_buffer_id = source_buffer.read(cx).remote_id().to_proto();
+            let source_buffer = source_buffer.clone();
+            let buffer_store = buffer_store.clone();
+            let redraw_sender = redraw_sender.clone();
+            cx.subscribe(
+                &source_buffer,
+                move |_, reload_buffer, event, cx| match event {
+                    BufferEvent::ReloadNeeded => {
+                        let reload = buffer_store.update(cx, |store, cx| {
+                            store.reload_buffers(
+                                [reload_buffer.clone()].into_iter().collect(),
+                                true,
+                                cx,
+                            )
+                        });
+                        let sender = redraw_sender.clone();
+                        cx.spawn(async move |_, _| {
+                            let result = reload
+                                .await
+                                .map(|_| ())
+                                .map_err(|error| format!("{error:#}"));
+                            let _ = sender
+                                .send(TerminalEvent::ReloadFinished {
+                                    buffer_id: source_buffer_id,
+                                    result,
+                                })
+                                .await;
+                        })
+                        .detach();
+                    }
+                    BufferEvent::LanguageChanged(_)
+                    | BufferEvent::Reparsed
+                    | BufferEvent::FileHandleChanged
+                    | BufferEvent::Reloaded
+                    | BufferEvent::DirtyChanged
+                    | BufferEvent::Saved
+                    | BufferEvent::CapabilityChanged => {
+                        let _ = redraw_sender.try_send(TerminalEvent::Redraw);
+                    }
+                    _ => {}
+                },
+            )
+            .detach();
+        }
+    })?;
+
+    let document = documents
+        .into_iter()
+        .next()
+        .context("MultiBuffer result lost its primary document")?;
+    Ok(DocumentTab {
+        document,
+        multi_buffer: Some(MultiBufferTab {
+            title,
+            buffer: multi_buffer,
+            source_buffers,
+            pending_rename: None,
+        }),
+        editor_window,
+        completion_generation,
+        viewport: Viewport::default(),
+        manual_vertical_scroll: false,
+        last_cursor: None,
+    })
+}
+
+async fn navigate_to_path_position(
+    path: &Path,
+    label: &str,
+    row: u32,
+    column: u32,
+    repository: Option<&RepositorySession>,
+    services: &FileServices,
+    tabs: &mut Vec<DocumentTab>,
+    active_index: &mut usize,
+    redraw_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<String> {
+    let existing = tabs.iter().position(|tab| {
+        tab.multi_buffer.is_none()
+            && document_state(&tab.document, cx).path.as_deref() == Some(path)
+    });
+    if let Some(index) = existing {
+        *active_index = index;
+    } else {
+        let document = if let Some(repository) = repository {
+            open_repository_document(path, repository, services, cx).await?
+        } else {
+            cx.update(|cx| open_document(Some(path.to_path_buf()), services.clone(), cx))
+                .await?
+        };
+        tabs.push(create_document_tab(document, services, redraw_sender, cx)?);
+        *active_index = tabs.len().saturating_sub(1);
+    }
+
+    tabs[*active_index].manual_vertical_scroll = false;
+    tabs[*active_index].last_cursor = None;
+    move_caret_to_text_position(
+        &tabs[*active_index].editor_window,
+        TextPosition {
+            row: usize::try_from(row).unwrap_or(usize::MAX),
+            byte_column: usize::try_from(column).unwrap_or(usize::MAX),
+        },
+        cx,
+    )?;
+    Ok(format!(
+        "opened {label}:{}:{}",
+        row.saturating_add(1),
+        column.saturating_add(1)
+    ))
+}
+
+async fn navigate_to_diagnostic(
+    item: &DiagnosticPresentation,
+    repository: Option<&RepositorySession>,
+    services: &FileServices,
+    tabs: &mut Vec<DocumentTab>,
+    active_index: &mut usize,
+    redraw_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<String> {
+    navigate_to_path_position(
+        &item.path,
+        &item.label,
+        item.row,
+        item.column,
+        repository,
+        services,
+        tabs,
+        active_index,
+        redraw_sender,
+        cx,
+    )
+    .await
+}
+
+async fn navigate_to_location(
+    item: &LocationPresentation,
+    repository: Option<&RepositorySession>,
+    services: &FileServices,
+    tabs: &mut Vec<DocumentTab>,
+    active_index: &mut usize,
+    redraw_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<String> {
+    navigate_to_path_position(
+        &item.path,
+        &item.label,
+        item.row,
+        item.column,
+        repository,
+        services,
+        tabs,
+        active_index,
+        redraw_sender,
+        cx,
+    )
+    .await
+}
+
+fn file_services(cx: &mut App) -> FileServices {
+    let file_system = cx.global::<ProjectRuntime>().file_system.clone();
+    file_services_with_fs(cx, file_system, true)
+}
+
+fn file_services_with_fs(
+    cx: &mut App,
+    file_system: Arc<dyn Fs>,
+    watch_global_configs: bool,
+) -> FileServices {
+    let runtime = cx.global::<ProjectRuntime>().clone();
+    let language_registry = runtime.language_registry.clone();
+    let project = Project::local(
+        runtime.client.clone(),
+        runtime.node_runtime.clone(),
+        runtime.user_store.clone(),
+        language_registry.clone(),
+        file_system.clone(),
+        Some(env::vars().collect()),
+        LocalProjectFlags {
+            init_worktree_trust: true,
+            watch_global_configs,
+        },
+        cx,
+    );
+    let (worktree_store, buffer_store, lsp_store) = project.read_with(cx, |project, _| {
+        (
+            project.worktree_store(),
+            project.buffer_store().clone(),
+            project.lsp_store(),
+        )
+    });
     FileServices {
+        project,
         buffer_store,
         worktree_store,
+        _lsp_store: lsp_store,
         file_system,
         language_registry,
     }
@@ -2777,9 +8080,9 @@ async fn prepare_repository(
     let root = RepositoryRoot::open(root_path, services.file_system.as_ref()).await?;
     let canonical_root = root.canonical_path().to_path_buf();
     let (worktree, relative_path) = services
-        .worktree_store
-        .update(cx, |store, cx| {
-            store.find_or_create_worktree(&canonical_root, true, cx)
+        .project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(&canonical_root, true, cx)
         })
         .await
         .with_context(|| {
@@ -2882,15 +8185,17 @@ async fn open_single_file_document(
         canonical_path.display()
     );
 
-    let (worktree, relative_path) = services
+    // A repository-external file is intentionally a non-scanning single-file
+    // worktree. Existing repository worktrees keep their scanners; this
+    // prevents the outside file from probing or watching its parent and
+    // siblings.
+    services
         .worktree_store
-        .update(cx, |store, cx| {
-            // A repository-external file is intentionally a non-scanning
-            // single-file worktree. Existing repository worktrees keep their
-            // scanners; this prevents the outside file from probing or
-            // watching its parent and siblings.
-            store.disable_scanner();
-            store.find_or_create_worktree(canonical_path, false, cx)
+        .update(cx, |store, _| store.disable_scanner());
+    let (worktree, relative_path) = services
+        .project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(canonical_path, false, cx)
         })
         .await
         .with_context(|| {
@@ -3190,8 +8495,10 @@ fn open_document(
     };
 
     cx.spawn(async move |cx| {
-        let project_path = project_path_for_file(&path, &services, cx).await?;
-        load_project_document(project_path, &path, &services, cx).await
+        let (project_path, worktree) = project_path_for_file(&path, &services, cx).await?;
+        let document = load_project_document(project_path, &path, &services, cx).await;
+        drop(worktree);
+        document
     })
 }
 
@@ -3216,6 +8523,51 @@ fn document_state(document: &OpenDocument, cx: &gpui::AsyncApp) -> DocumentState
     })
 }
 
+fn aggregate_buffer_state(buffers: &[Entity<Buffer>], cx: &gpui::AsyncApp) -> DocumentState {
+    let mut state = DocumentState {
+        path: None,
+        dirty: false,
+        conflict: false,
+        deleted: false,
+    };
+    for buffer in buffers {
+        buffer.read_with(cx, |buffer, cx| {
+            if state.path.is_none() {
+                state.path = buffer.file().map(|file| {
+                    file.as_local()
+                        .map(|file| file.abs_path(cx))
+                        .unwrap_or_else(|| file.full_path(cx))
+                });
+            }
+            state.dirty |= buffer.is_dirty();
+            state.conflict |= buffer.has_conflict();
+            state.deleted |= buffer
+                .file()
+                .is_some_and(|file| file.disk_state().is_deleted());
+        });
+    }
+    state
+}
+
+fn tab_state(tab: &DocumentTab, cx: &gpui::AsyncApp) -> DocumentState {
+    if tab
+        .multi_buffer
+        .as_ref()
+        .is_some_and(|multi_buffer| multi_buffer.pending_rename.is_some())
+    {
+        return DocumentState {
+            path: None,
+            dirty: false,
+            conflict: false,
+            deleted: false,
+        };
+    }
+    tab.multi_buffer.as_ref().map_or_else(
+        || document_state(&tab.document, cx),
+        |multi_buffer| aggregate_buffer_state(&multi_buffer.source_buffers, cx),
+    )
+}
+
 fn document_label(document: &OpenDocument, abbreviated: bool, cx: &gpui::AsyncApp) -> String {
     let state = document_state(document, cx);
     if let Some(path) = state.path {
@@ -3237,7 +8589,7 @@ async fn project_path_for_file(
     path: &Path,
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
-) -> Result<ProjectPath> {
+) -> Result<(ProjectPath, Entity<project::Worktree>)> {
     // A single-file worktree cannot observe a rename to a sibling. Use the
     // nearest existing directory, while never turning the filesystem root into
     // a recursive worktree. This also covers nested Save As paths.
@@ -3257,75 +8609,21 @@ async fn project_path_for_file(
         }
     };
 
-    services
-        .worktree_store
-        .update(cx, |store, cx| {
-            store.find_or_create_worktree(&worktree_root, false, cx)
+    let (worktree, _) = services
+        .project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(&worktree_root, false, cx)
         })
         .await
         .with_context(|| format!("could not create a worktree for {}", path.display()))?;
 
-    services
+    let project_path = services
         .worktree_store
         .read_with(cx, |store, cx| {
             store.project_path_for_absolute_path(path, cx)
         })
-        .with_context(|| format!("worktree does not contain {}", path.display()))
-}
-
-fn native_language_registry(cx: &mut App) -> Arc<LanguageRegistry> {
-    let registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
-    registry.set_theme(cx.theme().clone());
-    registry.register_native_grammars(grammars::native_grammars());
-
-    for name in [
-        "bash",
-        "c",
-        "cpp",
-        "css",
-        "diff",
-        "go",
-        "gomod",
-        "gowork",
-        "json",
-        "jsonc",
-        "markdown",
-        "markdown-inline",
-        "python",
-        "rust",
-        "tsx",
-        "typescript",
-        "javascript",
-        "jsdoc",
-        "regex",
-        "yaml",
-        "gitcommit",
-        "zed-keybind-context",
-    ] {
-        let config = grammars::load_config(name);
-        registry.register_language(
-            config.name.clone(),
-            config.grammar.clone(),
-            config.matcher.clone(),
-            config.hidden,
-            None,
-            Arc::new(move || {
-                let config = config.clone();
-                // Keep query compilation behind the registry loader. Eagerly constructing every
-                // Language adds several seconds to startup even though one file selects one root.
-                Box::pin(async move {
-                    Ok(LoadedLanguage {
-                        config,
-                        queries: grammars::load_queries(name),
-                        context_provider: None,
-                        toolchain_provider: None,
-                        manifest_name: None,
-                    })
-                })
-            }),
-        );
-    }
-    registry
+        .with_context(|| format!("worktree does not contain {}", path.display()))?;
+    Ok((project_path, worktree))
 }
 
 async fn assign_file_language(
@@ -3365,6 +8663,201 @@ async fn save_document(
         .with_context(|| format!("could not save {}", path.display()))
 }
 
+struct SaveFormatPlan {
+    buffers: Vec<Entity<Buffer>>,
+    target: LspFormatTarget,
+}
+
+fn save_format_plan(
+    buffers: &[Entity<Buffer>],
+    multi_buffer: &Entity<MultiBuffer>,
+    project: &Entity<Project>,
+    cx: &App,
+) -> Option<SaveFormatPlan> {
+    let multi_buffer_snapshot = multi_buffer.read(cx).snapshot(cx);
+    let project = project.read(cx);
+    let git_store = project.git_store().read(cx);
+    let mut fall_back_to_full_format = false;
+    let mut modified_ranges = Vec::new();
+
+    for buffer_entity in buffers {
+        let buffer = buffer_entity.read(cx);
+        let settings = LanguageSettings::for_buffer(buffer, cx);
+        match settings.format_on_save {
+            FormatOnSave::On | FormatOnSave::Off => {
+                return Some(SaveFormatPlan {
+                    buffers: buffers.to_vec(),
+                    target: LspFormatTarget::Buffers,
+                });
+            }
+            FormatOnSave::Modifications | FormatOnSave::ModificationsIfAvailable => {}
+        }
+
+        let Some(diff_snapshot) = git_store
+            .get_unstaged_diff(buffer.remote_id(), cx)
+            .map(|diff| diff.read(cx).snapshot(cx))
+        else {
+            if settings.format_on_save == FormatOnSave::ModificationsIfAvailable {
+                fall_back_to_full_format = true;
+            }
+            continue;
+        };
+
+        let buffer_snapshot = buffer.snapshot();
+        let mut merged: Vec<Range<text::Anchor>> = Vec::new();
+        for hunk in diff_snapshot.hunks(&buffer_snapshot) {
+            let range = hunk.buffer_range;
+            if range.start.cmp(&range.end, &buffer_snapshot).is_eq() {
+                continue;
+            }
+            let start_point = range.start.to_point(&buffer_snapshot);
+            let end_point = range.end.to_point(&buffer_snapshot);
+            let start_row = start_point.row;
+            let end_row = if end_point.column == 0 && end_point.row > start_point.row {
+                end_point.row - 1
+            } else {
+                end_point.row
+            };
+            let line_start = text::Point::new(start_row, 0);
+            let line_end = text::Point::new(end_row, buffer_snapshot.line_len(end_row));
+            let expanded =
+                buffer_snapshot.anchor_before(line_start)..buffer_snapshot.anchor_after(line_end);
+            if let Some(last) = merged.last_mut() {
+                let last_end_point = last.end.to_point(&buffer_snapshot);
+                if start_row <= last_end_point.row + 1 {
+                    if expanded.end.to_point(&buffer_snapshot) > last_end_point {
+                        last.end = expanded.end;
+                    }
+                    continue;
+                }
+            }
+            merged.push(expanded);
+        }
+
+        let flat_anchors = merged
+            .iter()
+            .flat_map(|range| [range.start, range.end])
+            .collect::<Vec<_>>();
+        let multi_buffer_anchors =
+            multi_buffer_snapshot.text_anchors_to_visible_anchors(flat_anchors);
+        for pair in multi_buffer_anchors.chunks_exact(2) {
+            let (Some(start), Some(end)) = (&pair[0], &pair[1]) else {
+                continue;
+            };
+            modified_ranges.push(
+                editor::ToPoint::to_point(start, &multi_buffer_snapshot)
+                    ..editor::ToPoint::to_point(end, &multi_buffer_snapshot),
+            );
+        }
+    }
+
+    if fall_back_to_full_format {
+        return Some(SaveFormatPlan {
+            buffers: buffers.to_vec(),
+            target: LspFormatTarget::Buffers,
+        });
+    }
+    if modified_ranges.is_empty() {
+        return None;
+    }
+
+    let multi_buffer = multi_buffer.read(cx);
+    let snapshot = multi_buffer.read(cx);
+    let mut buffer_id_to_ranges = BTreeMap::new();
+    for selection_range in modified_ranges {
+        for (buffer_snapshot, buffer_range, _) in
+            snapshot.range_to_buffer_ranges(selection_range.start..selection_range.end)
+        {
+            let buffer_id = buffer_snapshot.remote_id();
+            let start = buffer_snapshot.anchor_before(buffer_range.start);
+            let end = buffer_snapshot.anchor_after(buffer_range.end);
+            buffer_id_to_ranges
+                .entry(buffer_id)
+                .or_insert_with(Vec::new)
+                .push(start..end);
+        }
+    }
+    let targeted_buffers = buffer_id_to_ranges
+        .keys()
+        .filter_map(|buffer_id| multi_buffer.buffer(*buffer_id))
+        .collect::<Vec<_>>();
+    if targeted_buffers.is_empty() {
+        None
+    } else {
+        Some(SaveFormatPlan {
+            buffers: targeted_buffers,
+            target: LspFormatTarget::Ranges(buffer_id_to_ranges),
+        })
+    }
+}
+
+async fn save_tab(
+    tab: &DocumentTab,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    if let Some(multi_buffer) = &tab.multi_buffer {
+        ensure!(
+            multi_buffer.pending_rename.is_none(),
+            "rename previews cannot be saved; Enter accepts or Esc rejects"
+        );
+    }
+
+    // Build the same format-on-save target as Zed's Editor Item, but await the
+    // Project format task without `log_err()`. The graphical Editor intentionally
+    // logs formatter errors and proceeds with the write; the console contract keeps
+    // the dirty buffer and reports the failed save instead. Saving with formatting
+    // disabled afterward also guarantees at most one formatting transaction.
+    let (editor_buffer, format_plan) = tab.editor_window.update(cx, |editor, _window, cx| {
+        let editor_buffer = editor.buffer().clone();
+        let is_singleton = editor_buffer.read(cx).is_singleton();
+        let mut buffers = Vec::new();
+        for handle in editor_buffer.read(cx).all_buffers() {
+            let handle = handle.read(cx).base_buffer().unwrap_or(handle.clone());
+            let should_save = is_singleton || {
+                let buffer = handle.read(cx);
+                buffer.is_dirty() && buffer.file().is_some()
+            };
+            if should_save && !buffers.contains(&handle) {
+                buffers.push(handle);
+            }
+        }
+        let format_plan = save_format_plan(&buffers, &editor_buffer, &services.project, cx);
+        (editor_buffer, format_plan)
+    })?;
+    if let Some(format_plan) = format_plan {
+        let format = services.project.update(cx, |project, cx| {
+            project.format(
+                format_plan.buffers.into_iter().collect(),
+                format_plan.target,
+                true,
+                FormatTrigger::Save,
+                cx,
+            )
+        });
+        let transaction = format.await.context("could not format before save")?;
+        if !editor_buffer.read_with(cx, |buffer, _| buffer.is_singleton()) {
+            editor_buffer.update(cx, |buffer, cx| {
+                buffer.push_transaction(&transaction.0, cx);
+            });
+        }
+    }
+
+    let save = tab.editor_window.update(cx, |editor, window, cx| {
+        workspace::item::Item::save(
+            editor,
+            workspace::item::SaveOptions {
+                format: false,
+                ..workspace::item::SaveOptions::default()
+            },
+            services.project.clone(),
+            window,
+            cx,
+        )
+    })?;
+    save.await.context("could not format and save editor tab")
+}
+
 async fn reload_document(
     document: &OpenDocument,
     services: &FileServices,
@@ -3380,6 +8873,32 @@ async fn reload_document(
         })
         .await
         .with_context(|| format!("could not reload {}", path.display()))?;
+    Ok(())
+}
+
+async fn reload_tab(
+    tab: &DocumentTab,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let Some(multi_buffer) = &tab.multi_buffer else {
+        return reload_document(&tab.document, services, cx).await;
+    };
+    ensure!(
+        multi_buffer.pending_rename.is_none(),
+        "rename previews cannot be reloaded; Enter accepts or Esc rejects"
+    );
+    services
+        .buffer_store
+        .update(cx, |store, cx| {
+            store.reload_buffers(
+                multi_buffer.source_buffers.iter().cloned().collect(),
+                true,
+                cx,
+            )
+        })
+        .await
+        .context("could not reload MultiBuffer sources")?;
     Ok(())
 }
 
@@ -3414,7 +8933,7 @@ async fn save_document_as(
         }
     }
 
-    let project_path = project_path_for_file(&path, services, cx).await?;
+    let (project_path, worktree) = project_path_for_file(&path, services, cx).await?;
     let open_buffer = services
         .buffer_store
         .read_with(cx, |store, _| store.get_by_path(&project_path));
@@ -3428,6 +8947,7 @@ async fn save_document_as(
         })
         .await
         .with_context(|| format!("could not save {}", path.display()))?;
+    drop(worktree);
 
     Ok(SaveAsOutcome::Saved(path))
 }
@@ -3691,6 +9211,277 @@ fn close_search(editor_window: &WindowHandle<Editor>, cx: &mut gpui::AsyncApp) -
     })
 }
 
+fn load_keymap_bindings(content: &str, cx: &App) -> Result<Vec<KeyBinding>> {
+    match settings::KeymapFile::load(content, cx) {
+        settings::KeymapFileLoadResult::Success { key_bindings } => Ok(key_bindings),
+        settings::KeymapFileLoadResult::SomeFailedToLoad { error_message, .. } => {
+            bail!("keymap contains an invalid binding: {error_message}")
+        }
+        settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+            Err(error).context("parse keymap JSON")
+        }
+    }
+}
+
+fn apply_keymaps(user_bindings: Vec<KeyBinding>, cx: &mut App) -> Result<()> {
+    let defaults =
+        settings::KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx)
+            .context("load Zed default keymap")?;
+    let terminal_defaults = load_keymap_bindings(
+        &actions::terminalize_keymap_action_ids(TERMINAL_DEFAULT_KEYMAP),
+        cx,
+    )
+    .context("load zec terminal keymap")?;
+    cx.clear_key_bindings();
+    cx.bind_keys(defaults);
+    cx.bind_keys(terminal_defaults);
+    cx.bind_keys(user_bindings);
+    Ok(())
+}
+
+fn start_terminal_action_interceptor(
+    pending_actions: Rc<RefCell<VecDeque<actions::TerminalAction>>>,
+    event_sender: Option<async_channel::Sender<TerminalEvent>>,
+    cx: &mut App,
+) {
+    macro_rules! register {
+        ($action_type:ty, $terminal_action:expr) => {{
+            let pending_actions = pending_actions.clone();
+            let event_sender = event_sender.clone();
+            cx.on_action::<$action_type>(move |_, cx| {
+                pending_actions.borrow_mut().push_back($terminal_action);
+                if let Some(event_sender) = &event_sender {
+                    let _ = event_sender.try_send(TerminalEvent::Action($terminal_action));
+                }
+                // These actions belong to the terminal workspace reducer. Do
+                // not let a hidden Editor or a future GUI shell run them too.
+                cx.stop_propagation();
+            });
+        }};
+    }
+
+    use actions::TerminalAction as Action;
+    use terminal_gpui_actions as gpui_action;
+    register!(gpui_action::CommandPalette, Action::CommandPalette);
+    register!(gpui_action::NewFile, Action::NewFile);
+    register!(gpui_action::OpenFile, Action::OpenFile);
+    register!(gpui_action::QuickOpen, Action::QuickOpen);
+    register!(gpui_action::ProjectSearch, Action::ProjectSearch);
+    register!(gpui_action::CloseTab, Action::CloseTab);
+    register!(gpui_action::PreviousTab, Action::PreviousTab);
+    register!(gpui_action::NextTab, Action::NextTab);
+    register!(gpui_action::Find, Action::Find);
+    register!(gpui_action::Replace, Action::Replace);
+    register!(gpui_action::GoToLine, Action::GoToLine);
+    register!(gpui_action::Reload, Action::Reload);
+    register!(gpui_action::Save, Action::Save);
+    register!(gpui_action::Quit, Action::Quit);
+    register!(gpui_action::ShowCompletions, Action::ShowCompletions);
+    register!(gpui_action::Hover, Action::Hover);
+    register!(gpui_action::ProjectDiagnostics, Action::ProjectDiagnostics);
+    register!(gpui_action::GoToDefinition, Action::GoToDefinition);
+    register!(gpui_action::GoToTypeDefinition, Action::GoToTypeDefinition);
+    register!(gpui_action::FindReferences, Action::FindReferences);
+    register!(gpui_action::ProjectSymbols, Action::ProjectSymbols);
+    register!(gpui_action::NavigateBack, Action::NavigateBack);
+    register!(gpui_action::NavigateForward, Action::NavigateForward);
+    register!(gpui_action::RenameSymbol, Action::RenameSymbol);
+    register!(gpui_action::CodeActions, Action::CodeActions);
+    register!(gpui_action::FormatDocument, Action::FormatDocument);
+    register!(gpui_action::FormatSelection, Action::FormatSelection);
+    register!(gpui_action::Undo, Action::Undo);
+    register!(gpui_action::Redo, Action::Redo);
+    register!(gpui_action::Copy, Action::Copy);
+    register!(gpui_action::Cut, Action::Cut);
+}
+
+fn start_project_configuration_notifications(
+    project: &Entity<Project>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut App,
+) {
+    cx.subscribe(project, move |_project, event, _cx| match event {
+        project::Event::Toast {
+            notification_id,
+            message,
+            ..
+        } if notification_id.as_ref().starts_with("local-settings-") => {
+            let _ = event_sender.try_send(TerminalEvent::ConfigurationReloaded {
+                kind: "project settings",
+                result: Err(message.clone()),
+            });
+        }
+        project::Event::HideToast { notification_id }
+            if notification_id.as_ref().starts_with("local-settings-") =>
+        {
+            let _ = event_sender.try_send(TerminalEvent::ConfigurationReloaded {
+                kind: "project settings",
+                result: Ok("reloaded".to_owned()),
+            });
+        }
+        project::Event::Toast { message, .. } => {
+            let _ = event_sender.try_send(TerminalEvent::LanguageServiceNotice {
+                level: "notice",
+                message: bounded_terminal_text(message),
+            });
+        }
+        project::Event::LanguageServerAdded(server_id, name, _) => {
+            let _ = event_sender.try_send(TerminalEvent::LanguageServiceNotice {
+                level: "starting",
+                message: format!("{} ({server_id:?})", name.to_string()),
+            });
+        }
+        project::Event::LanguageServerRemoved(server_id) => {
+            let _ = event_sender.try_send(TerminalEvent::LanguageServiceNotice {
+                level: "stopped",
+                message: format!("server {server_id:?}"),
+            });
+        }
+        project::Event::LanguageServerLog(
+            _,
+            project::LanguageServerLogType::Log(kind),
+            message,
+        ) => {
+            let level = if *kind == lsp::MessageType::ERROR {
+                Some("error")
+            } else if *kind == lsp::MessageType::WARNING {
+                Some("warning")
+            } else {
+                None
+            };
+            if let Some(level) = level {
+                let _ = event_sender.try_send(TerminalEvent::LanguageServiceNotice {
+                    level,
+                    message: bounded_terminal_text(message),
+                });
+            }
+        }
+        project::Event::LanguageNotFound(_) => {
+            let _ = event_sender.try_send(TerminalEvent::LanguageServiceNotice {
+                level: "unavailable",
+                message: "no registered language support for this buffer".to_owned(),
+            });
+        }
+        _ => {}
+    })
+    .detach();
+}
+
+fn start_worktree_trust_notifications(
+    worktree_store: Entity<WorktreeStore>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut App,
+) {
+    let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) else {
+        return;
+    };
+    cx.subscribe(&trusted_worktrees, move |_trusted, event, cx| {
+        let TrustedWorktreesEvent::Restricted(_, restricted_paths) = event else {
+            return;
+        };
+        for restricted_path in restricted_paths {
+            let PathTrust::Worktree(worktree_id) = restricted_path else {
+                continue;
+            };
+            let Some(path) = worktree_store
+                .read(cx)
+                .worktree_for_id(*worktree_id, cx)
+                .map(|worktree| worktree.read(cx).abs_path().as_ref().to_path_buf())
+            else {
+                continue;
+            };
+            let _ = event_sender.try_send(TerminalEvent::WorktreeTrustRequired {
+                worktree_id: *worktree_id,
+                path,
+            });
+        }
+    })
+    .detach();
+}
+
+fn start_configuration_watchers(
+    file_system: Arc<dyn Fs>,
+    event_sender: async_channel::Sender<TerminalEvent>,
+    cx: &mut App,
+) {
+    let settings_sender = event_sender.clone();
+    settings::SettingsStore::update_global(cx, {
+        let file_system = file_system.clone();
+        move |store, cx| {
+            store.watch_settings_files(file_system, cx, move |settings_file, result, _cx| {
+                let kind = match settings_file {
+                    settings::SettingsFile::User => "user settings",
+                    settings::SettingsFile::Global => "global settings",
+                    _ => "settings",
+                };
+                let result = result
+                    .result()
+                    .map(|migrated| {
+                        if migrated {
+                            "reloaded (migration applied in memory)".to_owned()
+                        } else {
+                            "reloaded".to_owned()
+                        }
+                    })
+                    .map_err(|error| format!("{error:#}"));
+                let _ =
+                    settings_sender.try_send(TerminalEvent::ConfigurationReloaded { kind, result });
+            });
+        }
+    });
+
+    let (mut keymap_rx, keymap_watcher) = settings::watch_config_file(
+        &cx.background_executor(),
+        file_system,
+        paths::keymap_file().clone(),
+    );
+    cx.spawn(async move |cx| {
+        let _keymap_watcher = keymap_watcher;
+        let mut last_good_user_bindings = Vec::new();
+        while let Some(content) = keymap_rx.next().await {
+            let result: std::result::Result<String, String> = cx.update(|cx| {
+                let content = actions::terminalize_keymap_action_ids(&content);
+                match settings::KeymapFile::load(&content, cx) {
+                    settings::KeymapFileLoadResult::Success { key_bindings } => {
+                        apply_keymaps(key_bindings.clone(), cx)
+                            .map_err(|error| format!("could not apply keymap: {error:#}"))?;
+                        last_good_user_bindings = key_bindings;
+                        Ok("reloaded".to_owned())
+                    }
+                    settings::KeymapFileLoadResult::SomeFailedToLoad {
+                        key_bindings,
+                        error_message,
+                    } if !key_bindings.is_empty() => {
+                        apply_keymaps(key_bindings.clone(), cx)
+                            .map_err(|error| format!("could not apply keymap: {error:#}"))?;
+                        last_good_user_bindings = key_bindings;
+                        Ok(format!("partially reloaded: {error_message}"))
+                    }
+                    settings::KeymapFileLoadResult::SomeFailedToLoad { error_message, .. } => {
+                        apply_keymaps(last_good_user_bindings.clone(), cx)
+                            .map_err(|error| format!("could not restore keymap: {error:#}"))?;
+                        Err(format!(
+                            "invalid keymap; retained last valid bindings: {error_message}"
+                        ))
+                    }
+                    settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                        apply_keymaps(last_good_user_bindings.clone(), cx)
+                            .map_err(|error| format!("could not restore keymap: {error:#}"))?;
+                        Err(format!(
+                            "invalid keymap JSON; retained last valid bindings: {error:#}"
+                        ))
+                    }
+                }
+            });
+            let _ = event_sender.try_send(TerminalEvent::ConfigurationReloaded {
+                kind: "user keymap",
+                result,
+            });
+        }
+    })
+    .detach();
+}
+
 fn init_zed(cx: &mut App) {
     release_channel::init_test(
         semver::Version::new(0, 0, 0),
@@ -3700,12 +9491,47 @@ fn init_zed(cx: &mut App) {
     settings::init(cx);
     theme_settings::init(theme::LoadThemes::JustBase, cx);
     editor::init(cx);
+    project::trusted_worktrees::init(Default::default(), cx);
 
-    let bindings =
-        settings::KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx)
-            .expect("failed to load Zed's default keymap");
-    cx.bind_keys(bindings);
+    if !cx.has_global::<ProjectRuntime>() {
+        let client = Client::production(cx);
+        Project::init(&client, cx);
+        let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+        let node_runtime = node_runtime::NodeRuntime::unavailable();
+        let real_file_system: Arc<dyn Fs> =
+            Arc::new(RealFs::new(None, cx.background_executor().clone()));
+        let file_system: Arc<dyn Fs> = ZecFs::guarded(real_file_system);
+        <dyn Fs>::set_global(file_system.clone(), cx);
+        let language_registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
+        language_registry.set_theme(cx.theme().clone());
+        languages::init(
+            language_registry.clone(),
+            file_system.clone(),
+            node_runtime.clone(),
+            cx,
+        );
+        cx.set_global(ProjectRuntime {
+            client,
+            user_store,
+            node_runtime,
+            file_system,
+            language_registry,
+        });
+    }
+
+    apply_keymaps(Vec::new(), cx).expect("failed to load Zed/zec default keymaps");
 }
+
+#[derive(Clone)]
+struct ProjectRuntime {
+    client: Arc<Client>,
+    user_store: Entity<UserStore>,
+    node_runtime: node_runtime::NodeRuntime,
+    file_system: Arc<dyn Fs>,
+    language_registry: Arc<LanguageRegistry>,
+}
+
+impl gpui::Global for ProjectRuntime {}
 
 fn editor_application() -> gpui::Application {
     #[cfg(windows)]
@@ -3723,6 +9549,14 @@ fn editor_application() -> gpui::Application {
 }
 
 fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Editor>> {
+    open_editor_with_project(buffer, None, cx)
+}
+
+fn open_editor_with_project(
+    buffer: Entity<Buffer>,
+    project: Option<Entity<Project>>,
+    cx: &mut App,
+) -> Result<WindowHandle<Editor>> {
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(gpui::Bounds {
@@ -3734,7 +9568,7 @@ fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Edit
             ..Default::default()
         },
         |window, cx| {
-            let editor = cx.new(|cx| Editor::for_buffer(buffer, None, window, cx));
+            let editor = cx.new(|cx| Editor::for_buffer(buffer, project, window, cx));
             editor.update(cx, |editor, cx| {
                 editor.set_soft_wrap_mode(SoftWrap::None, cx);
                 editor
@@ -3748,16 +9582,56 @@ fn open_editor(buffer: Entity<Buffer>, cx: &mut App) -> Result<WindowHandle<Edit
     .context("GPUI could not create the hidden window")
 }
 
+fn open_multibuffer_editor_with_project(
+    buffer: Entity<MultiBuffer>,
+    project: Entity<Project>,
+    cx: &mut App,
+) -> Result<WindowHandle<Editor>> {
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(gpui::Bounds {
+                origin: Default::default(),
+                size: gpui::size(gpui::px(800.0), gpui::px(600.0)),
+            })),
+            focus: false,
+            show: false,
+            ..Default::default()
+        },
+        |window, cx| {
+            let editor = cx.new(|cx| Editor::for_multibuffer(buffer, Some(project), window, cx));
+            editor.update(cx, |editor, cx| {
+                editor.set_soft_wrap_mode(SoftWrap::None, cx);
+                editor
+                    .display_map
+                    .update(cx, |map, cx| map.set_wrap_width(None, cx));
+            });
+            window.focus(&editor.focus_handle(cx), cx);
+            editor
+        },
+    )
+    .context("GPUI could not create the hidden MultiBuffer window")
+}
+
 fn create_document_tab(
     document: OpenDocument,
-    buffer_store: Entity<BufferStore>,
+    services: &FileServices,
     redraw_sender: async_channel::Sender<TerminalEvent>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<DocumentTab> {
-    let editor_window = cx.update(|cx| open_editor(document.buffer.clone(), cx))?;
+    let project = services.project.clone();
+    let buffer_store = services.buffer_store.clone();
+    let editor_window =
+        cx.update(|cx| open_editor_with_project(document.buffer.clone(), Some(project), cx))?;
     let buffer = document.buffer.clone();
     let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id().to_proto());
-    if let Err(error) = editor_window.update(cx, |_editor, _window, cx| {
+    let completion_generation = Arc::new(AtomicU64::new(0));
+    let completion_provider = Rc::new(TerminalCompletionProvider {
+        project: services.project.clone(),
+        generation: completion_generation.clone(),
+        event_sender: redraw_sender.clone(),
+    });
+    if let Err(error) = editor_window.update(cx, |editor, _window, cx| {
+        editor.set_completion_provider(Some(completion_provider));
         cx.subscribe(&buffer, move |_, reload_buffer, event, cx| match event {
             BufferEvent::ReloadNeeded => {
                 let reload = buffer_store.update(cx, |store, cx| {
@@ -3794,7 +9668,9 @@ fn create_document_tab(
 
     Ok(DocumentTab {
         document,
+        multi_buffer: None,
         editor_window,
+        completion_generation,
         viewport: Viewport::default(),
         manual_vertical_scroll: false,
         last_cursor: None,
@@ -3806,8 +9682,11 @@ fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> Strin
     let labels = tabs
         .iter()
         .map(|tab| {
-            let name = document_label(&tab.document, multiple, cx);
-            let state = document_state(&tab.document, cx);
+            let name = tab.multi_buffer.as_ref().map_or_else(
+                || document_label(&tab.document, multiple, cx),
+                |multi_buffer| multi_buffer.title.clone(),
+            );
+            let state = tab_state(tab, cx);
             TabLabel {
                 name,
                 dirty: state.dirty,
@@ -3827,6 +9706,9 @@ fn capture_editor(
     area: Rect,
     status_label: &str,
     message: Option<&str>,
+    completion: Option<&CompletionPrompt>,
+    command_palette: Option<&CommandPalettePrompt>,
+    language_overlay: Option<&LanguageOverlay>,
     quick_open: Option<(&QuickOpenPrompt, &RepositoryIndex)>,
     project_search: Option<&ProjectSearchPrompt>,
     search: Option<&ActiveSearch>,
@@ -3941,7 +9823,19 @@ fn capture_editor(
         ))
         .bg(terminal_color(editor_style.background));
 
-    let (status, status_cursor_column) = if let Some((quick_open, index)) = quick_open {
+    let (status, status_cursor_column) = if let Some(completion) = completion {
+        let (status, cursor) = completion.status(message);
+        (status, Some(cursor))
+    } else if let Some(command_palette) = command_palette {
+        let (status, cursor) = command_palette.status(message);
+        (status, Some(cursor))
+    } else if let Some(language_overlay) = language_overlay {
+        let (status, cursor) = language_overlay.status(message);
+        (
+            status,
+            language_overlay.has_status_cursor().then_some(cursor),
+        )
+    } else if let Some((quick_open, index)) = quick_open {
         let (status, cursor) = quick_open.status(message, index);
         (status, Some(cursor))
     } else if let Some(project_search) = project_search {
@@ -3961,7 +9855,7 @@ fn capture_editor(
         (status, Some(cursor))
     } else {
         let mut status = format!(
-            "zec {status_label}  Ctrl-N new  Ctrl-O open  Ctrl-P quick open  Alt-F project search  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Alt-PgUp/PgDn scroll  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
+            "zec {status_label}  F1 commands  Ctrl-Space completion  F2 hover  F8 diagnostics  F12 definition  Alt/Shift-F12 type/refs  Ctrl-N new  Ctrl-O open  Ctrl-P quick open  Alt-F project search  Ctrl-W close  Ctrl-PgUp/PgDn tabs  Alt-PgUp/PgDn scroll  Ctrl-F find  Ctrl-H replace  Ctrl-G line  Ctrl-R reload  Ctrl-S save  Ctrl-Q quit"
         );
         if let Some(message) = message {
             status = format!("{message}  |  {status}");
@@ -3986,6 +9880,10 @@ fn capture_editor(
             viewport,
             status,
             status_cursor_column,
+            overlay: completion
+                .map(CompletionPrompt::overlay)
+                .or_else(|| command_palette.map(CommandPalettePrompt::overlay))
+                .or_else(|| language_overlay.map(LanguageOverlay::overlay)),
         },
         manual_vertical_scroll,
         last_cursor,
@@ -4222,6 +10120,1951 @@ fn run_alpha_1_probe(probe: Alpha1Probe) -> Result<()> {
     Ok(())
 }
 
+fn run_alpha_2_probe(probe: Alpha2Probe) -> Result<()> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    editor_application().run(move |cx| {
+        init_zed(cx);
+        let watches_configuration = matches!(&probe, Alpha2Probe::SettingsReload { .. });
+        let (event_sender, event_receiver) = async_channel::bounded(64);
+        if watches_configuration {
+            let configuration_file_system = cx.global::<ProjectRuntime>().file_system.clone();
+            start_configuration_watchers(configuration_file_system, event_sender.clone(), cx);
+            start_terminal_action_interceptor(
+                Rc::new(RefCell::new(VecDeque::new())),
+                Some(event_sender.clone()),
+                cx,
+            );
+        }
+        let services = file_services(cx);
+        start_project_configuration_notifications(&services.project, event_sender.clone(), cx);
+        cx.spawn(async move |cx| {
+            let result = execute_alpha_2_probe(probe, &services, event_receiver, cx)
+                .await
+                .and_then(|value| {
+                    serde_json::to_string(&value).context("serialize Alpha 2 probe result")
+                });
+            sender.send(result).expect("send Alpha 2 probe result");
+            let _ = cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
+
+    let json = receiver
+        .recv()
+        .context("Alpha 2 probe runtime exited without a result")??;
+    println!("{json}");
+    Ok(())
+}
+
+async fn execute_alpha_2_probe(
+    probe: Alpha2Probe,
+    services: &FileServices,
+    configuration_events: async_channel::Receiver<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    match probe {
+        Alpha2Probe::LanguageService { root, file } => {
+            alpha_2_language_service_probe(&root, &file, services, cx).await
+        }
+        Alpha2Probe::SettingsReload { root, file } => {
+            alpha_2_settings_reload_probe(&root, &file, services, configuration_events, cx).await
+        }
+        Alpha2Probe::LspFailure {
+            root,
+            file,
+            scenario,
+        } => {
+            alpha_2_lsp_failure_probe(&root, &file, &scenario, services, configuration_events, cx)
+                .await
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct EffectiveLanguageSettings {
+    tab_size: u32,
+    format_on_save: String,
+    completion_lsp: bool,
+    show_completions_on_input: bool,
+}
+
+fn effective_language_settings(
+    buffer: &Entity<Buffer>,
+    cx: &gpui::AsyncApp,
+) -> EffectiveLanguageSettings {
+    buffer.read_with(cx, |buffer, cx| {
+        let settings = language::language_settings::LanguageSettings::for_buffer(buffer, cx);
+        EffectiveLanguageSettings {
+            tab_size: settings.tab_size.get(),
+            format_on_save: format!("{:?}", settings.format_on_save).to_ascii_lowercase(),
+            completion_lsp: settings.completions.lsp,
+            show_completions_on_input: settings.show_completions_on_input,
+        }
+    })
+}
+
+async fn wait_for_effective_language_settings(
+    buffer: &Entity<Buffer>,
+    expected: &EffectiveLanguageSettings,
+    cx: &mut gpui::AsyncApp,
+) -> Result<EffectiveLanguageSettings> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let actual = effective_language_settings(buffer, cx);
+        if &actual == expected {
+            return Ok(actual);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "effective settings did not reload within 5 seconds; expected {expected:?}, actual {actual:?}"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+}
+
+async fn wait_for_configuration_result(
+    events: &async_channel::Receiver<TerminalEvent>,
+    kind: &str,
+    success: bool,
+    cx: &mut gpui::AsyncApp,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match events.try_recv() {
+            Ok(TerminalEvent::ConfigurationReloaded {
+                kind: event_kind,
+                result,
+            }) if event_kind == kind => match result {
+                Ok(status) if success => return Ok(status),
+                Err(error) if !success => return Ok(error),
+                _ => {}
+            },
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("configuration event channel closed while waiting for {kind}")
+            }
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for {kind} {} event",
+            if success { "success" } else { "failure" }
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+}
+
+fn dispatch_probe_keystrokes(
+    editor_window: &WindowHandle<Editor>,
+    keys: &[&str],
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let input_window: AnyWindowHandle = (*editor_window).into();
+    cx.update_window(input_window, |_root, window, _cx| {
+        window.activate_window();
+    })?;
+    for key in keys {
+        let keystroke =
+            Keystroke::parse(key).with_context(|| format!("parse probe keystroke {key}"))?;
+        cx.update_window(input_window, |_root, window, cx| {
+            window.dispatch_keystroke(keystroke, cx)
+        })?;
+    }
+    Ok(())
+}
+
+async fn wait_for_terminal_action(
+    events: &async_channel::Receiver<TerminalEvent>,
+    expected: actions::TerminalAction,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match events.try_recv() {
+            Ok(TerminalEvent::Action(action)) if action == expected => return Ok(()),
+            Ok(TerminalEvent::Action(action)) => {
+                bail!("expected terminal action {expected:?}, received {action:?}")
+            }
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal action event channel closed")
+            }
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for terminal action {expected:?}"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(5))
+            .await;
+    }
+}
+
+async fn ensure_no_terminal_action(
+    events: &async_channel::Receiver<TerminalEvent>,
+    duration: Duration,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        match events.try_recv() {
+            Ok(TerminalEvent::Action(action)) => {
+                bail!("an unbound key unexpectedly dispatched {action:?}")
+            }
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal action event channel closed")
+            }
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(5))
+            .await;
+    }
+}
+
+async fn wait_for_rust_analyzer_ready(
+    project: &Entity<Project>,
+    timeout: Duration,
+    cx: &mut gpui::AsyncApp,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if project.read_with(cx, |project, cx| {
+            project.language_server_statuses(cx).any(|(_, status)| {
+                status.name.to_string() == "rust-analyzer" && status.process_id.is_some()
+            })
+        }) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+}
+
+fn trust_probe_worktrees(services: &FileServices, cx: &mut gpui::AsyncApp) -> Result<()> {
+    let trusted_worktrees = cx
+        .update(|cx| TrustedWorktrees::try_get_global(cx))
+        .context("worktree trust service is unavailable")?;
+    let worktree_ids = services.worktree_store.read_with(cx, |store, cx| {
+        store
+            .worktrees()
+            .map(|worktree| worktree.read(cx).id())
+            .collect::<Vec<_>>()
+    });
+    trusted_worktrees.update(cx, |trusted_worktrees, cx| {
+        trusted_worktrees.trust(
+            &services.worktree_store,
+            worktree_ids.into_iter().map(PathTrust::Worktree).collect(),
+            cx,
+        );
+    });
+    Ok(())
+}
+
+async fn bounded_completion_request(
+    project: &Entity<Project>,
+    buffer: &Entity<Buffer>,
+    position: usize,
+    timeout: Duration,
+    cx: &mut gpui::AsyncApp,
+) -> (String, usize, usize, u128, usize) {
+    let started = Instant::now();
+    let request = project.update(cx, |project, cx| {
+        project.completions(
+            buffer,
+            position,
+            editor::CompletionContext {
+                trigger_kind: lsp::CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            },
+            cx,
+        )
+    });
+    let timer = cx.background_executor().timer(timeout);
+    let request = Box::pin(request);
+    let timer = Box::pin(timer);
+    match futures::future::select(request, timer).await {
+        futures::future::Either::Left((result, _)) => match result {
+            Ok(responses) => {
+                let presentations = completion_presentations(&responses);
+                let max_documentation_bytes = presentations
+                    .iter()
+                    .filter_map(|item| item.documentation.as_ref())
+                    .map(String::len)
+                    .max()
+                    .unwrap_or(0);
+                let completion_count = presentations.len();
+                let mut prompt = CompletionPrompt::running(1, 1);
+                let _ = prompt.complete(1, 1, Ok(presentations));
+                let overlay_rows = prompt.overlay().rows.len();
+                (
+                    "ok".to_owned(),
+                    completion_count,
+                    max_documentation_bytes,
+                    started.elapsed().as_millis(),
+                    overlay_rows,
+                )
+            }
+            Err(error) => (
+                format!("error: {error:#}"),
+                0,
+                0,
+                started.elapsed().as_millis(),
+                0,
+            ),
+        },
+        futures::future::Either::Right(((), pending_request)) => {
+            drop(pending_request);
+            (
+                "cancelled".to_owned(),
+                0,
+                0,
+                started.elapsed().as_millis(),
+                0,
+            )
+        }
+    }
+}
+
+async fn alpha_2_lsp_failure_probe(
+    root_path: &Path,
+    file_path: &Path,
+    scenario: &str,
+    services: &FileServices,
+    service_events: async_channel::Receiver<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    let repository = prepare_repository(root_path, services, cx).await?;
+    trust_probe_worktrees(services, cx)?;
+    let document = open_repository_document(file_path, &repository, services, cx).await?;
+    let buffer = document.buffer.clone();
+    let (redraw_sender, _redraw_receiver) = async_channel::bounded(64);
+    let tab = create_document_tab(document, services, redraw_sender, cx)?;
+    let original_disk = services
+        .file_system
+        .load(file_path)
+        .await
+        .with_context(|| format!("read failure fixture {}", file_path.display()))?;
+    let original_buffer = buffer.read_with(cx, |buffer, _| buffer.text());
+    ensure!(
+        original_buffer == original_disk,
+        "failure fixture buffer did not start from disk"
+    );
+    let marker_position = original_buffer
+        .find("alpha_")
+        .map(|offset| offset + "alpha_".len())
+        .unwrap_or(0);
+
+    let initially_ready = wait_for_rust_analyzer_ready(
+        &services.project,
+        if matches!(
+            scenario,
+            "request-error"
+                | "hang-request"
+                | "crash-request"
+                | "malformed-response"
+                | "large-payloads"
+                | "formatter-error"
+                | "huge-stderr"
+                | "restart-once"
+        ) {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_millis(500)
+        },
+        cx,
+    )
+    .await;
+
+    if scenario == "formatter-error" {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let readiness = bounded_completion_request(
+                &services.project,
+                &buffer,
+                marker_position,
+                Duration::from_secs(1),
+                cx,
+            )
+            .await;
+            if readiness.0 == "ok" && readiness.1 == 2 {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "formatter fixture buffer was not registered with rust-analyzer; outcome {}, count {}",
+                readiness.0,
+                readiness.1
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(25))
+                .await;
+        }
+    }
+
+    let edited_text = format!("{original_buffer}// continued after {scenario}\n");
+    tab.editor_window.update(cx, |editor, window, cx| {
+        editor.select_all(&SelectAll, window, cx);
+        editor.insert(&edited_text, window, cx);
+    })?;
+    let dirty_after_edit = document_state(&tab.document, cx).dirty;
+    tab.editor_window
+        .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))?;
+    let text_after_undo = buffer.read_with(cx, |buffer, _| buffer.text());
+    tab.editor_window
+        .update(cx, |editor, window, cx| editor.redo(&Redo, window, cx))?;
+    let text_after_redo = buffer.read_with(cx, |buffer, _| buffer.text());
+    ensure!(
+        dirty_after_edit && text_after_undo == original_buffer && text_after_redo == edited_text,
+        "LSP failure changed the Editor undo/redo authority"
+    );
+
+    let mut formatter_failure = None;
+    let mut dirty_after_formatter_failure = None;
+    let mut disk_after_formatter_failure = None;
+    if scenario == "formatter-error" {
+        let expected = EffectiveLanguageSettings {
+            tab_size: 4,
+            format_on_save: "on".to_owned(),
+            completion_lsp: true,
+            show_completions_on_input: true,
+        };
+        wait_for_effective_language_settings(&buffer, &expected, cx).await?;
+        let error = save_tab(&tab, services, cx)
+            .await
+            .expect_err("controlled formatter error unexpectedly saved");
+        formatter_failure = Some(format!("{error:#}"));
+        dirty_after_formatter_failure = Some(document_state(&tab.document, cx).dirty);
+        disk_after_formatter_failure = Some(
+            services
+                .file_system
+                .load(file_path)
+                .await
+                .with_context(|| format!("read formatter failure disk {}", file_path.display()))?,
+        );
+        ensure!(
+            dirty_after_formatter_failure == Some(true)
+                && disk_after_formatter_failure.as_deref() == Some(original_disk.as_str()),
+            "formatter failure changed disk or cleared dirty state"
+        );
+        let local_settings_path = root_path.join(".zed/settings.json");
+        std::fs::write(
+            &local_settings_path,
+            r#"{
+              "format_on_save": "off",
+              "remove_trailing_whitespace_on_save": false,
+              "ensure_final_newline_on_save": false
+            }"#,
+        )
+        .with_context(|| {
+            format!(
+                "disable formatter after controlled failure {}",
+                local_settings_path.display()
+            )
+        })?;
+        let settings_deadline = Instant::now() + Duration::from_secs(5);
+        while effective_language_settings(&buffer, cx).format_on_save != "off" {
+            ensure!(
+                Instant::now() < settings_deadline,
+                "format_on_save did not turn off after formatter failure"
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+    }
+    save_tab(&tab, services, cx).await?;
+    let saved_disk = services
+        .file_system
+        .load(file_path)
+        .await
+        .with_context(|| format!("read continued save {}", file_path.display()))?;
+    ensure!(
+        saved_disk == edited_text && !document_state(&tab.document, cx).dirty,
+        "editing/save did not remain usable after LSP failure"
+    );
+
+    let restart_requested = scenario == "restart-once";
+    if restart_requested {
+        // A crashed language server is intentionally left stopped by Project until the
+        // user asks for a restart. Exercise that recovery path explicitly instead of
+        // mistaking Project's temporary empty completion set for a recovered server.
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+        services.project.update(cx, |project, cx| {
+            project.restart_language_servers_for_buffers(
+                vec![buffer.clone()],
+                Default::default(),
+                true,
+                cx,
+            );
+        });
+    }
+    let (
+        request_outcome,
+        completion_count,
+        max_documentation_bytes,
+        request_elapsed_ms,
+        completion_overlay_rows,
+    ) = if scenario == "restart-once" {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let result = bounded_completion_request(
+                &services.project,
+                &buffer,
+                marker_position,
+                Duration::from_secs(2),
+                cx,
+            )
+            .await;
+            if result.0 == "ok" && result.1 == 2 {
+                break result;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "language server did not recover after controlled restart; last outcome {}, count {}",
+                result.0,
+                result.1
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+    } else {
+        bounded_completion_request(
+            &services.project,
+            &buffer,
+            marker_position,
+            if scenario.contains("hang") {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(3)
+            },
+            cx,
+        )
+        .await
+    };
+
+    let diagnostic_deadline = Instant::now() + Duration::from_secs(5);
+    let diagnostic_summary = loop {
+        let summary = services
+            .project
+            .read_with(cx, |project, cx| project.diagnostic_summary(false, cx));
+        if scenario != "large-payloads"
+            || summary.error_count.saturating_add(summary.warning_count) >= 10_000
+            || Instant::now() >= diagnostic_deadline
+        {
+            break summary;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    };
+    let (diagnostic_item_count, diagnostic_overlay_rows) = if scenario == "large-payloads" {
+        let items = collect_project_diagnostics(
+            services.project.clone(),
+            Some(root_path.to_path_buf()),
+            vec![(file_path.to_path_buf(), buffer.clone())],
+            cx,
+        )
+        .await?;
+        let item_count = items.len();
+        let mut prompt = DiagnosticsPrompt::running(1);
+        let _ = prompt.complete(1, Ok(items));
+        (item_count, prompt.overlay().rows.len())
+    } else {
+        (
+            diagnostic_summary
+                .error_count
+                .saturating_add(diagnostic_summary.warning_count),
+            0,
+        )
+    };
+    let statuses = services.project.read_with(cx, |project, cx| {
+        project
+            .language_server_statuses(cx)
+            .map(|(_, status)| {
+                serde_json::json!({
+                    "name": status.name.to_string(),
+                    "process_id": status.process_id,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let _keepalive_window = cx.update(|cx| open_editor(buffer.clone(), cx))?;
+    let close_started = Instant::now();
+    tab.editor_window
+        .update(cx, |_editor, window, _cx| window.remove_window())?;
+    let close_elapsed_ms = close_started.elapsed().as_millis();
+    ensure!(
+        close_elapsed_ms <= 250,
+        "closing an editor during an LSP failure took {close_elapsed_ms} ms"
+    );
+
+    let mut service_notices = Vec::new();
+    while let Ok(event) = service_events.try_recv() {
+        if let TerminalEvent::LanguageServiceNotice { level, message } = event {
+            service_notices.push(serde_json::json!({
+                "level": level,
+                "message": message,
+            }));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "scenario": scenario,
+        "initially_ready": initially_ready,
+        "restart_requested": restart_requested,
+        "request": {
+            "outcome": request_outcome,
+            "user_message": (!initially_ready)
+                .then(|| language_service_unavailable_message("completion")),
+            "elapsed_ms": request_elapsed_ms,
+            "completion_count": completion_count,
+            "max_documentation_bytes": max_documentation_bytes,
+            "overlay_rows": completion_overlay_rows,
+        },
+        "diagnostics": {
+            "errors": diagnostic_summary.error_count,
+            "warnings": diagnostic_summary.warning_count,
+            "item_count": diagnostic_item_count,
+            "overlay_rows": diagnostic_overlay_rows,
+        },
+        "limits": {
+            "language_items": MAX_LANGUAGE_RESPONSE_ITEMS,
+            "language_text_bytes": MAX_LANGUAGE_TEXT_BYTES,
+            "overlay_rows": MAX_OVERLAY_SNAPSHOT_ROWS,
+        },
+        "editor": {
+            "dirty_after_edit": dirty_after_edit,
+            "undo_restored": text_after_undo == original_buffer,
+            "redo_restored": text_after_redo == edited_text,
+            "saved": saved_disk == edited_text,
+            "close_elapsed_ms": close_elapsed_ms,
+        },
+        "formatter_failure": {
+            "error": formatter_failure,
+            "dirty": dirty_after_formatter_failure,
+            "disk": disk_after_formatter_failure,
+        },
+        "statuses": statuses,
+        "service_notices": service_notices,
+    }))
+}
+
+async fn alpha_2_settings_reload_probe(
+    root_path: &Path,
+    file_path: &Path,
+    services: &FileServices,
+    configuration_events: async_channel::Receiver<TerminalEvent>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    let repository = prepare_repository(root_path, services, cx).await?;
+    trust_probe_worktrees(services, cx)?;
+    let document = open_repository_document(file_path, &repository, services, cx).await?;
+    let buffer = document.buffer.clone();
+    let (redraw_sender, _redraw_receiver) = async_channel::bounded(64);
+    let tab = create_document_tab(document, services, redraw_sender, cx)?;
+
+    let initial_keymap_status =
+        wait_for_configuration_result(&configuration_events, "user keymap", true, cx).await?;
+    let initial_expected = EffectiveLanguageSettings {
+        tab_size: 5,
+        format_on_save: "off".to_owned(),
+        completion_lsp: true,
+        show_completions_on_input: true,
+    };
+    let initial = wait_for_effective_language_settings(&buffer, &initial_expected, cx).await?;
+
+    dispatch_probe_keystrokes(&tab.editor_window, &["ctrl-k", "ctrl-p"], cx)?;
+    wait_for_terminal_action(
+        &configuration_events,
+        actions::TerminalAction::CommandPalette,
+        cx,
+    )
+    .await?;
+    dispatch_probe_keystrokes(&tab.editor_window, &["f1"], cx)?;
+    ensure_no_terminal_action(&configuration_events, Duration::from_millis(75), cx).await?;
+
+    let keymap_path = paths::keymap_file().clone();
+    std::fs::write(&keymap_path, "{")
+        .with_context(|| format!("write invalid keymap {}", keymap_path.display()))?;
+    let invalid_keymap_error =
+        wait_for_configuration_result(&configuration_events, "user keymap", false, cx).await?;
+    dispatch_probe_keystrokes(&tab.editor_window, &["ctrl-k", "ctrl-p"], cx)?;
+    wait_for_terminal_action(
+        &configuration_events,
+        actions::TerminalAction::CommandPalette,
+        cx,
+    )
+    .await?;
+
+    std::fs::write(
+        &keymap_path,
+        r#"[
+          {
+            "context": "Editor",
+            "bindings": {
+              "f1": null,
+              "f3": "editor::Hover"
+            }
+          }
+        ]"#,
+    )
+    .with_context(|| format!("write replacement keymap {}", keymap_path.display()))?;
+    let replacement_keymap_status =
+        wait_for_configuration_result(&configuration_events, "user keymap", true, cx).await?;
+    dispatch_probe_keystrokes(&tab.editor_window, &["f3"], cx)?;
+    wait_for_terminal_action(&configuration_events, actions::TerminalAction::Hover, cx).await?;
+    dispatch_probe_keystrokes(&tab.editor_window, &["f1"], cx)?;
+    ensure_no_terminal_action(&configuration_events, Duration::from_millis(75), cx).await?;
+
+    let local_settings_path = root_path.join(".zed/settings.json");
+    std::fs::write(
+        &local_settings_path,
+        r#"{
+          "tab_size": 6,
+          "format_on_save": "off",
+          "completions": { "lsp": true },
+          "show_completions_on_input": true,
+          "languages": {
+            "Rust": {
+              "tab_size": 7,
+              "format_on_save": "on",
+              "completions": { "lsp": false },
+              "show_completions_on_input": false
+            }
+          }
+        }"#,
+    )
+    .with_context(|| format!("write updated settings {}", local_settings_path.display()))?;
+    let updated_expected = EffectiveLanguageSettings {
+        tab_size: 7,
+        format_on_save: "on".to_owned(),
+        completion_lsp: false,
+        show_completions_on_input: false,
+    };
+    let updated = wait_for_effective_language_settings(&buffer, &updated_expected, cx).await?;
+
+    let language_server_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ready = services.project.read_with(cx, |project, cx| {
+            project.language_server_statuses(cx).any(|(_, status)| {
+                status.name.to_string() == "rust-analyzer" && status.process_id.is_some()
+            })
+        });
+        if ready {
+            break;
+        }
+        ensure!(
+            Instant::now() < language_server_deadline,
+            "rust-analyzer did not become ready for format-on-save"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+    tab.editor_window.update(cx, |editor, window, cx| {
+        editor.select_all(&SelectAll, window, cx);
+        editor.insert("fn main() { let value = 1; }   \n", window, cx);
+    })?;
+    save_tab(&tab, services, cx).await?;
+    let formatted_disk = services
+        .file_system
+        .load(file_path)
+        .await
+        .with_context(|| format!("read format-on-save result {}", file_path.display()))?;
+    ensure!(
+        formatted_disk == "fn main() { let value = 1; }\n",
+        "format-on-save result differs: {formatted_disk:?}"
+    );
+
+    std::fs::write(&local_settings_path, "{")
+        .with_context(|| format!("write invalid settings {}", local_settings_path.display()))?;
+    let invalid_settings_error =
+        wait_for_configuration_result(&configuration_events, "project settings", false, cx).await?;
+    let retained_after_invalid = effective_language_settings(&buffer, cx);
+    ensure!(
+        retained_after_invalid == updated_expected,
+        "invalid project settings replaced the last valid settings"
+    );
+
+    std::fs::write(
+        &local_settings_path,
+        r#"{
+          "tab_size": 8,
+          "languages": {
+            "Rust": {
+              "tab_size": 9,
+              "format_on_save": "off",
+              "completions": { "lsp": true },
+              "show_completions_on_input": true
+            }
+          }
+        }"#,
+    )
+    .with_context(|| format!("restore settings {}", local_settings_path.display()))?;
+    let recovered_expected = EffectiveLanguageSettings {
+        tab_size: 9,
+        format_on_save: "off".to_owned(),
+        completion_lsp: true,
+        show_completions_on_input: true,
+    };
+    let recovered = wait_for_effective_language_settings(&buffer, &recovered_expected, cx).await?;
+    let recovery_status =
+        wait_for_configuration_result(&configuration_events, "project settings", true, cx).await?;
+
+    tab.editor_window.update(cx, |editor, window, cx| {
+        editor.select_all(&SelectAll, window, cx);
+        editor.insert("fn main() { let value = 2; }   \n", window, cx);
+    })?;
+    save_tab(&tab, services, cx).await?;
+    let unformatted_disk = services
+        .file_system
+        .load(file_path)
+        .await
+        .with_context(|| format!("read format-off result {}", file_path.display()))?;
+
+    Ok(serde_json::json!({
+        "initial": initial,
+        "updated": updated,
+        "retained_after_invalid": retained_after_invalid,
+        "recovered": recovered,
+        "format_on_save_disk": formatted_disk,
+        "format_off_disk": unformatted_disk,
+        "settings": {
+            "invalid_error": invalid_settings_error,
+            "recovery_status": recovery_status,
+            "path": local_settings_path.display().to_string(),
+        },
+        "keymap": {
+            "initial_status": initial_keymap_status,
+            "invalid_error": invalid_keymap_error,
+            "replacement_status": replacement_keymap_status,
+            "multi_chord_rebind": true,
+            "unbind": true,
+            "last_good_retained": true,
+            "replacement_rebind": true,
+            "path": keymap_path.display().to_string(),
+        },
+    }))
+}
+
+async fn alpha_2_language_service_probe(
+    root_path: &Path,
+    file_path: &Path,
+    services: &FileServices,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Value> {
+    let repository = prepare_repository(root_path, services, cx).await?;
+    trust_probe_worktrees(services, cx)?;
+    let document = open_repository_document(file_path, &repository, services, cx).await?;
+    let buffer = document.buffer.clone();
+    let (event_sender, event_receiver) = async_channel::bounded(64);
+    let tab = create_document_tab(document, services, event_sender.clone(), cx)?;
+    let peer_path = file_path.with_file_name("lib.rs");
+    let peer = if peer_path != file_path && peer_path.is_file() {
+        let document = open_repository_document(&peer_path, &repository, services, cx).await?;
+        let buffer = document.buffer.clone();
+        let tab = create_document_tab(document, services, event_sender.clone(), cx)?;
+        Some((peer_path, buffer, tab))
+    } else {
+        None
+    };
+
+    let text = buffer.read_with(cx, |buffer, _| buffer.text());
+    let marker = "alpha_";
+    let position = text
+        .find(marker)
+        .map(|offset| offset + marker.len())
+        .context("Alpha 2 language-service probe file must contain alpha_")?;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let ready = services.project.read_with(cx, |project, cx| {
+            project.language_server_statuses(cx).any(|(_, status)| {
+                status.name.to_string() == "rust-analyzer" && status.process_id.is_some()
+            })
+        });
+        if ready {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let language = buffer.read_with(cx, |buffer, _| {
+                buffer.language().map(|language| language.name().clone())
+            });
+            let adapters = language
+                .as_ref()
+                .map(|language| {
+                    services
+                        .language_registry
+                        .lsp_adapters(language)
+                        .into_iter()
+                        .map(|adapter| adapter.name().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let statuses = services.project.read_with(cx, |project, cx| {
+                project
+                    .language_server_statuses(cx)
+                    .map(|(_, status)| (status.name.to_string(), status.process_id))
+                    .collect::<Vec<_>>()
+            });
+            bail!(
+                "rust-analyzer did not become ready within 15 seconds; language={language:?}, adapters={adapters:?}, statuses={statuses:?}"
+            );
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+    }
+
+    let completion_task = services.project.update(cx, |project, cx| {
+        project.completions(
+            &buffer,
+            position,
+            editor::CompletionContext {
+                trigger_kind: lsp::CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            },
+            cx,
+        )
+    });
+    let completion_responses = completion_task
+        .await
+        .context("request fixture completions")?;
+    let completions = completion_responses
+        .into_iter()
+        .flat_map(|response| response.completions)
+        .map(|completion| {
+            let lsp_completion = completion.source.lsp_completion(false);
+            serde_json::json!({
+                "label": completion.label.text,
+                "new_text": completion.new_text,
+                "detail": lsp_completion.as_ref().and_then(|item| item.detail.clone()),
+                "kind": lsp_completion
+                    .as_ref()
+                    .and_then(|item| item.kind)
+                    .map(|kind| format!("{kind:?}")),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let hover_task = services
+        .project
+        .update(cx, |project, cx| project.hover(&buffer, position, cx));
+    let hovers = hover_task
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|hover| hover.contents)
+        .map(|block| {
+            serde_json::json!({
+                "kind": format!("{:?}", block.kind),
+                "text": block.text,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let diagnostic_deadline = Instant::now() + Duration::from_secs(5);
+    let diagnostic_summary = loop {
+        let summary = services
+            .project
+            .read_with(cx, |project, cx| project.diagnostic_summary(false, cx));
+        if summary.error_count > 0 || summary.warning_count > 0 {
+            break summary;
+        }
+        ensure!(
+            Instant::now() < diagnostic_deadline,
+            "fixture diagnostic was not published within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+    };
+
+    let statuses = services.project.read_with(cx, |project, cx| {
+        project
+            .language_server_statuses(cx)
+            .map(|(id, status)| {
+                serde_json::json!({
+                    "id": id.0,
+                    "name": status.name.to_string(),
+                    "language": status.language_name.as_ref().map(ToString::to_string),
+                    "process_id": status.process_id,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let language = buffer.read_with(cx, |buffer, _| {
+        buffer
+            .language()
+            .map(|language| language.name().to_string())
+    });
+
+    let prefix = &text[..position];
+    let display_row = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let byte_column = prefix
+        .rfind('\n')
+        .map_or(position, |newline| position.saturating_sub(newline + 1));
+    move_caret_to_text_position(
+        &tab.editor_window,
+        TextPosition {
+            row: display_row,
+            byte_column,
+        },
+        cx,
+    )?;
+    let terminal_generation = tab
+        .completion_generation
+        .load(AtomicOrdering::SeqCst)
+        .saturating_add(1);
+    tab.editor_window.update(cx, |editor, window, cx| {
+        editor.show_completions(&ShowCompletions, window, cx)
+    })?;
+    let terminal_deadline = Instant::now() + Duration::from_secs(5);
+    let terminal_items = loop {
+        match event_receiver.try_recv() {
+            Ok(TerminalEvent::CompletionFinished {
+                buffer_id: _,
+                generation,
+                result,
+                ..
+            }) if generation == terminal_generation => break result.map_err(anyhow::Error::msg)?,
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal completion event channel closed")
+            }
+        }
+        ensure!(
+            Instant::now() < terminal_deadline,
+            "terminal completion projection was not published within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    };
+    loop {
+        let menu_visible = tab.editor_window.update(cx, |editor, _window, _cx| {
+            editor.has_visible_completions_menu()
+        })?;
+        if menu_visible {
+            break;
+        }
+        ensure!(
+            Instant::now() < terminal_deadline,
+            "Zed completion menu was not ready within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    }
+    let confirm_task = tab.editor_window.update(cx, |editor, window, cx| {
+        editor.confirm_completion(&ConfirmCompletion { item_ix: Some(0) }, window, cx)
+    })?;
+    confirm_task
+        .context("Zed completion menu had no first item")?
+        .await
+        .context("apply terminal-projected completion")?;
+    let text_after_completion = tab
+        .editor_window
+        .update(cx, |editor, _window, cx| editor.text(cx))?;
+    tab.editor_window
+        .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))?;
+    let text_after_completion_undo = tab
+        .editor_window
+        .update(cx, |editor, _window, cx| editor.text(cx))?;
+
+    let terminal_hover_generation = 1;
+    let terminal_hover_buffer_id = start_hover_request(
+        &tab.editor_window,
+        &services.project,
+        terminal_hover_generation,
+        event_sender.clone(),
+        cx,
+    )?;
+    let terminal_hover_deadline = Instant::now() + Duration::from_secs(5);
+    let terminal_hover_items = loop {
+        match event_receiver.try_recv() {
+            Ok(TerminalEvent::HoverFinished {
+                buffer_id,
+                generation,
+                result,
+            }) if buffer_id == terminal_hover_buffer_id
+                && generation == terminal_hover_generation =>
+            {
+                break result.map_err(anyhow::Error::msg)?;
+            }
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal hover event channel closed")
+            }
+        }
+        ensure!(
+            Instant::now() < terminal_hover_deadline,
+            "terminal hover projection was not published within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    };
+    let mut terminal_hover_prompt =
+        HoverPrompt::running(terminal_hover_buffer_id, terminal_hover_generation);
+    ensure!(terminal_hover_prompt.complete(
+        terminal_hover_buffer_id,
+        terminal_hover_generation,
+        Ok(terminal_hover_items.clone())
+    ));
+    let terminal_hover_overlay = terminal_hover_prompt.overlay();
+
+    let terminal_diagnostic_items = collect_project_diagnostics(
+        services.project.clone(),
+        Some(root_path.to_path_buf()),
+        vec![(file_path.to_path_buf(), buffer.clone())],
+        cx,
+    )
+    .await?;
+    let mut terminal_diagnostics_prompt = DiagnosticsPrompt::running(1);
+    ensure!(terminal_diagnostics_prompt.complete(1, Ok(terminal_diagnostic_items.clone())));
+    let terminal_diagnostics_overlay = terminal_diagnostics_prompt.overlay();
+    let selected_diagnostic = terminal_diagnostics_prompt
+        .selected_item()
+        .context("fixture produced no terminal diagnostic")?;
+    let mut probe_tabs = vec![tab];
+    let peer_buffer = peer
+        .as_ref()
+        .map(|(path, buffer, _)| (path.clone(), buffer.clone()));
+    if let Some((_, _, peer_tab)) = peer {
+        probe_tabs.push(peer_tab);
+    }
+    let mut probe_active_index = 0;
+    let diagnostic_navigation = navigate_to_diagnostic(
+        &selected_diagnostic,
+        Some(&repository),
+        services,
+        &mut probe_tabs,
+        &mut probe_active_index,
+        event_sender.clone(),
+        cx,
+    )
+    .await?;
+    let (_, diagnostic_point, _) =
+        active_editor_buffer_point(&probe_tabs[probe_active_index].editor_window, cx)?;
+
+    let mut terminal_location_results = Vec::new();
+    for (index, kind) in [
+        LocationRequestKind::Definition,
+        LocationRequestKind::TypeDefinition,
+        LocationRequestKind::References,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let generation = u64::try_from(index).unwrap_or_default().saturating_add(10);
+        let buffer_id = start_locations_request(
+            kind,
+            &probe_tabs[probe_active_index].editor_window,
+            &services.project,
+            generation,
+            Some(root_path.to_path_buf()),
+            event_sender.clone(),
+            cx,
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let items = loop {
+            match event_receiver.try_recv() {
+                Ok(TerminalEvent::LocationsFinished {
+                    buffer_id: completed_buffer_id,
+                    generation: completed_generation,
+                    kind: completed_kind,
+                    result,
+                }) if completed_buffer_id == buffer_id
+                    && completed_generation == generation
+                    && completed_kind == kind =>
+                {
+                    break result.map_err(anyhow::Error::msg)?;
+                }
+                Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+                Err(async_channel::TryRecvError::Closed) => {
+                    bail!("terminal location event channel closed")
+                }
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "terminal {} projection was not published within 5 seconds",
+                kind.title().to_lowercase()
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        };
+        let mut prompt = LocationsPrompt::running(buffer_id, generation, kind);
+        ensure!(prompt.complete(buffer_id, generation, kind, Ok(items.clone())));
+        let overlay_rows = prompt
+            .overlay()
+            .rows
+            .into_iter()
+            .map(|row| row.text)
+            .collect::<Vec<_>>();
+        terminal_location_results.push((kind, items, overlay_rows));
+    }
+    let symbol_generation = 20;
+    let (_, _, symbol_buffer_id) =
+        active_editor_buffer_point(&probe_tabs[probe_active_index].editor_window, cx)?;
+    start_project_symbols_request(
+        &services.project,
+        symbol_buffer_id,
+        symbol_generation,
+        "alpha".to_owned(),
+        Some(root_path.to_path_buf()),
+        event_sender.clone(),
+        cx,
+    );
+    let symbol_deadline = Instant::now() + Duration::from_secs(5);
+    let symbol_items = loop {
+        match event_receiver.try_recv() {
+            Ok(TerminalEvent::LocationsFinished {
+                buffer_id,
+                generation,
+                kind: LocationRequestKind::ProjectSymbols,
+                result,
+            }) if buffer_id == symbol_buffer_id && generation == symbol_generation => {
+                break result.map_err(anyhow::Error::msg)?;
+            }
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal project-symbol event channel closed")
+            }
+        }
+        ensure!(
+            Instant::now() < symbol_deadline,
+            "terminal project symbols were not published within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    };
+    let mut symbol_prompt = LocationsPrompt::running(
+        symbol_buffer_id,
+        symbol_generation,
+        LocationRequestKind::ProjectSymbols,
+    );
+    ensure!(symbol_prompt.complete(
+        symbol_buffer_id,
+        symbol_generation,
+        LocationRequestKind::ProjectSymbols,
+        Ok(symbol_items.clone())
+    ));
+    terminal_location_results.push((
+        LocationRequestKind::ProjectSymbols,
+        symbol_items,
+        symbol_prompt
+            .overlay()
+            .rows
+            .into_iter()
+            .map(|row| row.text)
+            .collect(),
+    ));
+    let definition_target = terminal_location_results
+        .iter()
+        .find(|(kind, _, _)| *kind == LocationRequestKind::Definition)
+        .and_then(|(_, items, _)| items.first())
+        .context("fixture produced no definition target")?;
+    let semantic_navigation = navigate_to_location(
+        definition_target,
+        Some(&repository),
+        services,
+        &mut probe_tabs,
+        &mut probe_active_index,
+        event_sender.clone(),
+        cx,
+    )
+    .await?;
+    let (_, semantic_point, _) =
+        active_editor_buffer_point(&probe_tabs[probe_active_index].editor_window, cx)?;
+
+    let reference_items = terminal_location_results
+        .iter()
+        .find(|(kind, _, _)| *kind == LocationRequestKind::References)
+        .map(|(_, items, _)| items.clone())
+        .context("fixture produced no reference targets")?;
+    let multibuffer_tab = create_locations_multibuffer_tab(
+        "References".to_owned(),
+        &reference_items,
+        Some(&repository),
+        services,
+        event_sender.clone(),
+        cx,
+    )
+    .await?;
+    let multibuffer_source_count = multibuffer_tab
+        .multi_buffer
+        .as_ref()
+        .context("reference result did not create a MultiBuffer tab")?
+        .buffer
+        .read_with(cx, |multi_buffer, _| {
+            multi_buffer.all_buffers_iter().count()
+        });
+    let multibuffer_text = multibuffer_tab
+        .editor_window
+        .update(cx, |editor, _window, cx| editor.text(cx))?;
+    let multibuffer_marker = multibuffer_text
+        .find("alpha_")
+        .context("reference MultiBuffer omitted the fixture symbol")?;
+    let multibuffer_prefix = &multibuffer_text[..multibuffer_marker];
+    let multibuffer_row = multibuffer_prefix
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    let multibuffer_column = multibuffer_prefix
+        .rfind('\n')
+        .map_or(multibuffer_marker, |newline| {
+            multibuffer_marker.saturating_sub(newline + 1)
+        });
+    let multibuffer_before = multibuffer_tab
+        .multi_buffer
+        .as_ref()
+        .expect("MultiBuffer checked above")
+        .source_buffers
+        .iter()
+        .map(|buffer| {
+            buffer.read_with(cx, |buffer, cx| {
+                let path = buffer
+                    .file()
+                    .map(|file| {
+                        file.as_local()
+                            .map(|file| file.abs_path(cx))
+                            .unwrap_or_else(|| file.full_path(cx))
+                    })
+                    .unwrap_or_default();
+                (path, buffer.text())
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    move_caret_to_text_position(
+        &multibuffer_tab.editor_window,
+        TextPosition {
+            row: multibuffer_row,
+            byte_column: multibuffer_column,
+        },
+        cx,
+    )?;
+    multibuffer_tab
+        .editor_window
+        .update(cx, |editor, window, cx| editor.insert("mb_", window, cx))?;
+    let multibuffer_after_edit = multibuffer_tab
+        .multi_buffer
+        .as_ref()
+        .expect("MultiBuffer checked above")
+        .source_buffers
+        .iter()
+        .map(|buffer| {
+            buffer.read_with(cx, |buffer, cx| {
+                let path = buffer
+                    .file()
+                    .map(|file| {
+                        file.as_local()
+                            .map(|file| file.abs_path(cx))
+                            .unwrap_or_else(|| file.full_path(cx))
+                    })
+                    .unwrap_or_default();
+                (path, buffer.text())
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let changed_multibuffer_paths = multibuffer_after_edit
+        .iter()
+        .filter_map(|(path, text)| {
+            (multibuffer_before.get(path) != Some(text)).then_some(path.clone())
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        changed_multibuffer_paths.len() == 1,
+        "MultiBuffer edit changed {:?}, expected exactly one source",
+        changed_multibuffer_paths
+    );
+    let changed_multibuffer_path = changed_multibuffer_paths[0].clone();
+    save_tab(&multibuffer_tab, services, cx).await?;
+    let multibuffer_disk_after_save = std::fs::read_to_string(&changed_multibuffer_path)
+        .with_context(|| {
+            format!(
+                "read {} after MultiBuffer save",
+                changed_multibuffer_path.display()
+            )
+        })?;
+    multibuffer_tab
+        .editor_window
+        .update(cx, |editor, window, cx| editor.undo(&Undo, window, cx))?;
+    let multibuffer_after_undo = multibuffer_tab
+        .multi_buffer
+        .as_ref()
+        .expect("MultiBuffer checked above")
+        .source_buffers
+        .iter()
+        .map(|buffer| {
+            buffer.read_with(cx, |buffer, cx| {
+                let path = buffer
+                    .file()
+                    .map(|file| {
+                        file.as_local()
+                            .map(|file| file.abs_path(cx))
+                            .unwrap_or_else(|| file.full_path(cx))
+                    })
+                    .unwrap_or_default();
+                (path, buffer.text())
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    ensure!(
+        multibuffer_after_undo == multibuffer_before,
+        "MultiBuffer undo did not restore every source buffer"
+    );
+    save_tab(&multibuffer_tab, services, cx).await?;
+    let multibuffer_disk_after_restore = std::fs::read_to_string(&changed_multibuffer_path)
+        .with_context(|| {
+            format!(
+                "read {} after MultiBuffer restore",
+                changed_multibuffer_path.display()
+            )
+        })?;
+    let multibuffer_changed_label = changed_multibuffer_path
+        .strip_prefix(root_path)
+        .unwrap_or(&changed_multibuffer_path)
+        .to_string_lossy()
+        .into_owned();
+    probe_tabs.push(multibuffer_tab);
+    cx.background_executor()
+        .timer(Duration::from_millis(25))
+        .await;
+
+    move_caret_to_text_position(
+        &probe_tabs[0].editor_window,
+        TextPosition {
+            row: display_row,
+            byte_column,
+        },
+        cx,
+    )?;
+    let rename_generation = 30;
+    let (rename_buffer, rename_point, rename_buffer_id) = start_rename_request(
+        &probe_tabs[0].editor_window,
+        &services.project,
+        rename_generation,
+        event_sender.clone(),
+        cx,
+    )?;
+    let rename_deadline = Instant::now() + Duration::from_secs(5);
+    let rename_preparation = loop {
+        match event_receiver.try_recv() {
+            Ok(TerminalEvent::RenamePrepared {
+                buffer_id,
+                generation,
+                result,
+            }) if buffer_id == rename_buffer_id && generation == rename_generation => {
+                break result.map_err(anyhow::Error::msg)?;
+            }
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal rename event channel closed")
+            }
+        }
+        ensure!(
+            Instant::now() < rename_deadline,
+            "terminal rename preparation was not published within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    };
+    let mut rename_prompt = RenamePrompt::running(
+        rename_buffer.clone(),
+        rename_buffer_id,
+        rename_generation,
+        rename_point,
+    );
+    ensure!(rename_prompt.complete(
+        rename_buffer_id,
+        rename_generation,
+        Ok(rename_preparation.clone())
+    ));
+    let rename_overlay_rows = rename_prompt
+        .overlay()
+        .rows
+        .into_iter()
+        .map(|row| row.text)
+        .collect::<Vec<_>>();
+    let rename_name = "renamed_fixture".to_owned();
+    let rename_main_before_preview = buffer.read_with(cx, |buffer, _| buffer.text());
+    let rename_peer_before_preview = peer_buffer
+        .as_ref()
+        .map(|(_, buffer)| buffer.read_with(cx, |buffer, _| buffer.text()));
+
+    let (rejected_server_id, rejected_request) = request_rename_workspace_edit(
+        &services.project,
+        &rename_buffer,
+        rename_point,
+        rename_name.clone(),
+        None,
+        cx,
+    )?;
+    let rejected_edit = rejected_request.await?;
+    let rejected_preview = create_rename_preview_tab(
+        rename_buffer.clone(),
+        rename_point,
+        rename_name.clone(),
+        rejected_server_id,
+        rejected_edit,
+        repository.root.canonical_path().to_path_buf(),
+        Some(&repository),
+        services,
+        cx,
+    )
+    .await?;
+    let rejected_preview_text = rejected_preview
+        .editor_window
+        .update(cx, |editor, _window, cx| editor.text(cx))?;
+    rejected_preview
+        .editor_window
+        .update(cx, |_editor, window, _cx| window.remove_window())?;
+    drop(rejected_preview);
+    let rename_rejection_unchanged = buffer.read_with(cx, |buffer, _| buffer.text())
+        == rename_main_before_preview
+        && peer_buffer
+            .as_ref()
+            .map(|(_, buffer)| buffer.read_with(cx, |buffer, _| buffer.text()))
+            == rename_peer_before_preview;
+    ensure!(
+        rename_rejection_unchanged,
+        "rejecting the rename preview changed a source buffer"
+    );
+
+    let (preview_server_id, preview_request) = request_rename_workspace_edit(
+        &services.project,
+        &rename_buffer,
+        rename_point,
+        rename_name.clone(),
+        None,
+        cx,
+    )?;
+    let preview_edit = preview_request.await?;
+    let rename_preview_tab = create_rename_preview_tab(
+        rename_buffer.clone(),
+        rename_point,
+        rename_name.clone(),
+        preview_server_id,
+        preview_edit,
+        repository.root.canonical_path().to_path_buf(),
+        Some(&repository),
+        services,
+        cx,
+    )
+    .await?;
+    let rename_preview_text = rename_preview_tab
+        .editor_window
+        .update(cx, |editor, _window, cx| editor.text(cx))?;
+    let rename_pending = rename_preview_tab
+        .multi_buffer
+        .as_ref()
+        .and_then(|multi_buffer| multi_buffer.pending_rename.clone())
+        .context("rename preview tab has no pending transaction")?;
+    let rename_preview_source_count = rename_preview_tab
+        .multi_buffer
+        .as_ref()
+        .map(|multi_buffer| multi_buffer.source_buffers.len())
+        .unwrap_or_default();
+    let rename_preview_buffer_count = rename_preview_tab
+        .multi_buffer
+        .as_ref()
+        .map(|multi_buffer| {
+            multi_buffer
+                .buffer
+                .read_with(cx, |buffer, _| buffer.all_buffers_iter().count())
+        })
+        .unwrap_or_default();
+    let rename_preview_read_only =
+        rename_preview_tab
+            .multi_buffer
+            .as_ref()
+            .is_some_and(|multi_buffer| {
+                multi_buffer
+                    .buffer
+                    .read_with(cx, |buffer, _| buffer.capability() == Capability::ReadOnly)
+            });
+    validate_pending_rename_guards(&rename_pending, cx)?;
+    let (_, confirmation_request) = request_rename_workspace_edit(
+        &services.project,
+        &rename_pending.origin_buffer,
+        rename_pending.origin_point,
+        rename_pending.new_name.clone(),
+        Some(rename_pending.language_server_id),
+        cx,
+    )?;
+    let confirmation_edit = confirmation_request.await?;
+    let confirmation_plan =
+        normalize_rename_workspace_edit(&confirmation_edit, &rename_pending.workspace_root)?;
+    ensure!(
+        confirmation_plan.signature == rename_pending.plan.signature,
+        "fixture rename changed between preview and acceptance"
+    );
+    validate_pending_rename_guards(&rename_pending, cx)?;
+    let rename_transaction = services.project.update(cx, |project, cx| {
+        project.perform_rename(
+            rename_pending.origin_buffer.clone(),
+            rename_pending.origin_point,
+            rename_name.clone(),
+            cx,
+        )
+    });
+    let rename_transaction = rename_transaction
+        .await
+        .context("perform fixture multi-buffer rename")?;
+    let rename_buffer_count = rename_transaction.0.len();
+    rename_preview_tab
+        .editor_window
+        .update(cx, |_editor, window, _cx| window.remove_window())?;
+    let rename_main_after = buffer.read_with(cx, |buffer, _| buffer.text());
+    let rename_peer_after = peer_buffer
+        .as_ref()
+        .map(|(_, buffer)| buffer.read_with(cx, |buffer, _| buffer.text()));
+    let mut rename_history = ProjectEditHistory::default();
+    ensure!(
+        rename_history.push(rename_transaction) == rename_buffer_count,
+        "rename history buffer count changed"
+    );
+    let rename_undo_count = rename_history.undo_latest(cx)?;
+    let rename_main_after_undo = buffer.read_with(cx, |buffer, _| buffer.text());
+    let rename_peer_after_undo = peer_buffer
+        .as_ref()
+        .map(|(_, buffer)| buffer.read_with(cx, |buffer, _| buffer.text()));
+    let rename_redo_count = rename_history.redo_latest(cx)?;
+    let rename_main_after_redo = buffer.read_with(cx, |buffer, _| buffer.text());
+    rename_history.undo_latest(cx)?;
+    cx.background_executor()
+        .timer(Duration::from_millis(25))
+        .await;
+
+    move_caret_to_text_position(
+        &probe_tabs[0].editor_window,
+        TextPosition {
+            row: display_row,
+            byte_column,
+        },
+        cx,
+    )?;
+    let code_action_generation = 31;
+    let (code_action_buffer, code_action_buffer_id) = start_code_actions_request(
+        &probe_tabs[0].editor_window,
+        &services.project,
+        code_action_generation,
+        event_sender.clone(),
+        cx,
+    )?;
+    let code_action_deadline = Instant::now() + Duration::from_secs(5);
+    let code_actions = loop {
+        match event_receiver.try_recv() {
+            Ok(TerminalEvent::CodeActionsFinished {
+                buffer_id,
+                generation,
+                result,
+            }) if buffer_id == code_action_buffer_id && generation == code_action_generation => {
+                break result.map_err(anyhow::Error::msg)?;
+            }
+            Ok(_) | Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                bail!("terminal code-action event channel closed")
+            }
+        }
+        ensure!(
+            Instant::now() < code_action_deadline,
+            "terminal code actions were not published within 5 seconds"
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(10))
+            .await;
+    };
+    let mut code_action_prompt = CodeActionsPrompt::running(
+        code_action_buffer.clone(),
+        code_action_buffer_id,
+        code_action_generation,
+    );
+    ensure!(code_action_prompt.complete(
+        code_action_buffer_id,
+        code_action_generation,
+        Ok(code_actions)
+    ));
+    let code_action_overlay_rows = code_action_prompt
+        .overlay()
+        .rows
+        .into_iter()
+        .map(|row| row.text)
+        .collect::<Vec<_>>();
+    let code_action = code_action_prompt
+        .selected_action()
+        .context("fixture produced no enabled code action")?;
+    let applied_code_action_title = code_action_title(&code_action).to_owned();
+    let applied_code_action_kind = code_action_kind(&code_action);
+    let applied_code_action_preferred = code_action_preferred(&code_action);
+    let code_action_transaction = services.project.update(cx, |project, cx| {
+        project.apply_code_action(code_action_buffer, code_action, true, cx)
+    });
+    let code_action_transaction = code_action_transaction
+        .await
+        .context("apply fixture code action")?;
+    let code_action_buffer_count = code_action_transaction.0.len();
+    let code_action_main_after = buffer.read_with(cx, |buffer, _| buffer.text());
+    let mut code_action_history = ProjectEditHistory::default();
+    code_action_history.push(code_action_transaction);
+    let code_action_undo_count = code_action_history.undo_latest(cx)?;
+    let code_action_main_after_undo = buffer.read_with(cx, |buffer, _| buffer.text());
+    cx.background_executor()
+        .timer(Duration::from_millis(25))
+        .await;
+
+    let format_document_transaction =
+        format_active_editor(&probe_tabs[0].editor_window, &services.project, false, cx)?
+            .await
+            .context("format fixture document")?;
+    let format_document_buffer_count = format_document_transaction.0.len();
+    let format_document_after = buffer.read_with(cx, |buffer, _| buffer.text());
+    let mut format_history = ProjectEditHistory::default();
+    format_history.push(format_document_transaction);
+    let format_document_undo_count = if format_history.can_undo() {
+        format_history.undo_latest(cx)?
+    } else {
+        0
+    };
+    let format_document_after_undo = buffer.read_with(cx, |buffer, _| buffer.text());
+    cx.background_executor()
+        .timer(Duration::from_millis(25))
+        .await;
+
+    probe_tabs[0]
+        .editor_window
+        .update(cx, |editor, window, cx| {
+            let display = editor.display_snapshot(cx);
+            let start = display.display_point_to_anchor(
+                display.clip_point(DisplayPoint::new(DisplayRow(0), 0), Bias::Left),
+                Bias::Left,
+            );
+            let end = display.display_point_to_anchor(
+                display.clip_point(DisplayPoint::new(DisplayRow(2), 0), Bias::Right),
+                Bias::Right,
+            );
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_anchor_ranges([start..end])
+            });
+        })?;
+    let format_range_transaction =
+        format_active_editor(&probe_tabs[0].editor_window, &services.project, true, cx)?
+            .await
+            .context("format fixture selection")?;
+    let format_range_buffer_count = format_range_transaction.0.len();
+    let format_range_after = buffer.read_with(cx, |buffer, _| buffer.text());
+    let mut format_range_history = ProjectEditHistory::default();
+    format_range_history.push(format_range_transaction);
+    let format_range_undo_count = if format_range_history.can_undo() {
+        format_range_history.undo_latest(cx)?
+    } else {
+        0
+    };
+    let format_range_after_undo = buffer.read_with(cx, |buffer, _| buffer.text());
+
+    let terminal_locations_json = terminal_location_results
+        .iter()
+        .map(|(kind, items, overlay_rows)| {
+            let key = match kind {
+                LocationRequestKind::Definition => "definitions",
+                LocationRequestKind::TypeDefinition => "type_definitions",
+                LocationRequestKind::References => "references",
+                LocationRequestKind::ProjectSymbols => "project_symbols",
+            };
+            (
+                key.to_owned(),
+                serde_json::json!({
+                    "items": items.iter().map(|item| serde_json::json!({
+                        "path": item.path,
+                        "label": item.label,
+                        "row": item.row,
+                        "column": item.column,
+                        "end_row": item.end_row,
+                        "end_column": item.end_column,
+                        "snippet": item.snippet,
+                    })).collect::<Vec<_>>(),
+                    "overlay_rows": overlay_rows,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    let report = serde_json::json!({
+        "project_entity": format!("{:?}", services.project.entity_id()),
+        "buffer_entity": format!("{:?}", buffer.entity_id()),
+        "language": language,
+        "servers": statuses,
+        "completions": completions,
+        "hover": hovers,
+        "diagnostics": {
+            "errors": diagnostic_summary.error_count,
+            "warnings": diagnostic_summary.warning_count,
+        },
+        "terminal_completion": {
+            "items": terminal_items
+                .iter()
+                .map(|item| serde_json::json!({
+                    "label": item.label,
+                    "detail": item.detail,
+                    "kind": item.kind,
+                    "documentation": item.documentation,
+                }))
+                .collect::<Vec<_>>(),
+            "text_after_apply": text_after_completion,
+            "text_after_undo": text_after_completion_undo,
+        },
+        "terminal_hover": {
+            "items": terminal_hover_items
+                .iter()
+                .map(|item| serde_json::json!({
+                    "kind": item.kind,
+                    "text": item.text,
+                }))
+                .collect::<Vec<_>>(),
+            "overlay_rows": terminal_hover_overlay
+                .rows
+                .iter()
+                .map(|row| row.text.clone())
+                .collect::<Vec<_>>(),
+        },
+        "terminal_diagnostics": {
+            "items": terminal_diagnostic_items
+                .iter()
+                .map(|item| serde_json::json!({
+                    "path": item.path,
+                    "label": item.label,
+                    "row": item.row,
+                    "column": item.column,
+                    "severity": item.severity,
+                    "message": item.message,
+                    "source": item.source,
+                }))
+                .collect::<Vec<_>>(),
+            "overlay_rows": terminal_diagnostics_overlay
+                .rows
+                .iter()
+                .map(|row| row.text.clone())
+                .collect::<Vec<_>>(),
+            "navigation": diagnostic_navigation,
+            "cursor": {
+                "row": diagnostic_point.row,
+                "column": diagnostic_point.column,
+            },
+        },
+        "terminal_locations": terminal_locations_json,
+        "terminal_multibuffer": {
+            "title": "References",
+            "target_count": reference_items.len(),
+            "source_count": multibuffer_source_count,
+            "snapshot_contains_main": multibuffer_text.contains("fn main"),
+            "snapshot_contains_peer": multibuffer_text.contains("fixture_peer"),
+            "changed_path": multibuffer_changed_label,
+            "source_before": multibuffer_before.get(&changed_multibuffer_path),
+            "source_after_edit": multibuffer_after_edit.get(&changed_multibuffer_path),
+            "disk_after_save": multibuffer_disk_after_save,
+            "source_after_undo": multibuffer_after_undo.get(&changed_multibuffer_path),
+            "disk_after_restore": multibuffer_disk_after_restore,
+        },
+        "semantic_navigation": {
+            "message": semantic_navigation,
+            "cursor": {
+                "row": semantic_point.row,
+                "column": semantic_point.column,
+            },
+        },
+        "terminal_edits": {
+            "rename": {
+                "preparation": {
+                    "placeholder": rename_preparation.placeholder,
+                    "start": rename_preparation.start,
+                    "end": rename_preparation.end,
+                },
+                "overlay_rows": rename_overlay_rows,
+                "preview": {
+                    "read_only": rename_preview_read_only,
+                    "source_count": rename_preview_source_count,
+                    "buffer_count": rename_preview_buffer_count,
+                    "edit_count": rename_pending.plan.edit_count,
+                    "file_operation_count": rename_pending.plan.file_operation_count,
+                    "signature": rename_pending.plan.signature,
+                    "confirmation_signature_matches": confirmation_plan.signature
+                        == rename_pending.plan.signature,
+                    "contains_main": rename_preview_text.contains("src/main.rs"),
+                    "contains_peer": rename_preview_text.contains("src/lib.rs"),
+                    "contains_old_text": rename_preview_text.contains("alpha_"),
+                    "contains_new_text": rename_preview_text.contains("renamed_fixture"),
+                    "rejected_contains_new_text": rejected_preview_text.contains("renamed_fixture"),
+                    "rejection_unchanged": rename_rejection_unchanged,
+                },
+                "buffer_count": rename_buffer_count,
+                "undo_buffer_count": rename_undo_count,
+                "redo_buffer_count": rename_redo_count,
+                "main_after": rename_main_after,
+                "peer_after": rename_peer_after,
+                "main_after_undo": rename_main_after_undo,
+                "peer_after_undo": rename_peer_after_undo,
+                "main_after_redo": rename_main_after_redo,
+            },
+            "code_action": {
+                "title": applied_code_action_title,
+                "kind": applied_code_action_kind,
+                "preferred": applied_code_action_preferred,
+                "overlay_rows": code_action_overlay_rows,
+                "buffer_count": code_action_buffer_count,
+                "undo_buffer_count": code_action_undo_count,
+                "main_after": code_action_main_after,
+                "main_after_undo": code_action_main_after_undo,
+            },
+            "format_document": {
+                "buffer_count": format_document_buffer_count,
+                "undo_buffer_count": format_document_undo_count,
+                "after": format_document_after,
+                "after_undo": format_document_after_undo,
+            },
+            "format_range": {
+                "buffer_count": format_range_buffer_count,
+                "undo_buffer_count": format_range_undo_count,
+                "after": format_range_after,
+                "after_undo": format_range_after_undo,
+            },
+        },
+    });
+
+    // Releasing the project-backed editor releases Zed's OpenLspBufferHandle.
+    // A project-less keepalive window prevents GPUI from terminating when the
+    // probe closes its only real editor, so didClose can reach the server before
+    // the outer runner initiates shutdown.
+    let _keepalive_window = cx.update(|cx| open_editor(buffer.clone(), cx))?;
+    for tab in &probe_tabs {
+        tab.editor_window
+            .update(cx, |_editor, window, _cx| window.remove_window())?;
+    }
+    cx.background_executor()
+        .timer(Duration::from_millis(25))
+        .await;
+
+    Ok(report)
+}
+
 async fn execute_alpha_1_probe(
     probe: Alpha1Probe,
     services: &FileServices,
@@ -4389,7 +12232,7 @@ async fn alpha_1_root_identity_probe(
         } else {
             tabs.push(create_document_tab(
                 document,
-                services.buffer_store.clone(),
+                services,
                 redraw_sender.clone(),
                 cx,
             )?);
@@ -4470,8 +12313,8 @@ async fn alpha_1_outside_trace_probe(path: &Path, cx: &mut gpui::AsyncApp) -> Re
 
     let (recording, services) = cx.update(|cx| {
         let real: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.background_executor().clone()));
-        let recording = RecordingFs::new(real);
-        let services = file_services_with_fs(cx, recording.clone());
+        let recording = ZecFs::isolated_recording(real);
+        let services = file_services_with_fs(cx, recording.clone(), false);
         (recording, services)
     });
     recording.clear();
@@ -4651,12 +12494,7 @@ async fn alpha_1_search_failure_probe(
     let document =
         load_project_document(project_path, control_file.canonical_path(), services, cx).await?;
     let (redraw_sender, _redraw_receiver) = async_channel::bounded(64);
-    let tabs = vec![create_document_tab(
-        document,
-        services.buffer_store.clone(),
-        redraw_sender,
-        cx,
-    )?];
+    let tabs = vec![create_document_tab(document, services, redraw_sender, cx)?];
     let before = alpha_1_document_trace(&tabs[0].document, tabs.len(), cx);
 
     let mut scheduler = ProjectSearchScheduler::default();
@@ -4706,6 +12544,9 @@ async fn alpha_1_search_failure_probe(
             None,
             Rect::new(0, 0, 120, 40),
             "repo",
+            None,
+            None,
+            None,
             None,
             None,
             Some(&prompt),
@@ -5621,6 +13462,9 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
+                        None,
+                        None,
                     );
                     let middle = capture_editor(
                         editor,
@@ -5640,6 +13484,9 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
+                        None,
+                        None,
                     );
                     let end = capture_editor(
                         editor,
@@ -5652,6 +13499,9 @@ mod tests {
                         middle.last_cursor,
                         area,
                         "large",
+                        None,
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -5713,6 +13563,9 @@ mod tests {
         ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
     )]
     #[test]
+    // Keep this Alpha 1 PoC identifier stable. The standalone-file path is now
+    // backed by a Zed Project internally, but the externally observable reload
+    // and undo contract represented by this pinned test ID is unchanged.
     fn clean_file_auto_reloads_without_project_and_reload_is_undoable() {
         use std::time::{Duration, Instant};
 
@@ -5734,14 +13587,14 @@ mod tests {
                     let (event_sender, _event_receiver) = async_channel::unbounded();
                     let tab = create_document_tab(
                         document,
-                        services.buffer_store.clone(),
+                        &services,
                         event_sender,
                         cx,
                     )?;
 
-                    let (project_is_none, initial_text) = tab.editor_window.update(
+                    let (project_is_some, initial_text) = tab.editor_window.update(
                         cx,
-                        |editor, _window, cx| (editor.project().is_none(), editor.text(cx)),
+                        |editor, _window, cx| (editor.project().is_some(), editor.text(cx)),
                     )?;
                     anyhow::ensure!(initial_text == INITIAL, "initial text was {initial_text:?}");
 
@@ -5779,7 +13632,7 @@ mod tests {
                         .read_with(cx, |buffer, _| (buffer.is_dirty(), buffer.has_conflict()));
 
                     Ok((
-                        project_is_none,
+                        project_is_some,
                         reloaded_text,
                         reloaded_dirty,
                         reloaded_conflict,
@@ -5797,7 +13650,7 @@ mod tests {
         });
 
         let (
-            project_is_none,
+            project_is_some,
             reloaded_text,
             reloaded_dirty,
             reloaded_conflict,
@@ -5809,7 +13662,7 @@ mod tests {
             .expect("receive external reload result")
             .expect("external reload should succeed");
 
-        assert!(project_is_none);
+        assert!(project_is_some);
         assert_eq!(reloaded_text, EXTERNAL);
         assert!(!reloaded_dirty);
         assert!(!reloaded_conflict);
@@ -5842,12 +13695,7 @@ mod tests {
                 let result: Result<_> = async {
                     let document = document.await?;
                     let (event_sender, _event_receiver) = async_channel::unbounded();
-                    let tab = create_document_tab(
-                        document,
-                        services.buffer_store.clone(),
-                        event_sender,
-                        cx,
-                    )?;
+                    let tab = create_document_tab(document, &services, event_sender, cx)?;
 
                     std::fs::rename(&original_path, &renamed_path).with_context(|| {
                         format!(
@@ -6696,5 +14544,416 @@ mod tests {
         keep_cursor_visible(&mut viewport, moved_cursor, 5, 6, false);
         assert_eq!(viewport.top_row, 3);
         assert_eq!(viewport.left_column, 6);
+    }
+
+    #[test]
+    fn terminal_completion_rejects_stale_results_and_filters_original_indices() {
+        let mut prompt = CompletionPrompt::running(7, 11);
+        assert!(!prompt.complete(7, 10, Ok(Vec::new())));
+        assert!(matches!(prompt.state, CompletionPromptState::Running));
+
+        assert!(prompt.complete(
+            7,
+            11,
+            Ok(vec![
+                terminal::CompletionPresentation {
+                    label: "alpha".to_owned(),
+                    detail: Some("first".to_owned()),
+                    kind: Some("FUNCTION".to_owned()),
+                    documentation: None,
+                },
+                terminal::CompletionPresentation {
+                    label: "beta".to_owned(),
+                    detail: Some("second".to_owned()),
+                    kind: Some("VARIABLE".to_owned()),
+                    documentation: Some("beta docs".to_owned()),
+                },
+            ])
+        ));
+        prompt.prompt = LinePrompt::with_text("second");
+        prompt.refresh();
+        assert_eq!(prompt.selected_item_index(), Some(1));
+        assert!(
+            prompt
+                .overlay()
+                .rows
+                .iter()
+                .any(|row| row.text.contains("beta docs"))
+        );
+    }
+
+    #[test]
+    fn language_payloads_and_overlay_snapshots_are_bounded() {
+        let oversized = format!("{}é", "x".repeat(MAX_LANGUAGE_TEXT_BYTES));
+        let bounded = bounded_terminal_text(&oversized);
+        assert!(bounded.len() <= MAX_LANGUAGE_TEXT_BYTES);
+        assert!(bounded.ends_with('…'));
+        assert!(bounded.is_char_boundary(bounded.len()));
+
+        let mut completion = CompletionPrompt::running(7, 11);
+        let completion_items = (0..MAX_LANGUAGE_RESPONSE_ITEMS + 50)
+            .map(|index| terminal::CompletionPresentation {
+                label: format!("item-{index:05}"),
+                detail: None,
+                kind: None,
+                documentation: None,
+            })
+            .collect();
+        assert!(completion.complete(7, 11, Ok(completion_items)));
+        completion.selected = MAX_LANGUAGE_RESPONSE_ITEMS - 1;
+        let completion_overlay = completion.overlay();
+        assert_eq!(completion_overlay.rows.len(), MAX_OVERLAY_SNAPSHOT_ROWS);
+        assert_eq!(
+            completion_overlay.selected,
+            Some(MAX_OVERLAY_SNAPSHOT_ROWS - 1)
+        );
+        let CompletionPromptState::Ready { items, visible } = &completion.state else {
+            panic!("completion did not become ready")
+        };
+        assert_eq!(items.len(), MAX_LANGUAGE_RESPONSE_ITEMS);
+        assert_eq!(visible.len(), MAX_LANGUAGE_RESPONSE_ITEMS);
+
+        let mut diagnostics = DiagnosticsPrompt::running(9);
+        let diagnostic_items = (0..MAX_LANGUAGE_RESPONSE_ITEMS + 50)
+            .map(|index| DiagnosticPresentation {
+                path: PathBuf::from(format!("/repo/{index:05}.rs")),
+                label: format!("{index:05}.rs"),
+                row: 0,
+                column: 0,
+                severity: "W".to_owned(),
+                message: "bounded warning".to_owned(),
+                source: Some("fixture".to_owned()),
+            })
+            .collect();
+        assert!(diagnostics.complete(9, Ok(diagnostic_items)));
+        diagnostics.selected = MAX_LANGUAGE_RESPONSE_ITEMS - 1;
+        let diagnostics_overlay = diagnostics.overlay();
+        assert_eq!(diagnostics_overlay.rows.len(), MAX_OVERLAY_SNAPSHOT_ROWS);
+        assert_eq!(
+            diagnostics_overlay.selected,
+            Some(MAX_OVERLAY_SNAPSHOT_ROWS - 1)
+        );
+        let DiagnosticsPromptState::Ready { items, visible } = &diagnostics.state else {
+            panic!("diagnostics did not become ready")
+        };
+        assert_eq!(items.len(), MAX_LANGUAGE_RESPONSE_ITEMS);
+        assert_eq!(visible.len(), MAX_LANGUAGE_RESPONSE_ITEMS);
+    }
+
+    #[test]
+    fn terminal_hover_rejects_stale_results_and_scrolls_projected_lines() {
+        let mut prompt = HoverPrompt::running(3, 5);
+        assert!(!prompt.complete(4, 5, Ok(Vec::new())));
+        assert!(prompt.complete(
+            3,
+            5,
+            Ok(vec![HoverPresentation {
+                kind: "Markdown".to_owned(),
+                text: "first\nsecond".to_owned(),
+            }])
+        ));
+        assert_eq!(prompt.overlay().rows.len(), 3);
+        prompt.step(TabDirection::Next);
+        assert_eq!(prompt.overlay().selected, Some(1));
+    }
+
+    #[test]
+    fn terminal_diagnostics_reject_stale_results_and_filter_owned_locations() {
+        let mut prompt = DiagnosticsPrompt::running(9);
+        assert!(!prompt.complete(8, Ok(Vec::new())));
+        assert!(prompt.complete(
+            9,
+            Ok(vec![
+                DiagnosticPresentation {
+                    path: PathBuf::from("/repo/src/main.rs"),
+                    label: "src/main.rs".to_owned(),
+                    row: 1,
+                    column: 2,
+                    severity: "E".to_owned(),
+                    message: "missing value".to_owned(),
+                    source: Some("fixture".to_owned()),
+                },
+                DiagnosticPresentation {
+                    path: PathBuf::from("/repo/src/lib.rs"),
+                    label: "src/lib.rs".to_owned(),
+                    row: 4,
+                    column: 5,
+                    severity: "W".to_owned(),
+                    message: "unused value".to_owned(),
+                    source: Some("fixture".to_owned()),
+                },
+            ])
+        ));
+        prompt.prompt = LinePrompt::with_text("unused");
+        prompt.refresh();
+        let selected = prompt.selected_item().expect("filtered diagnostic");
+        assert_eq!(selected.path, PathBuf::from("/repo/src/lib.rs"));
+        assert_eq!(prompt.overlay().selected, Some(0));
+    }
+
+    #[test]
+    fn terminal_locations_reject_stale_results_and_preserve_owned_targets() {
+        let mut prompt = LocationsPrompt::running(7, 11, LocationRequestKind::References);
+        assert!(!prompt.complete(8, 11, LocationRequestKind::References, Ok(Vec::new())));
+        assert!(!prompt.complete(7, 11, LocationRequestKind::Definition, Ok(Vec::new())));
+        assert!(matches!(prompt.state, LocationsPromptState::Running));
+        assert!(prompt.complete(
+            7,
+            11,
+            LocationRequestKind::References,
+            Ok(vec![
+                LocationPresentation {
+                    path: PathBuf::from("/repo/src/main.rs"),
+                    label: "src/main.rs".to_owned(),
+                    row: 1,
+                    column: 2,
+                    end_row: 1,
+                    end_column: 5,
+                    snippet: "alpha main".to_owned(),
+                },
+                LocationPresentation {
+                    path: PathBuf::from("/repo/src/lib.rs"),
+                    label: "src/lib.rs".to_owned(),
+                    row: 4,
+                    column: 5,
+                    end_row: 4,
+                    end_column: 9,
+                    snippet: "beta peer".to_owned(),
+                },
+            ])
+        ));
+        prompt.prompt = LinePrompt::with_text("peer");
+        prompt.refresh();
+        let selected = prompt.selected_item().expect("filtered location");
+        assert_eq!(selected.path, PathBuf::from("/repo/src/lib.rs"));
+        assert_eq!(prompt.overlay().selected, Some(0));
+
+        prompt.begin_request(12);
+        assert!(!prompt.complete(7, 11, LocationRequestKind::References, Ok(Vec::new())));
+        assert!(matches!(prompt.state, LocationsPromptState::Running));
+    }
+
+    #[test]
+    fn rename_preview_normalizes_utf16_and_is_order_stable() {
+        let directory = tempfile::tempdir().expect("create rename preview directory");
+        let root = directory.path().join("repo");
+        std::fs::create_dir(&root).expect("create rename preview root");
+        let main = root.join("main.rs");
+        let peer = root.join("peer.rs");
+        std::fs::write(&main, "let emoji = \"😀alpha\";\n").expect("write main fixture");
+        std::fs::write(&peer, "let peer = alpha;\n").expect("write peer fixture");
+        let main_uri = lsp::Uri::from_file_path(&main).expect("main URI");
+        let peer_uri = lsp::Uri::from_file_path(&peer).expect("peer URI");
+        let main_edit = lsp::TextEdit::new(
+            lsp::Range::new(lsp::Position::new(0, 15), lsp::Position::new(0, 20)),
+            "renamed".to_owned(),
+        );
+        let peer_edit = lsp::TextEdit::new(
+            lsp::Range::new(lsp::Position::new(0, 11), lsp::Position::new(0, 16)),
+            "renamed".to_owned(),
+        );
+        let first = lsp::WorkspaceEdit {
+            changes: Some(std::collections::HashMap::from([
+                (main_uri.clone(), vec![main_edit.clone()]),
+                (peer_uri.clone(), vec![peer_edit.clone()]),
+            ])),
+            ..Default::default()
+        };
+        let second = lsp::WorkspaceEdit {
+            changes: Some(std::collections::HashMap::from([
+                (peer_uri, vec![peer_edit]),
+                (main_uri, vec![main_edit]),
+            ])),
+            ..Default::default()
+        };
+        let first = normalize_rename_workspace_edit(&first, &root).expect("normalize first edit");
+        let second =
+            normalize_rename_workspace_edit(&second, &root).expect("normalize second edit");
+        assert_eq!(first.signature, second.signature);
+        assert_eq!(first.edit_count, 2);
+        assert_eq!(first.file_operation_count, 0);
+
+        let (updated, summaries) = apply_preview_text_edits(
+            "let emoji = \"😀alpha\";\n",
+            &[RenamePreviewEdit {
+                start_line: 0,
+                start_character: 15,
+                end_line: 0,
+                end_character: 20,
+                new_text: "renamed".to_owned(),
+                annotation_id: None,
+            }],
+        )
+        .expect("apply UTF-16 preview edit");
+        assert_eq!(updated, "let emoji = \"😀renamed\";\n");
+        assert!(summaries[0].contains("alpha"));
+        assert!(summaries[0].contains("renamed"));
+        assert!(utf16_position_to_byte("😀", 0, 1).is_err());
+    }
+
+    #[test]
+    fn rename_preview_exposes_safe_file_operations_and_annotations() {
+        let directory = tempfile::tempdir().expect("create rename operation directory");
+        let root = directory.path().join("repo");
+        std::fs::create_dir(&root).expect("create rename operation root");
+        let old = root.join("old.rs");
+        let created = root.join("created.rs");
+        let renamed = root.join("renamed.rs");
+        std::fs::write(&old, "old\n").expect("write rename operation fixture");
+        let annotation_id = "confirm-file-op".to_owned();
+        let edit = lsp::WorkspaceEdit {
+            document_changes: Some(lsp::DocumentChanges::Operations(vec![
+                lsp::DocumentChangeOperation::Op(lsp::ResourceOp::Create(lsp::CreateFile {
+                    uri: lsp::Uri::from_file_path(&created).expect("created URI"),
+                    options: Some(lsp::CreateFileOptions {
+                        overwrite: Some(false),
+                        ignore_if_exists: Some(true),
+                    }),
+                    annotation_id: Some(annotation_id.clone()),
+                })),
+                lsp::DocumentChangeOperation::Op(lsp::ResourceOp::Rename(lsp::RenameFile {
+                    old_uri: lsp::Uri::from_file_path(&old).expect("old URI"),
+                    new_uri: lsp::Uri::from_file_path(&renamed).expect("renamed URI"),
+                    options: None,
+                    annotation_id: Some(annotation_id.clone()),
+                })),
+                lsp::DocumentChangeOperation::Op(lsp::ResourceOp::Delete(lsp::DeleteFile {
+                    uri: lsp::Uri::from_file_path(&created).expect("delete URI"),
+                    options: Some(lsp::DeleteFileOptions {
+                        recursive: Some(false),
+                        ignore_if_not_exists: Some(true),
+                        annotation_id: Some(annotation_id.clone()),
+                    }),
+                })),
+            ])),
+            change_annotations: Some(std::collections::HashMap::from([(
+                annotation_id.clone(),
+                lsp::ChangeAnnotation {
+                    label: "Rename supporting files".to_owned(),
+                    needs_confirmation: Some(true),
+                    description: Some("fixture confirmation".to_owned()),
+                },
+            )])),
+            ..Default::default()
+        };
+        let plan = normalize_rename_workspace_edit(&edit, &root)
+            .expect("normalize resource operation preview");
+        assert_eq!(plan.file_operation_count, 3);
+        assert_eq!(plan.edit_count, 0);
+        assert!(plan.annotations[&annotation_id].needs_confirmation);
+        assert!(matches!(
+            plan.operations.as_slice(),
+            [
+                RenamePreviewOperation::Create { .. },
+                RenamePreviewOperation::Rename { .. },
+                RenamePreviewOperation::Delete { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn rename_preview_rejects_workspace_escape_overlap_and_snippets() {
+        let directory = tempfile::tempdir().expect("create rename security directory");
+        let root = directory.path().join("repo");
+        std::fs::create_dir(&root).expect("create rename security root");
+        let outside = directory.path().join("outside.rs");
+        std::fs::write(&outside, "outside\n").expect("write outside fixture");
+        let outside_edit = lsp::WorkspaceEdit {
+            changes: Some(std::collections::HashMap::from([(
+                lsp::Uri::from_file_path(&outside).expect("outside URI"),
+                vec![lsp::TextEdit::new(
+                    lsp::Range::default(),
+                    "escaped".to_owned(),
+                )],
+            )])),
+            ..Default::default()
+        };
+        assert!(
+            normalize_rename_workspace_edit(&outside_edit, &root)
+                .expect_err("outside edit must fail")
+                .to_string()
+                .contains("outside the workspace")
+        );
+
+        let overlap = vec![
+            RenamePreviewEdit {
+                start_line: 0,
+                start_character: 0,
+                end_line: 0,
+                end_character: 3,
+                new_text: "a".to_owned(),
+                annotation_id: None,
+            },
+            RenamePreviewEdit {
+                start_line: 0,
+                start_character: 2,
+                end_line: 0,
+                end_character: 4,
+                new_text: "b".to_owned(),
+                annotation_id: None,
+            },
+        ];
+        assert!(apply_preview_text_edits("alpha", &overlap).is_err());
+
+        let snippet = lsp::Edit::Snippet(lsp::SnippetTextEdit {
+            range: lsp::Range::default(),
+            snippet: lsp::StringValue {
+                kind: lsp::StringValueKind::Snippet,
+                value: "${1:name}".to_owned(),
+            },
+            annotation_id: None,
+        });
+        assert!(rename_preview_edit(&snippet).is_err());
+
+        #[cfg(unix)]
+        {
+            let escape = root.join("escape.rs");
+            std::os::unix::fs::symlink(&outside, &escape).expect("create escape symlink");
+            let symlink_edit = lsp::WorkspaceEdit {
+                changes: Some(std::collections::HashMap::from([(
+                    lsp::Uri::from_file_path(&escape).expect("escape URI"),
+                    vec![lsp::TextEdit::new(
+                        lsp::Range::default(),
+                        "escaped".to_owned(),
+                    )],
+                )])),
+                ..Default::default()
+            };
+            assert!(
+                normalize_rename_workspace_edit(&symlink_edit, &root)
+                    .expect_err("symlink escape must fail")
+                    .to_string()
+                    .contains("outside the workspace")
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_history_is_bidirectional_and_bounded() {
+        let point = |row| NavigationPoint {
+            buffer_id: u64::from(row),
+            path: Some(PathBuf::from(format!("/repo/{row}.rs"))),
+            row,
+            column: row.saturating_add(1),
+            viewport: Viewport {
+                top_row: row as usize,
+                left_column: row as usize,
+            },
+        };
+
+        let mut history = NavigationHistory::default();
+        history.record_jump(point(1));
+        assert!(history.can_go_back());
+        assert_eq!(history.go_back(point(2)), Some(point(1)));
+        assert!(history.can_go_forward());
+        assert_eq!(history.go_forward(point(1)), Some(point(2)));
+
+        let mut bounded = NavigationHistory::default();
+        for row in 0..150 {
+            bounded.record_jump(point(row));
+        }
+        assert_eq!(bounded.back.len(), 100);
+        assert_eq!(bounded.back.first(), Some(&point(50)));
+        assert!(bounded.forward.is_empty());
     }
 }

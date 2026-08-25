@@ -4,6 +4,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Read as _, Write as _},
+    os::unix::fs::{PermissionsExt as _, symlink},
     path::Path,
     sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     thread::{self, JoinHandle},
@@ -49,6 +50,7 @@ const CTRL_P: &[u8] = b"\x10";
 const CTRL_Q: &[u8] = b"\x11";
 const CTRL_S: &[u8] = b"\x13";
 const CTRL_Z: &[u8] = b"\x1a";
+const CTRL_PAGE_DOWN: &[u8] = b"\x1b[6;5~";
 const ENTER: &[u8] = b"\r";
 
 // This is one execute! call in TerminalSession::restore. Keeping the full ordered
@@ -72,6 +74,7 @@ fn actual_binary_preserves_edits_and_restores_the_pty_on_every_exit_path() -> Re
     normal_edit_undo_resize_save_and_quit(temp.path())?;
     directory_quick_open_deduplicates_symlink_alias(temp.path())?;
     failed_save_keeps_dirty_text_and_quit_guard(temp.path())?;
+    restricted_worktree_requires_confirmation_before_lsp(temp.path())?;
     signal_exit_restores_terminal(temp.path(), Signal::SIGINT)?;
     signal_exit_restores_terminal(temp.path(), Signal::SIGQUIT)?;
     signal_exit_restores_terminal(temp.path(), Signal::SIGTERM)?;
@@ -163,7 +166,15 @@ fn directory_quick_open_deduplicates_symlink_alias(directory: &Path) -> Result<(
         .get_termios()
         .context("PTY does not expose its initial termios")?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
-    session.wait_ready()?;
+    session.wait_for_screen("restricted Markdown worktree", ACTION_TIMEOUT, |screen| {
+        screen.contains("Worktree Trust") && screen.contains("quick-open-repo")
+    })?;
+    session.send(b"\x1b")?;
+    session.wait_for_screen(
+        "restricted worktree prompt dismissed",
+        ACTION_TIMEOUT,
+        |screen| screen.contains(READY) && !screen.contains("Worktree Trust"),
+    )?;
     session.assert_raw_mode_enabled(&termios_before)?;
     session.wait_for_screen("directory README ready", ACTION_TIMEOUT, |screen| {
         screen.contains(READY) && screen.contains("quick-open-repo")
@@ -220,6 +231,19 @@ fn failed_save_keeps_dirty_text_and_quit_guard(directory: &Path) -> Result<()> {
     let mut session = PtySession::spawn(pair, &[directory.as_os_str()])?;
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&termios_before)?;
+    session.wait_for_screen(
+        "restricted shared test worktree",
+        ACTION_TIMEOUT,
+        |screen| {
+            screen.contains("Worktree Trust") && screen.contains(&directory.display().to_string())
+        },
+    )?;
+    session.send(b"\x1b")?;
+    session.wait_for_screen(
+        "shared worktree prompt dismissed",
+        ACTION_TIMEOUT,
+        |screen| !screen.contains("Worktree Trust"),
+    )?;
     session.send(CTRL_N)?;
     session.wait_for_screen("scratch tab", ACTION_TIMEOUT, |screen| {
         screen.contains("Untitled 1")
@@ -269,6 +293,134 @@ fn failed_save_keeps_dirty_text_and_quit_guard(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Result<()> {
+    let workspace = directory.join("trust-workspace");
+    let root = workspace.join("project");
+    let source_dir = root.join("src");
+    let zed_dir = root.join(".zed");
+    let bin_dir = workspace.join("bin");
+    let home = workspace.join("home");
+    let xdg_config = workspace.join("xdg-config");
+    let xdg_data = workspace.join("xdg-data");
+    let xdg_cache = workspace.join("xdg-cache");
+    let xdg_state = workspace.join("xdg-state");
+    let rustup_home = workspace.join("rustup");
+    let cargo_home = workspace.join("cargo");
+    for path in [
+        &source_dir,
+        &zed_dir,
+        &bin_dir,
+        &home,
+        &xdg_config.join("zed"),
+        &xdg_data,
+        &xdg_cache,
+        &xdg_state,
+        &rustup_home,
+        &cargo_home,
+    ] {
+        fs::create_dir_all(path).context("create trust fixture directory")?;
+    }
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"pty-trust\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    )
+    .context("write trust fixture manifest")?;
+    fs::write(source_dir.join("main.rs"), "fn main() { alpha_ }\n")
+        .context("write trust fixture source")?;
+    fs::write(
+        zed_dir.join("settings.json"),
+        r#"{
+          "format_on_save": "off",
+          "remove_trailing_whitespace_on_save": false,
+          "ensure_final_newline_on_save": false
+        }"#,
+    )
+    .context("write trust fixture project settings")?;
+    fs::write(xdg_config.join("zed/settings.json"), "{}")
+        .context("write restricted user settings")?;
+    fs::write(xdg_config.join("zed/global_settings.json"), "{}")
+        .context("write restricted global settings")?;
+    fs::write(xdg_config.join("zed/keymap.json"), "[]").context("write restricted keymap")?;
+
+    symlink(
+        Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp")),
+        bin_dir.join("rust-analyzer"),
+    )
+    .context("link PTY fixture language server")?;
+    let fake_rustup = bin_dir.join("rustup");
+    fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n").context("write fake rustup")?;
+    let mut permissions = fs::metadata(&fake_rustup)
+        .context("read fake rustup metadata")?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_rustup, permissions).context("make fake rustup executable")?;
+
+    let log = workspace.join("lsp.jsonl");
+    let path = format!("{}:/usr/local/bin:/usr/bin:/bin", bin_dir.display());
+    let pair = open_pty()?;
+    let termios_before = pair
+        .master
+        .get_termios()
+        .context("PTY does not expose its initial termios")?;
+    let environment = [
+        (OsStr::new("PATH"), OsStr::new(&path)),
+        (OsStr::new("HOME"), home.as_os_str()),
+        (OsStr::new("XDG_CONFIG_HOME"), xdg_config.as_os_str()),
+        (OsStr::new("XDG_DATA_HOME"), xdg_data.as_os_str()),
+        (OsStr::new("XDG_CACHE_HOME"), xdg_cache.as_os_str()),
+        (OsStr::new("XDG_STATE_HOME"), xdg_state.as_os_str()),
+        (OsStr::new("RUSTUP_HOME"), rustup_home.as_os_str()),
+        (OsStr::new("CARGO_HOME"), cargo_home.as_os_str()),
+        (OsStr::new("ZEC_ALPHA2_LSP_LOG"), log.as_os_str()),
+    ];
+    let source = source_dir.join("main.rs");
+    let mut session =
+        PtySession::spawn_with_env(pair, &[root.as_os_str(), source.as_os_str()], &environment)?;
+    session.wait_for_screen("worktree trust confirmation", ACTION_TIMEOUT, |screen| {
+        screen.contains("Worktree Trust")
+            && screen.contains("Enter: trust for this session")
+            && screen.contains(&root.display().to_string())
+    })?;
+    session.assert_raw_mode_enabled(&termios_before)?;
+    ensure!(
+        !log.exists() || fs::read(&log).context("read pre-trust LSP log")?.is_empty(),
+        "language server started before worktree trust confirmation"
+    );
+
+    session.send(ENTER)?;
+    session.wait_for_screen("trusted worktree status", ACTION_TIMEOUT, |screen| {
+        screen.contains("worktree trusted for this session")
+    })?;
+    session.wait_until(
+        "fixture LSP initialized after trust",
+        ACTION_TIMEOUT,
+        |_| {
+            fs::read_to_string(&log).is_ok_and(|trace| trace.contains("\"method\":\"initialized\""))
+        },
+    )?;
+    session.send(CTRL_PAGE_DOWN)?;
+    session.wait_for_screen("Rust tab after trust", ACTION_TIMEOUT, |screen| {
+        screen.contains("2/2 settings.json [main.rs]") && screen.contains("fn main() { alpha_ }")
+    })?;
+    session.send(b"\x1b/")?;
+    session.wait_for_screen(
+        "completion after worktree trust",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("Completions") && screen.contains("alpha_completion"),
+    )?;
+    session.send(b"\x1b")?;
+    session.wait_for_screen("completion dismissed", ACTION_TIMEOUT, |screen| {
+        !screen.contains("Completions")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(
+        status.success(),
+        "trusted worktree zec exit failed: {status}"
+    );
+    session.assert_terminal_restored(&termios_before)
+}
+
 fn signal_exit_restores_terminal(directory: &Path, signal: Signal) -> Result<()> {
     let path = directory.join(format!("signal-{}.txt", signal as i32));
     fs::write(&path, "clean signal fixture\n").context("write signal fixture")?;
@@ -312,7 +464,9 @@ fn suspend_restores_and_resume_reenters_the_terminal(directory: &Path) -> Result
     session.assert_terminal_restored(&termios_before)?;
 
     session.send_signal(Signal::SIGCONT)?;
-    session.wait_ready()?;
+    session.wait_for_screen("frame after SIGCONT", ACTION_TIMEOUT, |screen| {
+        screen.contains("resumed  |  zec")
+    })?;
     session.assert_raw_mode_enabled(&termios_before)?;
     session.send(CTRL_A)?;
     session.paste(TOKEN)?;
@@ -320,9 +474,13 @@ fn suspend_restores_and_resume_reenters_the_terminal(directory: &Path) -> Result
     session.wait_for_screen("save after SIGCONT", ACTION_TIMEOUT, |screen| {
         screen.contains("saved  |  zec")
     })?;
+    let expected = format!("{TOKEN}\n");
+    let saved = fs::read(&path).context("read suspend fixture after save")?;
     ensure!(
-        fs::read(&path).context("read suspend fixture after save")? == TOKEN.as_bytes(),
-        "editing after SIGCONT did not reach disk"
+        saved == expected.as_bytes(),
+        "editing after SIGCONT did not reach disk; expected {:?}, got {:?}",
+        expected.as_bytes(),
+        saved
     );
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
@@ -356,6 +514,14 @@ struct PtySession {
 
 impl PtySession {
     fn spawn(pair: PtyPair, arguments: &[&OsStr]) -> Result<Self> {
+        Self::spawn_with_env(pair, arguments, &[])
+    }
+
+    fn spawn_with_env(
+        pair: PtyPair,
+        arguments: &[&OsStr],
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<Self> {
         let PtyPair { slave, master } = pair;
         let mut reader = master.try_clone_reader().context("clone PTY reader")?;
         let writer = master.take_writer().context("take PTY writer")?;
@@ -393,6 +559,9 @@ impl PtySession {
         command.env("TERM", "xterm-256color");
         command.env("LANG", "C.UTF-8");
         command.env("LC_ALL", "C.UTF-8");
+        for (name, value) in environment {
+            command.env(name, value);
+        }
         let child = slave
             .spawn_command(command)
             .context("spawn actual zec binary")?;

@@ -73,6 +73,104 @@ pub fn is_project_search(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::ALT
 }
 
+pub fn is_command_palette(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::F(1) && event.modifiers == CrosstermModifiers::NONE)
+            || (matches!(event.code, KeyCode::Char('p' | 'P'))
+                && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)))
+}
+
+pub fn is_completion(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::Char(' ') && event.modifiers == CrosstermModifiers::CONTROL)
+            || (event.code == KeyCode::Char('/') && event.modifiers == CrosstermModifiers::ALT))
+}
+
+pub fn is_hover(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(2)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_project_diagnostics(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(8)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_go_to_definition(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(12)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_go_to_type_definition(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(12)
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_find_references(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(12)
+        && event.modifiers == CrosstermModifiers::SHIFT
+}
+
+pub fn is_project_symbols(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('t')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_rename_symbol(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(6)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_code_actions(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('.')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_format_document(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('f' | 'F'))
+        && event.modifiers == (CrosstermModifiers::ALT | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_format_selection(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('f' | 'F'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_undo(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('z')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_redo(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::Char('y') && event.modifiers == CrosstermModifiers::CONTROL)
+            || (matches!(event.code, KeyCode::Char('z' | 'Z'))
+                && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)))
+}
+
+pub fn is_navigation_back(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Left
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_navigation_forward(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Right
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
 pub fn is_close_tab(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('w')
@@ -104,13 +202,39 @@ pub fn is_scroll_page_down(event: &KeyEvent) -> bool {
 }
 
 pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
-    (event.modifiers == CrosstermModifiers::CONTROL
-        && matches!(
-            event.code,
-            KeyCode::Char('c' | 'f' | 'g' | 'h' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 'w' | 'x')
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-        ))
+    is_command_palette(event)
+        || is_completion(event)
+        || is_hover(event)
+        || is_project_diagnostics(event)
+        || is_go_to_definition(event)
+        || is_go_to_type_definition(event)
+        || is_find_references(event)
+        || is_project_symbols(event)
+        || is_rename_symbol(event)
+        || is_code_actions(event)
+        || is_format_document(event)
+        || is_format_selection(event)
+        || is_undo(event)
+        || is_redo(event)
+        || (event.code == KeyCode::F(6) && event.modifiers == CrosstermModifiers::NONE)
+        || (event.code == KeyCode::Char('.') && event.modifiers == CrosstermModifiers::CONTROL)
+        || (matches!(event.code, KeyCode::Char('f' | 'F'))
+            && (event.modifiers == (CrosstermModifiers::ALT | CrosstermModifiers::SHIFT)
+                || event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)))
+        || (event.code == KeyCode::Char('z') && event.modifiers == CrosstermModifiers::CONTROL)
+        || (matches!(event.code, KeyCode::Char('z' | 'Z'))
+            && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT))
+        || (event.code == KeyCode::Char('y') && event.modifiers == CrosstermModifiers::CONTROL)
+        || is_navigation_back(event)
+        || is_navigation_forward(event)
+        || (event.modifiers == CrosstermModifiers::CONTROL
+            && matches!(
+                event.code,
+                KeyCode::Char(
+                    'c' | 'f' | 'g' | 'h' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 'w' | 'x'
+                ) | KeyCode::PageUp
+                    | KeyCode::PageDown
+            ))
         || (event.modifiers == CrosstermModifiers::ALT
             && matches!(
                 event.code,
@@ -529,13 +653,94 @@ mod tests {
                 CrosstermModifiers::ALT | CrosstermModifiers::SHIFT,
             )));
         }
-        assert!(!is_intercepted_shortcut(&KeyEvent::new(
+        assert!(is_intercepted_shortcut(&KeyEvent::new(
             KeyCode::Char('z'),
             CrosstermModifiers::CONTROL,
         )));
         assert!(!is_intercepted_shortcut(&KeyEvent::new(
             KeyCode::Char('c'),
             CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+        )));
+    }
+
+    #[test]
+    fn recognizes_command_palette_and_portable_language_action_fallbacks() {
+        assert!(is_command_palette(&KeyEvent::new(
+            KeyCode::Char('P'),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+        )));
+        assert!(is_command_palette(&KeyEvent::new(
+            KeyCode::F(1),
+            CrosstermModifiers::NONE,
+        )));
+        assert!(is_completion(&KeyEvent::new(
+            KeyCode::Char(' '),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(is_completion(&KeyEvent::new(
+            KeyCode::Char('/'),
+            CrosstermModifiers::ALT,
+        )));
+        assert!(is_hover(&KeyEvent::new(
+            KeyCode::F(2),
+            CrosstermModifiers::NONE,
+        )));
+        assert!(is_project_diagnostics(&KeyEvent::new(
+            KeyCode::F(8),
+            CrosstermModifiers::NONE,
+        )));
+        assert!(is_go_to_definition(&KeyEvent::new(
+            KeyCode::F(12),
+            CrosstermModifiers::NONE,
+        )));
+        assert!(is_go_to_type_definition(&KeyEvent::new(
+            KeyCode::F(12),
+            CrosstermModifiers::ALT,
+        )));
+        assert!(is_find_references(&KeyEvent::new(
+            KeyCode::F(12),
+            CrosstermModifiers::SHIFT,
+        )));
+        assert!(is_project_symbols(&KeyEvent::new(
+            KeyCode::Char('t'),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(is_rename_symbol(&KeyEvent::new(
+            KeyCode::F(6),
+            CrosstermModifiers::NONE,
+        )));
+        assert!(is_code_actions(&KeyEvent::new(
+            KeyCode::Char('.'),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(is_format_document(&KeyEvent::new(
+            KeyCode::Char('F'),
+            CrosstermModifiers::SHIFT | CrosstermModifiers::ALT,
+        )));
+        assert!(is_format_selection(&KeyEvent::new(
+            KeyCode::Char('f'),
+            CrosstermModifiers::CONTROL | CrosstermModifiers::ALT,
+        )));
+        assert!(is_undo(&KeyEvent::new(
+            KeyCode::Char('z'),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(is_redo(&KeyEvent::new(
+            KeyCode::Char('y'),
+            CrosstermModifiers::CONTROL,
+        )));
+        assert!(is_navigation_back(&KeyEvent::new(
+            KeyCode::Left,
+            CrosstermModifiers::ALT,
+        )));
+        assert!(is_navigation_forward(&KeyEvent::new(
+            KeyCode::Right,
+            CrosstermModifiers::ALT,
+        )));
+        assert!(!is_command_palette(&KeyEvent::new_with_kind(
+            KeyCode::F(1),
+            CrosstermModifiers::NONE,
+            KeyEventKind::Release,
         )));
     }
 }

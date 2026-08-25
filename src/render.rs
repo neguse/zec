@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Modifier, Style},
     text::Span,
-    widgets::{Clear, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 
 /// A cursor position in the complete document.
@@ -62,6 +62,21 @@ pub struct Viewport {
     pub left_column: usize,
 }
 
+/// One presentation-only row in a terminal overlay collection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OverlayRow {
+    pub text: String,
+    pub enabled: bool,
+}
+
+/// A bounded terminal projection of a picker, menu, completion list, or panel.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OverlaySnapshot {
+    pub title: String,
+    pub rows: Vec<OverlayRow>,
+    pub selected: Option<usize>,
+}
+
 /// Immutable, Zed-independent input to the terminal renderer.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderSnapshot {
@@ -92,6 +107,8 @@ pub struct RenderSnapshot {
     pub status: String,
     /// Terminal-cell column for an input cursor on the status row.
     pub status_cursor_column: Option<usize>,
+    /// The topmost overlay. Domain state remains outside the renderer.
+    pub overlay: Option<OverlaySnapshot>,
 }
 
 impl RenderSnapshot {
@@ -386,6 +403,10 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
         render_selection_row(snapshot, document_row, line, y, text_rect, text_area, buf);
     }
 
+    if let Some(overlay) = &snapshot.overlay {
+        render_overlay(overlay, body_rect, clipped, snapshot.text_style, buf);
+    }
+
     if area.height == 0 {
         return;
     }
@@ -408,6 +429,102 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
         0,
         buf,
     );
+}
+
+fn render_overlay(
+    overlay: &OverlaySnapshot,
+    body: Rect,
+    clipped: Rect,
+    base_style: Style,
+    buf: &mut Buffer,
+) {
+    if body.width < 4 || body.height < 3 {
+        return;
+    }
+
+    let content_width = overlay
+        .rows
+        .iter()
+        .map(|row| usize::from(row.text.cell_width()).saturating_add(2))
+        .chain([usize::from(overlay.title.cell_width())])
+        .max()
+        .unwrap_or_default();
+    let desired_width = u16::try_from(content_width.saturating_add(4)).unwrap_or(u16::MAX);
+    let width = desired_width.clamp(4, body.width);
+    let visible_rows = overlay
+        .rows
+        .len()
+        .min(usize::from(body.height.saturating_sub(2)));
+    let height = u16::try_from(visible_rows.saturating_add(2))
+        .unwrap_or(body.height)
+        .clamp(3, body.height);
+    let x = body.x.saturating_add(body.width.saturating_sub(width) / 2);
+    let y = body
+        .y
+        .saturating_add(body.height.saturating_sub(height).min(2));
+    let area = Rect::new(x, y, width, height).intersection(clipped);
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+
+    Clear.render(area, buf);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(overlay.title.as_str())
+        .style(base_style);
+    let inner = block.inner(area);
+    block.render(area, buf);
+    if inner.is_empty() {
+        return;
+    }
+
+    let selected = overlay
+        .selected
+        .filter(|selected| *selected < overlay.rows.len());
+    let visible_count = usize::from(inner.height);
+    let first = selected
+        .map(|selected| {
+            selected
+                .saturating_add(1)
+                .saturating_sub(visible_count)
+                .min(overlay.rows.len().saturating_sub(visible_count))
+        })
+        .unwrap_or_default();
+    for (screen_row, (row_index, row)) in overlay
+        .rows
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible_count)
+        .enumerate()
+    {
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(screen_row).unwrap_or(inner.height));
+        let row_area = Rect::new(inner.x, y, inner.width, 1).intersection(clipped);
+        let mut style = base_style;
+        if selected == Some(row_index) {
+            style = style.add_modifier(Modifier::REVERSED);
+        } else if !row.enabled {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        buf.set_style(row_area, style);
+        let prefix = if selected == Some(row_index) {
+            "› "
+        } else {
+            "  "
+        };
+        render_line(
+            &format!("{prefix}{}", row.text),
+            style,
+            &[],
+            y,
+            inner,
+            clipped,
+            0,
+            buf,
+        );
+    }
 }
 
 fn render_background_row(
@@ -598,8 +715,8 @@ mod tests {
     };
 
     use super::{
-        BackgroundRange, Cursor, EditorWidget, RenderSnapshot, SelectionRange, StyleSpan,
-        TextPosition, Viewport,
+        BackgroundRange, Cursor, EditorWidget, OverlayRow, OverlaySnapshot, RenderSnapshot,
+        SelectionRange, StyleSpan, TextPosition, Viewport,
     };
 
     fn row(buf: &Buffer, y: u16) -> String {
@@ -629,6 +746,7 @@ mod tests {
             },
             status: "NORMAL".into(),
             status_cursor_column: None,
+            overlay: None,
         };
         let area = Rect::new(0, 0, 20, 4);
         let mut buf = Buffer::empty(area);
@@ -1035,6 +1153,7 @@ mod tests {
             },
             status: String::new(),
             status_cursor_column: None,
+            overlay: None,
         };
         let widget_area = Rect::new(10, 5, 8, 4);
 
@@ -1234,6 +1353,7 @@ mod tests {
             },
             status: "NORMAL".into(),
             status_cursor_column: None,
+            overlay: None,
         };
         let area = Rect::new(0, 0, 24, 3);
         let mut buf = Buffer::empty(area);
@@ -1303,5 +1423,40 @@ mod tests {
                 byte_column: 4,
             })
         );
+    }
+
+    #[test]
+    fn overlays_are_bounded_virtualized_and_mark_the_selected_row() {
+        let snapshot = RenderSnapshot {
+            lines: vec!["underlay".into(); 20],
+            total_rows: 20,
+            text_style: Style::new().fg(Color::White).bg(Color::Black),
+            overlay: Some(OverlaySnapshot {
+                title: "Commands".into(),
+                rows: (0..10)
+                    .map(|index| OverlayRow {
+                        text: format!("action {index}"),
+                        enabled: index != 8,
+                    })
+                    .collect(),
+                selected: Some(8),
+            }),
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 24, 7);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        assert!(row(&buf, 0).contains("Commands"));
+        assert!(row(&buf, 4).contains("› action 8"));
+        let selected_x = row(&buf, 4).find('›').expect("selected marker") as u16;
+        assert!(
+            buf.cell((selected_x, 4))
+                .expect("selected overlay cell")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(row(&buf, 5).contains('└'));
     }
 }

@@ -1,9 +1,10 @@
 # zec
 
-Zed の編集コアを使う CUI エディタです。Linux向け基盤の実現可能性PoCは、
-data/terminal lifecycle、viewport-bounded rendering、actual-binary PTY試験、
-clean-build再現性の全gateを2026-08-23に通過しました。production-readyではなく、
-ここからalpha editorとして開発します。
+Zed の編集コアを使う CUI エディタです。Linux向け基盤の実現可能性PoCとAlpha 1の
+repository editing loopはcanonical gateを通過しています。現在は、Zed Projectをauthorityにした
+language editing loopを実装したAlpha 2 candidateです。341 caseのactual-binary acceptance、
+15種のLSP failure matrix、latency/VmHWM benchmarkをhosted gateで検証してから昇格します。
+まだproduction-readyではありません。
 
 現在は、GPUI runtime 上で `editor::Editor` を動かし、Crossterm から Zed の
 keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを描画します。
@@ -11,7 +12,20 @@ Linuxではheadless platformを、Windowsでは非表示windowを作るnative pl
 
 設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に、
 PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
-次のマイルストーンは [docs/alpha-1.md](docs/alpha-1.md) の機械判定contractで管理します。
+長期のZed体験parityは [docs/zed-parity.md](docs/zed-parity.md) と
+[docs/zed-parity-v1.json](docs/zed-parity-v1.json)で追跡します。repository editing loopは
+[docs/alpha-1.md](docs/alpha-1.md)、次のProject-backed language editing loopは
+[docs/alpha-2.md](docs/alpha-2.md)の機械判定contractで管理します。
+
+Alpha 2の通常回帰は、unit/PTYに加えて次のactual-binary integration testで確認できます。
+canonicalな20-process acceptanceとbenchmark、Alpha 1再検証、evidence-only promotionを含む完全な
+判定手順は[docs/alpha-2.md](docs/alpha-2.md)を参照してください。
+
+```sh
+cargo test --locked --test parity_contract --test pty_acceptance \
+  --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures \
+  -- --test-threads=1
+```
 
 引数なしなら現在のdirectory、directoryを1つ渡した場合はそのdirectoryをrepository rootとして
 起動します。開発checkoutから実行する場合は、それぞれ`cargo run --`、
@@ -96,8 +110,18 @@ BufferSnapshotで文書境界・行末へclipし、Unicode columnはbyte数で�
 Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
 Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight
 します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な
-parser/queryを遅延loadします。現在は実行時にLSPやNode runtimeを初期化しません。
+parser/queryを遅延loadします。repository modeでは同じZed `Project`がLanguageRegistryと
+LspStoreも所有し、各language adapterの通常のPATH discoveryでlanguage serverを起動します。
+Node runtimeは現在unavailableとして初期化するため、Nodeを必須とするadapterはまだ利用できません。
 `NO_COLOR` が設定された環境ではCrosstermの規約どおり色を出しません。
+
+`F1`または`Ctrl-Shift-P`はaction ID、表示名、binding、現在のenabled stateを持つcommand
+paletteです。`Ctrl-Space`（または`Alt-/`）で補完、`F2`でhover、`F8`でproject diagnostics、
+`F12` / `Alt-F12` / `Shift-F12`でdefinition / type definition / references、`Ctrl-T`でproject
+symbolsを開きます。移動後は`Alt-Left` / `Alt-Right`でselectionとviewportを含む履歴を往復できます。
+`F6`はprepareRename後にrename promptを開き、`Ctrl-.`はcode action picker、`Shift-Alt-F`は文書、
+`Ctrl-Alt-F`はselectionをformatします。複数fileに及ぶrename/code actionはZedの
+`ProjectTransaction`として保持し、`Ctrl-Z` / `Ctrl-Y`で全対象Bufferを一括undo/redoします。
 
 端末を使わず、Zed Editorへの挿入とundoを確認するheadless smoke:
 

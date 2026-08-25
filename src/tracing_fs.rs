@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use async_tar::Archive;
 use futures::{AsyncRead, Stream};
 use git::repository::GitRepository;
@@ -82,16 +82,40 @@ pub(crate) fn classify_single_file_accesses(
     Ok(operations.into_iter().collect())
 }
 
-pub(crate) struct RecordingFs {
+/// zec's filesystem boundary.
+///
+/// Besides optionally recording path access for the Alpha 1 single-file
+/// oracle, this rejects directories that merely happen to be named `.git`
+/// before Zed's GitStore starts a repository worker for them.
+pub(crate) struct ZecFs {
     inner: Arc<dyn Fs>,
     state: Arc<TraceState>,
+    record_accesses: bool,
+    isolate_observers: bool,
 }
 
-impl RecordingFs {
-    pub(crate) fn new(inner: Arc<dyn Fs>) -> Arc<Self> {
+impl ZecFs {
+    /// Build the production wrapper. Filesystem behavior, including
+    /// `Fs::is_fake`, otherwise remains identical to the wrapped authority.
+    pub(crate) fn guarded(inner: Arc<dyn Fs>) -> Arc<Self> {
         Arc::new(Self {
             inner,
             state: Arc::default(),
+            record_accesses: false,
+            isolate_observers: false,
+        })
+    }
+
+    /// Build a real-filesystem recorder that suppresses Zed's process-global
+    /// filesystem observers. Zed uses `Fs::is_fake` only to skip its global Git
+    /// configuration watches in production builds; every filesystem operation
+    /// still delegates to `inner`.
+    pub(crate) fn isolated_recording(inner: Arc<dyn Fs>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            state: Arc::default(),
+            record_accesses: true,
+            isolate_observers: true,
         })
     }
 
@@ -112,8 +136,47 @@ impl RecordingFs {
     }
 
     fn record(&self, kind: FsPathKind, method: &'static str, path: &Path) {
-        self.state.record(kind, method, path);
+        if self.record_accesses {
+            self.state.record(kind, method, path);
+        }
     }
+}
+
+fn resolve_git_metadata_dir(abs_dot_git: &Path) -> Result<PathBuf> {
+    if !abs_dot_git.is_file() {
+        return Ok(abs_dot_git.to_path_buf());
+    }
+
+    let contents = std::fs::read_to_string(abs_dot_git)
+        .with_context(|| format!("read Git metadata file {}", abs_dot_git.display()))?;
+    let relative_or_absolute = contents
+        .strip_prefix("gitdir:")
+        .context("Git metadata file does not start with `gitdir:`")?
+        .trim();
+    ensure!(
+        !relative_or_absolute.is_empty(),
+        "Git metadata file has an empty gitdir"
+    );
+    let git_dir = PathBuf::from(relative_or_absolute);
+    if git_dir.is_absolute() {
+        Ok(git_dir)
+    } else {
+        Ok(abs_dot_git
+            .parent()
+            .context("Git metadata file has no parent")?
+            .join(git_dir))
+    }
+}
+
+fn validate_git_repository_metadata(abs_dot_git: &Path) -> Result<()> {
+    let git_dir = resolve_git_metadata_dir(abs_dot_git)?;
+    let head = git_dir.join("HEAD");
+    ensure!(
+        head.is_file(),
+        "Git metadata at {} has no HEAD file",
+        git_dir.display()
+    );
+    Ok(())
 }
 
 struct RecordingWatcher {
@@ -135,7 +198,7 @@ impl Watcher for RecordingWatcher {
 }
 
 #[async_trait::async_trait]
-impl Fs for RecordingFs {
+impl Fs for ZecFs {
     async fn create_dir(&self, path: &Path) -> Result<()> {
         self.record(FsPathKind::Mutate, "create_dir", path);
         self.inner.create_dir(path).await
@@ -261,6 +324,16 @@ impl Fs for RecordingFs {
         &self,
         path: &Path,
     ) -> Result<Pin<Box<dyn Send + Stream<Item = Result<PathBuf>>>>> {
+        // Every local Zed Project starts an unrelated, process-global cleanup
+        // of old js-debug-companion downloads. The Alpha 1 single-file probe
+        // uses an isolated filesystem authority so that housekeeping must not
+        // race with (or be mistaken for) traversal of the controlled file's
+        // parent. Answering this one private directory from an empty in-memory
+        // view also guarantees that the probe performs no OS access there.
+        if self.isolate_observers && path == paths::debug_adapters_dir().join("js-debug-companion")
+        {
+            return Ok(Box::pin(futures::stream::empty()));
+        }
         self.record(FsPathKind::ReadDir, "read_dir", path);
         self.inner.read_dir(path).await
     }
@@ -293,6 +366,12 @@ impl Fs for RecordingFs {
         if let Some(path) = system_git_binary_path {
             self.record(FsPathKind::Repository, "open_repo.git_binary", path);
         }
+        validate_git_repository_metadata(abs_dot_git).with_context(|| {
+            format!(
+                "refusing invalid Git repository metadata {}",
+                abs_dot_git.display()
+            )
+        })?;
         self.inner.open_repo(abs_dot_git, system_git_binary_path)
     }
 
@@ -318,7 +397,7 @@ impl Fs for RecordingFs {
     }
 
     fn is_fake(&self) -> bool {
-        self.inner.is_fake()
+        self.isolate_observers || self.inner.is_fake()
     }
 
     async fn is_case_sensitive(&self) -> bool {
@@ -386,5 +465,38 @@ mod tests {
             path: target.to_path_buf(),
         };
         assert!(classify_single_file_accesses(&[observe], target).is_err());
+    }
+
+    #[test]
+    fn rejects_directory_that_only_looks_like_git_metadata() {
+        let directory = tempfile::tempdir().expect("temporary Git metadata fixture");
+        let dot_git = directory.path().join(".git");
+        std::fs::create_dir(&dot_git).expect("create fake .git directory");
+        std::fs::write(dot_git.join("alpha1-excluded.txt"), "not a repository")
+            .expect("write exclusion sentinel");
+
+        let error = validate_git_repository_metadata(&dot_git)
+            .expect_err("a .git directory without HEAD must be rejected");
+        assert!(error.to_string().contains("has no HEAD file"));
+    }
+
+    #[test]
+    fn accepts_normal_and_linked_worktree_git_metadata() {
+        let directory = tempfile::tempdir().expect("temporary Git metadata fixture");
+        let normal = directory.path().join("normal.git");
+        std::fs::create_dir(&normal).expect("create normal Git metadata");
+        std::fs::write(normal.join("HEAD"), "ref: refs/heads/main\n").expect("write normal HEAD");
+        validate_git_repository_metadata(&normal).expect("accept normal Git metadata");
+
+        let linked = directory.path().join("linked");
+        let linked_metadata = directory.path().join("main.git/worktrees/linked");
+        std::fs::create_dir_all(&linked_metadata).expect("create linked Git metadata");
+        std::fs::create_dir(&linked).expect("create linked worktree");
+        std::fs::write(linked_metadata.join("HEAD"), "ref: refs/heads/linked\n")
+            .expect("write linked HEAD");
+        let dot_git = linked.join(".git");
+        std::fs::write(&dot_git, "gitdir: ../main.git/worktrees/linked\n")
+            .expect("write linked .git file");
+        validate_git_repository_metadata(&dot_git).expect("accept linked Git metadata");
     }
 }

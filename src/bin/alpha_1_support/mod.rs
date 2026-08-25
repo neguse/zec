@@ -1180,7 +1180,22 @@ pub fn fresh_config_dir(case_id: &str) -> Result<PathBuf> {
         fs::remove_dir_all(&path)
             .with_context(|| format!("remove old config {}", path.display()))?;
     }
-    fs::create_dir_all(&path).with_context(|| format!("create fresh config {}", path.display()))?;
+    let zed = path.join("zed");
+    fs::create_dir_all(&zed).with_context(|| format!("create fresh config {}", zed.display()))?;
+    fs::write(
+        zed.join("settings.json"),
+        concat!(
+            "{\n",
+            "  \"session\": { \"trust_all_worktrees\": true },\n",
+            "  \"format_on_save\": \"off\",\n",
+            "  \"remove_trailing_whitespace_on_save\": false,\n",
+            "  \"ensure_final_newline_on_save\": false,\n",
+            "  \"git\": { \"disable_git\": true },\n",
+            "  \"languages\": { \"Rust\": { \"language_servers\": [] } }\n",
+            "}\n",
+        ),
+    )
+    .with_context(|| format!("write pinned Alpha 1 settings under {}", zed.display()))?;
     Ok(path)
 }
 
@@ -1819,16 +1834,47 @@ impl Drop for PtySession {
 }
 
 pub fn assert_process_group_absent(process_group: i32) -> Result<()> {
-    let result = unsafe { nix::libc::kill(-process_group, 0) };
-    if result == 0 {
-        bail!("process group {process_group} still exists after child exit");
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    loop {
+        let result = unsafe { nix::libc::kill(-process_group, 0) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            ensure!(
+                error.raw_os_error() == Some(nix::libc::ESRCH),
+                "cannot prove process group {process_group} is absent: {error}"
+            );
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "process group {process_group} still exists 5 seconds after child exit"
+        );
+        thread::sleep(EVENT_POLL);
     }
-    let error = io::Error::last_os_error();
-    ensure!(
-        error.raw_os_error() == Some(nix::libc::ESRCH),
-        "cannot prove process group {process_group} is absent: {error}"
-    );
-    Ok(())
+}
+
+pub fn wait_for_no_descendant_processes(pid: i32) -> Result<()> {
+    const STABLE_FOR: Duration = Duration::from_millis(100);
+
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    let mut zero_since = None;
+    loop {
+        let now = Instant::now();
+        let descendant_count = descendant_process_count(pid)?;
+        if descendant_count == 0 {
+            let zero_since = *zero_since.get_or_insert(now);
+            if now.saturating_duration_since(zero_since) >= STABLE_FOR {
+                return Ok(());
+            }
+        } else {
+            zero_since = None;
+        }
+        ensure!(
+            now < deadline,
+            "zec still has {descendant_count} descendant process(es) after 5 seconds"
+        );
+        thread::sleep(deadline.saturating_duration_since(now).min(EVENT_POLL));
+    }
 }
 
 pub fn vm_hwm_bytes(pid: i32) -> Result<u64> {

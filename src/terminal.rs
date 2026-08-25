@@ -1,5 +1,6 @@
 use std::{
     io::{self, Stdout, stdout},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -21,14 +22,17 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode,
     },
 };
+use lsp::{LanguageServerId, WorkspaceEdit};
+use project::CodeAction;
 use ratatui::{Terminal, backend::CrosstermBackend};
+use settings::WorktreeId;
 #[cfg(unix)]
 use signal_hook::{
     SigId,
     consts::{SIGHUP, SIGINT, SIGQUIT, SIGSTOP, SIGTERM, SIGTSTP},
 };
 
-use crate::{ProjectSearchRequestKey, repository::ProjectSearchOutput};
+use crate::{ProjectSearchRequestKey, actions::TerminalAction, repository::ProjectSearchOutput};
 
 pub type ZecTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -38,8 +42,71 @@ pub enum ScrollDirection {
     Down,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionPresentation {
+    pub label: String,
+    pub detail: Option<String>,
+    pub kind: Option<String>,
+    pub documentation: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HoverPresentation {
+    pub kind: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticPresentation {
+    pub path: PathBuf,
+    pub label: String,
+    pub row: u32,
+    pub column: u32,
+    pub severity: String,
+    pub message: String,
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocationRequestKind {
+    Definition,
+    TypeDefinition,
+    References,
+    ProjectSymbols,
+}
+
+impl LocationRequestKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Definition => "Definitions",
+            Self::TypeDefinition => "Type Definitions",
+            Self::References => "References",
+            Self::ProjectSymbols => "Project Symbols",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocationPresentation {
+    pub path: PathBuf,
+    pub label: String,
+    pub row: u32,
+    pub column: u32,
+    pub end_row: u32,
+    pub end_column: u32,
+    pub snippet: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenamePreparation {
+    pub placeholder: String,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug)]
 pub enum TerminalEvent {
+    Action(TerminalAction),
     Key(KeyEvent),
     Paste(String),
     Mouse(MouseEvent),
@@ -56,6 +123,55 @@ pub enum TerminalEvent {
     ProjectSearchFinished {
         request: ProjectSearchRequestKey,
         result: Result<ProjectSearchOutput, String>,
+    },
+    CompletionFinished {
+        buffer_id: u64,
+        generation: u64,
+        menu_wait_attempt: u16,
+        result: Result<Vec<CompletionPresentation>, String>,
+    },
+    HoverFinished {
+        buffer_id: u64,
+        generation: u64,
+        result: Result<Vec<HoverPresentation>, String>,
+    },
+    DiagnosticsFinished {
+        generation: u64,
+        result: Result<Vec<DiagnosticPresentation>, String>,
+    },
+    LocationsFinished {
+        buffer_id: u64,
+        generation: u64,
+        kind: LocationRequestKind,
+        result: Result<Vec<LocationPresentation>, String>,
+    },
+    RenamePrepared {
+        buffer_id: u64,
+        generation: u64,
+        result: Result<RenamePreparation, String>,
+    },
+    RenamePreviewFinished {
+        buffer_id: u64,
+        generation: u64,
+        new_name: String,
+        result: Result<(LanguageServerId, WorkspaceEdit), String>,
+    },
+    CodeActionsFinished {
+        buffer_id: u64,
+        generation: u64,
+        result: Result<Vec<CodeAction>, String>,
+    },
+    ConfigurationReloaded {
+        kind: &'static str,
+        result: Result<String, String>,
+    },
+    LanguageServiceNotice {
+        level: &'static str,
+        message: String,
+    },
+    WorktreeTrustRequired {
+        worktree_id: WorktreeId,
+        path: PathBuf,
     },
     Error(String),
     Signal(i32),
