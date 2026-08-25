@@ -1,0 +1,29 @@
+{
+  "contract_version": 1,
+  "candidate_sha": "341bc8e03518c05970750c5606cf63e16fe3faf1",
+  "gate": {
+    "run_id": 32868356950,
+    "job_id": 97869159240,
+    "run_attempt": 1,
+    "run_url": "https://github.com/neguse/zec/actions/runs/32868356950",
+    "job_url": "https://github.com/neguse/zec/actions/runs/32868356950/job/97869159240"
+  },
+  "artifact": {
+    "id": 9573243941,
+    "digest": "ca30d79443153cc429f6b4db38e3462eb6c1f6b9abef56a8ce29d64c9bc11163"
+  },
+  "reports": {
+    "acceptance_sha256": "f2d9ac2eabd2d7870444902c71827fc26e5a76739f1b99eb2c2ae58242f82e8c",
+    "benchmark_sha256": "c3b2cbe5ce1754dfd9749e2a7ce4a7329b76b14d897bcc3cbab4dedd55fc0efe"
+  },
+  "counts": {
+    "existing_test_count": 129,
+    "acceptance_case_count": 186
+  },
+  "oracle": {
+    "generator_source_sha256": "d579eae10060c3dff7afc5c4317dd9d743857438ed13ea90c41b8cea42815dd0",
+    "spec_sha256": "c7d7bbb9a9a8b1b17aa0b32170ed63d69ccdbdedf9b3743c4989760570d7b0a2",
+    "before_manifest_sha256": "09eb67e4452e476aaa6401c0f118717308c78859f69ce43efcd0f256feec5723",
+    "after_manifest_sha256": "446b5e1ef7047af4ea9b0cd00ee7a500ae7513d37340ed4ad1d7937b44a06bcf"
+  }
+}
