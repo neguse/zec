@@ -684,7 +684,7 @@ impl CollaborationPanelState {
                 (KeyCode::Char('n' | 'N'), KeyModifiers::NONE | KeyModifiers::SHIFT)
                 | (KeyCode::Esc, KeyModifiers::NONE) => {
                     self.pending_media = None;
-                    self.notice = Some(format!("{} bridge cancelled", kind.label()));
+                    self.notice = Some(format!("{} bridge cancelled", kind.argument()));
                     CollaborationInput::Consumed
                 }
                 _ => CollaborationInput::Consumed,
@@ -873,7 +873,7 @@ impl CollaborationPanelState {
             .context("select a channel before starting media")?
             .to_owned();
         self.media.start(kind, &url)?;
-        let message = format!("external {} bridge started", kind.label());
+        let message = format!("{} bridge started", kind.argument());
         self.notice = Some(message.clone());
         Ok(message)
     }
@@ -881,7 +881,7 @@ impl CollaborationPanelState {
     pub(crate) fn stop_media(&mut self, kind: MediaKind) -> Result<String> {
         let stopped = self.media.stop(kind)?;
         let message = if stopped {
-            format!("external {} bridge stopped", kind.label())
+            format!("{} bridge stopped", kind.argument())
         } else {
             format!("external {} bridge was not running", kind.label())
         };
@@ -912,13 +912,7 @@ impl CollaborationPanelState {
             );
         }
         if let Some(kind) = self.pending_media {
-            return (
-                format!(
-                    "Permission: launch external {} bridge? y confirm / n cancel",
-                    kind.label()
-                ),
-                None,
-            );
+            return (format!("Allow {} bridge? y/n", kind.argument()), None);
         }
         (
             self.notice.clone().unwrap_or_else(|| {
@@ -1010,10 +1004,7 @@ impl Widget for CollaborationPanelWidget<'_> {
             return;
         }
         Clear.render(area, buffer);
-        let title = format!(
-            " Collaboration · {} · {} ",
-            self.state.connection, self.state.account
-        );
+        let title = " Collaboration ";
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
@@ -1031,6 +1022,22 @@ impl Widget for CollaborationPanelWidget<'_> {
         let status_y = inner.bottom().saturating_sub(1);
         let content_bottom = status_y;
         let mut y = inner.y;
+        write_bounded(
+            buffer,
+            inner,
+            y,
+            &format!("Status: {}", self.state.connection),
+            Style::default().fg(Color::DarkGray),
+        );
+        y = y.saturating_add(1);
+        write_bounded(
+            buffer,
+            inner,
+            y,
+            &format!("Account: {}", self.state.account),
+            Style::default().fg(Color::DarkGray),
+        );
+        y = y.saturating_add(1);
         write_bounded(
             buffer,
             inner,
@@ -1118,27 +1125,37 @@ impl Widget for CollaborationPanelWidget<'_> {
             );
             y = y.saturating_add(1);
         }
+        let voice = if self.state.media.running(MediaKind::Voice) {
+            "on"
+        } else {
+            "off"
+        };
+        let screen = if self.state.media.running(MediaKind::Screen) {
+            "on"
+        } else {
+            "off"
+        };
+        let configured = if self.state.media_configured() {
+            "configured"
+        } else {
+            "not configured"
+        };
         if y < content_bottom {
-            let voice = if self.state.media.running(MediaKind::Voice) {
-                "on"
-            } else {
-                "off"
-            };
-            let screen = if self.state.media.running(MediaKind::Screen) {
-                "on"
-            } else {
-                "off"
-            };
-            let configured = if self.state.media_configured() {
-                "configured"
-            } else {
-                "not configured"
-            };
             write_bounded(
                 buffer,
                 inner,
                 y,
-                &format!("Media bridge: {configured}; voice {voice}; screen {screen}"),
+                &format!("Media bridge: {configured}"),
+                Style::default().fg(Color::Blue),
+            );
+            y = y.saturating_add(1);
+        }
+        if y < content_bottom {
+            write_bounded(
+                buffer,
+                inner,
+                y,
+                &format!("Voice: {voice}  Screen: {screen}"),
                 Style::default().fg(Color::Blue),
             );
         }

@@ -7505,6 +7505,7 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                             .iter()
                             .filter(|tab| {
                                 tab.image_project_path.is_none()
+                                    && tab.channel_notes.is_none()
                                     && tab_state(tab, cx).needs_discard_confirmation()
                             })
                             .count();
@@ -7929,6 +7930,7 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                         // editor window. It is never user-editable state and must not inherit
                         // scratch-buffer discard confirmation, including after session restore.
                         let needs_confirmation = tabs[active_index].image_project_path.is_none()
+                            && tabs[active_index].channel_notes.is_none()
                             && tab_state(&tabs[active_index], cx).needs_discard_confirmation();
                         if needs_confirmation && !close_armed {
                             close_armed = true;

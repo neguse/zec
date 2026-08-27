@@ -1325,6 +1325,289 @@ fn beta_3_native_zed_agent_and_local_commands_run_through_the_actual_binary() ->
     session.assert_terminal_restored(&termios_before)
 }
 
+#[test]
+fn parity_1_collaboration_notes_follow_invites_and_media_run_through_the_actual_binary()
+-> Result<()> {
+    const READY: &str = "PARITY1_COLLABORATION_EDITOR_READY";
+    const ORIGINAL_NOTES: &str = "# Shared Notes\nCOLLAB_ORIGINAL\n";
+    const EDITED_NOTES: &str = "# Shared Notes\nCOLLAB_EDITED\n";
+    const FINAL_NOTES: &str = "# Shared Notes\nCOLLAB_FINAL\n";
+    const CHANNEL_URL: &str = "https://example.invalid/channels/terminal-team";
+
+    let temp = tempfile::tempdir().context("create collaboration PTY fixture")?;
+    let root = temp.path().join("collaboration-project");
+    fs::create_dir_all(&root).context("create collaboration fixture project")?;
+    fs::write(root.join("README.md"), format!("{READY}\n"))
+        .context("write collaboration fixture document")?;
+
+    let media_log = temp.path().join("media-bridge.log");
+    let media_bridge = temp.path().join("media-bridge.sh");
+    fs::write(
+        &media_bridge,
+        "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$$\" \"$1\" \"$2\" \"$3\" >> \"$ZEC_MEDIA_LOG\"\nexec /bin/sleep 30\n",
+    )
+    .context("write collaboration media bridge")?;
+    let mut permissions = fs::metadata(&media_bridge)
+        .context("read collaboration media bridge metadata")?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&media_bridge, permissions)
+        .context("make collaboration media bridge executable")?;
+
+    let collaboration_fixture = serde_json::to_string(&serde_json::json!({
+        "account": "terminal-user",
+        "channels": [
+            {
+                "id": 7,
+                "name": "terminal-team",
+                "unread": true,
+                "url": CHANNEL_URL,
+                "notes": ORIGINAL_NOTES,
+                "collaborators": [{
+                    "userId": 42,
+                    "username": "alice",
+                    "online": true,
+                    "host": true,
+                    "row": 1,
+                    "column": 3
+                }]
+            },
+            {
+                "id": 8,
+                "name": "invited-accept",
+                "invitation": true,
+                "url": "https://example.invalid/channels/invited-accept"
+            },
+            {
+                "id": 9,
+                "name": "invited-decline",
+                "invitation": true,
+                "url": "https://example.invalid/channels/invited-decline"
+            }
+        ]
+    }))
+    .context("serialize collaboration fixture")?;
+    let media_configuration = serde_json::to_string(&serde_json::json!({
+        "command": media_bridge.to_string_lossy(),
+        "args": ["fixture-prefix"],
+        "env": { "ZEC_MEDIA_LOG": media_log.to_string_lossy() }
+    }))
+    .context("serialize media bridge configuration")?;
+
+    let pair = open_pty()?;
+    let termios_before = pair
+        .master
+        .get_termios()
+        .context("PTY does not expose its initial termios")?;
+    let environment = [
+        (
+            OsStr::new("ZEC_COLLABORATION_FIXTURE"),
+            OsStr::new(&collaboration_fixture),
+        ),
+        (
+            OsStr::new("ZEC_MEDIA_BRIDGE"),
+            OsStr::new(&media_configuration),
+        ),
+        (OsStr::new("ZEC_EXTERNAL_MEDIA"), OsStr::new("1")),
+    ];
+    let mut session = PtySession::spawn_with_env(pair, &[root.as_os_str()], &environment)?;
+    session.wait_for_screen("collaboration worktree trust", STARTUP_TIMEOUT, |screen| {
+        screen.contains("Worktree Trust") && screen.contains("collaboration-project")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("collaboration editor ready", ACTION_TIMEOUT, |screen| {
+        screen.contains(READY) && !screen.contains("Worktree Trust")
+    })?;
+    session.assert_raw_mode_enabled(&termios_before)?;
+
+    open_collaboration_panel(&mut session)?;
+    session.wait_for_screen("fixture collaboration panel", ACTION_TIMEOUT, |screen| {
+        screen.contains("Collaboration")
+            && screen.contains("Status: fixture-connected")
+            && screen.contains("Account: @terminal-user")
+            && screen.contains("#terminal-team")
+            && screen.contains("#invited-accept [invite]")
+            && screen.contains("@alice host")
+            && screen.contains("Media bridge: configured")
+            && screen.contains("Voice: off  Screen: off")
+    })?;
+
+    session.send(b"i")?;
+    session.wait_for_screen("fixture collaboration sign out", ACTION_TIMEOUT, |screen| {
+        screen.contains("Status: signed out")
+            && screen.contains("Account: signed out")
+            && screen.contains("fixture signed out")
+    })?;
+    session.send(b"i")?;
+    session.wait_for_screen("fixture collaboration sign in", ACTION_TIMEOUT, |screen| {
+        screen.contains("Status: fixture-connected")
+            && screen.contains("Account: @terminal-user")
+            && screen.contains("fixture signed in")
+    })?;
+    session.send(b"r")?;
+    session.wait_for_screen("fixture collaboration refresh", ACTION_TIMEOUT, |screen| {
+        screen.contains("fixture refreshed")
+    })?;
+
+    session.send(b"v")?;
+    session.wait_for_screen("voice bridge permission", ACTION_TIMEOUT, |screen| {
+        screen.contains("Allow voice bridge? y/n")
+    })?;
+    ensure!(
+        !media_log.exists(),
+        "media bridge launched before explicit confirmation"
+    );
+    session.send(b"n")?;
+    session.wait_for_screen("voice bridge rejection", ACTION_TIMEOUT, |screen| {
+        screen.contains("voice bridge cancelled") && screen.contains("Voice: off  Screen: off")
+    })?;
+
+    session.send(b"v")?;
+    session.send(b"y")?;
+    session.wait_for_screen("voice bridge started", ACTION_TIMEOUT, |screen| {
+        screen.contains("voice bridge started") && screen.contains("Voice: on  Screen: off")
+    })?;
+    session.wait_until("voice bridge invocation", ACTION_TIMEOUT, |_| {
+        fs::read_to_string(&media_log).is_ok_and(|text| {
+            text.lines()
+                .any(|line| line.contains(&format!("|fixture-prefix|voice|{CHANNEL_URL}")))
+        })
+    })?;
+    let voice_pid = bridge_pid(&media_log, "voice")?;
+    session.send(b"v")?;
+    session.wait_for_screen("voice bridge stopped", ACTION_TIMEOUT, |screen| {
+        screen.contains("voice bridge stopped") && screen.contains("Voice: off  Screen: off")
+    })?;
+    session.wait_until("voice bridge process reaped", ACTION_TIMEOUT, |_| {
+        !PathBuf::from(format!("/proc/{voice_pid}")).exists()
+    })?;
+
+    session.send(b"s")?;
+    session.wait_for_screen("screen bridge permission", ACTION_TIMEOUT, |screen| {
+        screen.contains("Allow screen bridge? y/n")
+    })?;
+    session.send(b"y")?;
+    session.wait_for_screen("screen bridge started", ACTION_TIMEOUT, |screen| {
+        screen.contains("screen bridge started") && screen.contains("Voice: off  Screen: on")
+    })?;
+    session.wait_until("screen bridge invocation", ACTION_TIMEOUT, |_| {
+        fs::read_to_string(&media_log).is_ok_and(|text| {
+            text.lines()
+                .any(|line| line.contains(&format!("|fixture-prefix|screen|{CHANNEL_URL}")))
+        })
+    })?;
+    let screen_pid = bridge_pid(&media_log, "screen")?;
+    session.send(b"s")?;
+    session.wait_for_screen("screen bridge stopped", ACTION_TIMEOUT, |screen| {
+        screen.contains("screen bridge stopped") && screen.contains("Voice: off  Screen: off")
+    })?;
+    session.wait_until("screen bridge process reaped", ACTION_TIMEOUT, |_| {
+        !PathBuf::from(format!("/proc/{screen_pid}")).exists()
+    })?;
+
+    session.send(ENTER)?;
+    session.wait_for_screen("channel notes editor", ACTION_TIMEOUT, |screen| {
+        screen.contains("#terminal-team notes")
+            && screen.contains("COLLAB_ORIGINAL")
+            && screen.contains("edits synchronize automatically")
+    })?;
+    session.send(F10)?;
+    session.wait_for_screen("channel notes split", ACTION_TIMEOUT, |screen| {
+        screen.matches("# Shared Notes").count() >= 2 && screen.contains("split right into pane")
+    })?;
+    session.send(CTRL_A)?;
+    session.paste(EDITED_NOTES)?;
+    session.wait_for_screen("shared channel notes edit", ACTION_TIMEOUT, |screen| {
+        screen.matches("COLLAB_EDITED").count() >= 2
+    })?;
+    session.send(CTRL_S)?;
+    session.wait_for_screen("channel notes auto sync", ACTION_TIMEOUT, |screen| {
+        screen.contains("#terminal-team notes synchronize automatically")
+    })?;
+    session.send(CTRL_Z)?;
+    session.wait_for_screen("shared channel notes undo", ACTION_TIMEOUT, |screen| {
+        screen.matches("COLLAB_ORIGINAL").count() >= 2 && !screen.contains("COLLAB_EDITED")
+    })?;
+    session.send(CTRL_A)?;
+    session.paste(FINAL_NOTES)?;
+    session.wait_for_screen(
+        "shared channel notes final edit",
+        ACTION_TIMEOUT,
+        |screen| screen.matches("COLLAB_FINAL").count() >= 2,
+    )?;
+
+    open_collaboration_panel(&mut session)?;
+    session.wait_for_screen("active channel notes marker", ACTION_TIMEOUT, |screen| {
+        screen.contains("#terminal-team") && screen.contains('\u{270e}')
+    })?;
+    session.send(b"\t")?;
+    session.send(b"f")?;
+    session.wait_for_screen("follow fixture collaborator", ACTION_TIMEOUT, |screen| {
+        screen.contains("COLLAB_FINAL")
+            && screen.contains("following collaborator 42 in channel notes")
+    })?;
+
+    open_collaboration_panel(&mut session)?;
+    session.send(b"\t")?;
+    session.send(b"c")?;
+    session.wait_for_screen(
+        "create collaboration channel prompt",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("Create channel:") && screen.contains("Enter crea"),
+    )?;
+    session.paste("console-created")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("fixture channel created", ACTION_TIMEOUT, |screen| {
+        screen.contains("created fixture channel #con") && screen.contains("#console-created")
+    })?;
+    session.send(b"\x1b[A")?;
+    session.send(b"d")?;
+    session.wait_for_screen("fixture invitation declined", ACTION_TIMEOUT, |screen| {
+        screen.contains("invitation declined") && !screen.contains("#invited-decline")
+    })?;
+    session.send(b"\x1b[A")?;
+    session.send(b"a")?;
+    session.wait_for_screen("fixture invitation accepted", ACTION_TIMEOUT, |screen| {
+        screen.contains("invitation accepted")
+            && screen.contains("#invited-accept")
+            && !screen.contains("#invited-accept [invite]")
+    })?;
+    session.send(b"\x1b")?;
+    session.wait_for_screen("collaboration returns to notes", ACTION_TIMEOUT, |screen| {
+        screen.contains("COLLAB_FINAL") && screen.contains("editor focused")
+    })?;
+
+    // Channel notes are synchronized state, so even the deterministic local
+    // fixture must not trigger a scratch-buffer discard confirmation.
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "collaboration zec exit failed: {status}");
+    session.assert_terminal_restored(&termios_before)
+}
+
+fn open_collaboration_panel(session: &mut PtySession) -> Result<()> {
+    session.send(F1)?;
+    session.wait_for_screen("collaboration command palette", ACTION_TIMEOUT, |screen| {
+        screen.contains("Command palette:")
+    })?;
+    session.paste("Toggle Collaboration Panel")?;
+    session.send(ENTER)
+}
+
+fn bridge_pid(path: &Path, kind: &str) -> Result<u32> {
+    let log = fs::read_to_string(path)
+        .with_context(|| format!("read {} bridge log {}", kind, path.display()))?;
+    let line = log
+        .lines()
+        .find(|line| line.contains(&format!("|fixture-prefix|{kind}|")))
+        .with_context(|| format!("{kind} invocation missing from bridge log"))?;
+    line.split('|')
+        .next()
+        .context("bridge log omitted pid")?
+        .parse()
+        .with_context(|| format!("parse {kind} bridge pid"))
+}
+
 fn open_markdown_preview(session: &mut PtySession) -> Result<()> {
     session.send(F1)?;
     session.wait_for_screen("Markdown command palette", ACTION_TIMEOUT, |screen| {
