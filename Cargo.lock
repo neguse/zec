@@ -2519,6 +2519,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "codestral"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "edit_prediction",
+ "edit_prediction_types",
+ "futures",
+ "gpui",
+ "http_client",
+ "icons",
+ "language",
+ "language_model",
+ "log",
+ "serde",
+ "serde_json",
+ "text",
+ "zed_credentials_provider",
+ "zeta_prompt",
+]
+
+[[package]]
 name = "collections"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
@@ -16198,7 +16220,9 @@ dependencies = [
  "clap",
  "client",
  "cloud_api_types",
+ "codestral",
  "collections",
+ "copilot",
  "crashes",
  "crossterm",
  "dap",

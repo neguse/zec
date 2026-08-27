@@ -76,7 +76,9 @@ base64 = "0.22"
 crossterm = { version = "0.29", features = ["osc52"] }
 cloud_api_types = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 channel = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+codestral = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 collections = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+copilot = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 dap = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 dap_adapters = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 debug_adapter_extension = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }

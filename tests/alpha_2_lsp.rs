@@ -41,7 +41,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     }
     fs::write(
         xdg_config.join("zed/settings.json"),
-        r#"{"session":{"trust_all_worktrees":true}}"#,
+        r#"{"session":{"trust_all_worktrees":true},"edit_predictions":{"provider":"none"}}"#,
     )
     .expect("write isolated trusted user settings");
     fs::write(xdg_config.join("zed/global_settings.json"), "{}")
@@ -50,6 +50,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     fs::write(
         zed_dir.join("settings.json"),
         r#"{
+          "edit_predictions": { "provider": "none" },
           "format_on_save": "off",
           "remove_trailing_whitespace_on_save": false,
           "ensure_final_newline_on_save": false

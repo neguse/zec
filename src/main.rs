@@ -20931,6 +20931,7 @@ fn init_zed(cx: &mut App) {
         language_model::init(cx);
         client::RefreshLlmTokenListener::register(client.clone(), user_store.clone(), cx);
         language_models::init(user_store.clone(), client.clone(), cx);
+        edit_prediction::init(client.clone(), user_store.clone(), cx);
         init_agent_language_model_settings(cx);
         prompt_store::init(cx);
         agent::ThreadStore::init_global(cx);
@@ -21053,8 +21054,6 @@ fn open_editor_with_project(
     project: Option<Entity<Project>>,
     cx: &mut App,
 ) -> Result<WindowHandle<Editor>> {
-    let prediction_buffer = buffer.clone();
-    let prediction_project = project.clone();
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(gpui::Bounds {
@@ -21073,20 +21072,6 @@ fn open_editor_with_project(
                     .display_map
                     .update(cx, |map, cx| map.set_wrap_width(None, cx));
             });
-            if let Some(project) = prediction_project {
-                let runtime = cx.global::<ProjectRuntime>().clone();
-                editor.update(cx, |editor, cx| {
-                    edit_prediction::install(
-                        editor,
-                        prediction_buffer,
-                        project,
-                        &runtime.client,
-                        &runtime.user_store,
-                        window,
-                        cx,
-                    );
-                });
-            }
             window.focus(&editor.focus_handle(cx), cx);
             editor
         },
@@ -22647,9 +22632,9 @@ fn run_alpha_2_probe(probe: Alpha2Probe) -> Result<()> {
         init_zed(cx);
         let watches_configuration = matches!(&probe, Alpha2Probe::SettingsReload { .. });
         let (event_sender, event_receiver) = async_channel::bounded(64);
+        let configuration_file_system = cx.global::<ProjectRuntime>().file_system.clone();
+        start_configuration_watchers(configuration_file_system, event_sender.clone(), cx);
         if watches_configuration {
-            let configuration_file_system = cx.global::<ProjectRuntime>().file_system.clone();
-            start_configuration_watchers(configuration_file_system, event_sender.clone(), cx);
             start_terminal_action_interceptor(
                 Rc::new(RefCell::new(VecDeque::new())),
                 Some(event_sender.clone()),
