@@ -1,0 +1,238 @@
+name: Alpha 3
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: alpha-3-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+  CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  LC_ALL: C.UTF-8
+  LANG: C.UTF-8
+  TERM: xterm-256color
+
+jobs:
+  classify:
+    name: Classify candidate or promotion
+    runs-on: ubuntu-24.04
+    outputs:
+      promotion: ${{ steps.diff.outputs.promotion }}
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify the commit
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          promotion=false
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            change="$(git diff --name-status --no-renames HEAD^ HEAD)"
+            if [[ "$change" == $'A\tdocs/alpha-3-evidence.json' ]]; then
+              promotion=true
+            fi
+          fi
+          echo "promotion=$promotion" >> "$GITHUB_OUTPUT"
+
+  gate:
+    name: Alpha 3 gate
+    needs: classify
+    if: needs.classify.outputs.promotion != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record disk baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CI_DISK_BASELINE_KIB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $3 }')" >> "$GITHUB_ENV"
+
+      - name: Install Linux build dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential clang cmake curl elfutils g++ gcc gdb gettext-base git jq \
+            libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev \
+            libsqlite3-dev libssl-dev libstdc++-14-dev libva-dev libvulkan1 \
+            libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev \
+            lld llvm make musl-dev musl-tools pipewire xdg-desktop-portal
+          sudo apt-get clean
+
+      - name: Install pinned Rust toolchain
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          rustc --version --verbose
+          cargo --version
+          rustfmt --version
+
+      - name: Verify lockfile, Alpha 1 oracles, scripts, and formatting
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          cargo fmt --all -- --check
+          bash -n script/run-alpha-1-and-2-gates
+          bash -n script/verify-alpha-3-artifact
+          bash -n script/verify-alpha-3-evidence
+          rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+          /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
+
+      - name: Build all release gate binaries
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --features alpha-1-linux \
+            --bin zec \
+            --bin alpha_1_acceptance --bin alpha_1_bench \
+            --bin alpha_2_fixture_lsp --bin alpha_2_acceptance --bin alpha_2_bench \
+            --bin alpha_3_acceptance --bin alpha_3_bench
+
+      - name: Run regression and Alpha 3 integration tests
+        timeout-minutes: 45
+        env:
+          ZEC_REQUIRE_GDB_DAP: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features alpha-1-linux \
+            --bin zec -- --test-threads=1
+          cargo test --locked --release --features alpha-1-linux \
+            --test parity_contract --test pty_acceptance \
+            --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures \
+            --test alpha_3_workspace --test alpha_3_project_panel \
+            --test alpha_3_search --test alpha_3_session -- --test-threads=1
+
+      - name: Run headless smoke
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_output="$(./target/release/zec --smoke)"
+          printf '%s\n' "$smoke_output"
+          grep -Fq 'initial: ""' <<< "$smoke_output"
+          grep -Fq 'after insert: "hello from zec"' <<< "$smoke_output"
+          grep -Fq 'after undo: ""' <<< "$smoke_output"
+
+      - name: Re-run canonical Alpha 1 and Alpha 2 gates
+        timeout-minutes: 135
+        shell: bash
+        run: ./script/run-alpha-1-and-2-gates target/alpha-3/regression
+
+      - name: Run Alpha 3 acceptance
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=5s 60m \
+            ./target/release/alpha_3_acceptance --zec ./target/release/zec \
+            --assert --report target/alpha-3/acceptance.json
+          ./target/release/alpha_3_acceptance \
+            --verify-report target/alpha-3/acceptance.json
+
+      - name: Run Alpha 3 benchmark
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=5s 20m \
+            ./target/release/alpha_3_bench --zec ./target/release/zec \
+            --assert --report target/alpha-3/benchmark.json
+          ./target/release/alpha_3_bench \
+            --verify-report target/alpha-3/benchmark.json
+
+      - name: Record artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target/alpha-3
+          find . -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+
+      - name: Verify complete Alpha 3 artifact
+        shell: bash
+        run: ./script/verify-alpha-3-artifact target/alpha-3
+
+      - name: Upload Alpha 3 evidence
+        id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: alpha-3-reports
+          path: target/alpha-3
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Print evidence coordinates
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          printf 'candidate_sha=%s\nrun_id=%s\nrun_attempt=%s\nartifact_id=%s\nartifact_digest=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$ARTIFACT_ID" "$ARTIFACT_DIGEST"
+
+      - name: Enforce CI disk budget
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE"
+          du -sh target "$HOME/.cargo/git" "$HOME/.cargo/registry" 2>/dev/null || true
+          used_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $3 }')"
+          generated_kib="$((used_kib - CI_DISK_BASELINE_KIB))"
+          budget_kib="$((14 * 1024 * 1024))"
+          echo "CI-generated disk: $((generated_kib / 1024)) MiB (budget: $((budget_kib / 1024)) MiB)"
+          test "$generated_kib" -lt "$budget_kib"
+
+  evidence:
+    name: Alpha 3 evidence
+    needs: classify
+    if: needs.classify.outputs.promotion == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout promotion
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify promoted evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./script/verify-alpha-3-evidence

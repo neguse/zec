@@ -66,98 +66,112 @@
       "milestone": "alpha-2",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-2.md"
+      "evidence": "docs/beta-2.md"
     },
     {
       "id": "WORKSPACE_LAYOUT",
       "milestone": "alpha-3",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/alpha-3.md"
     },
     {
       "id": "PROJECT_PANEL_FILE_OPERATIONS",
       "milestone": "alpha-3",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/alpha-3.md"
     },
     {
       "id": "SEARCH_REPLACE_COMPLETE",
       "milestone": "alpha-3",
       "delivery": "faithful",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/alpha-3.md"
     },
     {
       "id": "ADVANCED_EDITOR_PRESENTATION",
       "milestone": "alpha-3",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/alpha-3.md"
     },
     {
       "id": "NAVIGATION_OUTLINE",
       "milestone": "alpha-3",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/alpha-3.md"
     },
     {
       "id": "GIT_WORKFLOW",
       "milestone": "beta-1",
       "delivery": "faithful",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/beta-1.md"
     },
     {
       "id": "TERMINAL_TASK_TEST",
       "milestone": "beta-1",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/beta-1.md"
     },
     {
-      "id": "DEBUGGER_REPL_NOTEBOOK",
+      "id": "DEBUGGER_REPL",
+      "milestone": "beta-1",
+      "delivery": "terminal-adapted",
+      "status": "candidate",
+      "evidence": "docs/beta-1.md"
+    },
+    {
+      "id": "NOTEBOOK_INTERACTIVE",
       "milestone": "beta-1",
       "delivery": "terminal-adapted",
       "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "evidence": "docs/beta-1.md"
     },
     {
       "id": "SESSION_CRASH_RECOVERY",
       "milestone": "beta-1",
       "delivery": "faithful",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/alpha-3.md"
     },
     {
       "id": "EXTENSION_ECOSYSTEM",
       "milestone": "beta-2",
       "delivery": "faithful",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/beta-2.md"
     },
     {
       "id": "RICH_CONTENT",
       "milestone": "beta-2",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/beta-2.md"
+    },
+    {
+      "id": "LARGE_FILE_PATH",
+      "milestone": "beta-2",
+      "delivery": "faithful",
+      "status": "candidate",
+      "evidence": "docs/beta-2.md"
     },
     {
       "id": "PACKAGE_UPDATE_PLATFORM",
       "milestone": "beta-2",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/beta-2.md"
     },
     {
       "id": "REMOTE_DEVELOPMENT",
       "milestone": "beta-2",
       "delivery": "faithful",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/beta-2.md"
     },
     {
       "id": "AI_AGENT_ASSISTANCE",

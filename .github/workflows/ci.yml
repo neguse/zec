@@ -59,6 +59,7 @@ jobs:
             g++ \
             gcc \
             gettext-base \
+            gdb \
             git \
             jq \
             libasound2-dev \
@@ -79,8 +80,10 @@ jobs:
             make \
             musl-dev \
             musl-tools \
+            openssh-server \
             pipewire \
             xdg-desktop-portal
+          sudo install -d -m 0755 /run/sshd
           sudo apt-get clean
 
       - name: Install pinned Rust toolchain
@@ -100,12 +103,13 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
           cargo fmt --all -- --check
+          python3 script/release-manifest self-test
 
-      - name: Build zec and Alpha 2 gate binaries
+      - name: Build zec, remote server, and Alpha 2 gate binaries
         timeout-minutes: 60
         run: >-
           cargo build --locked
-          --bin zec --bin alpha_2_fixture_lsp
+          --bin zec --bin zec-remote-server --bin alpha_2_fixture_lsp
           --bin alpha_2_acceptance --bin alpha_2_bench
 
       - name: Run unit and headless tests
@@ -113,10 +117,13 @@ jobs:
         run: cargo test --locked --bin zec -- --test-threads=1
 
       - name: Run parity, PTY, and Alpha 2 integration tests
-        timeout-minutes: 30
+        timeout-minutes: 45
+        env:
+          ZEC_REQUIRE_GDB_DAP: "1"
+          ZEC_REQUIRE_REMOTE_SSH: "1"
         run: >-
           cargo test --locked
-          --test parity_contract --test pty_acceptance
+          --test parity_contract --test pty_acceptance --test update_cli
           --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures
           -- --test-threads=1
 
@@ -170,10 +177,11 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 --no-deps | Out-Null
           cargo fmt --all -- --check
+          python script/release-manifest self-test
 
-      - name: Build zec
+      - name: Build zec and remote server
         timeout-minutes: 60
-        run: cargo build --locked --bin zec
+        run: cargo build --locked --bin zec --bin zec-remote-server
 
       - name: Run portable unit tests
         timeout-minutes: 30

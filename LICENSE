@@ -1,0 +1,16 @@
+zec is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+zec is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+The complete license text is available at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+zec incorporates and links to components from Zed, whose relevant crates are
+also licensed under GPL-3.0-or-later. Release source corresponding to a binary
+is the repository tree at that release tag, including Cargo.lock and the pinned
+Zed revision in Cargo.toml.

@@ -19,10 +19,12 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "NAVIGATION_OUTLINE",
     "GIT_WORKFLOW",
     "TERMINAL_TASK_TEST",
-    "DEBUGGER_REPL_NOTEBOOK",
+    "DEBUGGER_REPL",
+    "NOTEBOOK_INTERACTIVE",
     "SESSION_CRASH_RECOVERY",
     "EXTENSION_ECOSYSTEM",
     "RICH_CONTENT",
+    "LARGE_FILE_PATH",
     "PACKAGE_UPDATE_PLATFORM",
     "REMOTE_DEVELOPMENT",
     "AI_AGENT_ASSISTANCE",
@@ -111,6 +113,43 @@ fn parity_contract_is_complete_consistent_and_pinned() {
             "evidence path for {} does not exist: {}",
             capability.id,
             evidence.display()
+        );
+    }
+
+    for id in [
+        "SETTINGS_KEYMAP",
+        "EXTENSION_ECOSYSTEM",
+        "RICH_CONTENT",
+        "LARGE_FILE_PATH",
+        "PACKAGE_UPDATE_PLATFORM",
+        "REMOTE_DEVELOPMENT",
+    ] {
+        let capability = contract
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == id)
+            .unwrap_or_else(|| panic!("missing Beta 2 capability {id}"));
+        assert_eq!(capability.status, "candidate", "{id} lost Beta 2 status");
+        assert_eq!(
+            capability.evidence, "docs/beta-2.md",
+            "{id} must use the normative Beta 2 evidence"
+        );
+    }
+
+    for id in [
+        "NOTEBOOK_INTERACTIVE",
+        "AI_AGENT_ASSISTANCE",
+        "COLLABORATIVE_EDITING",
+        "COLLABORATION_MEDIA",
+    ] {
+        let capability = contract
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == id)
+            .unwrap_or_else(|| panic!("missing planned capability {id}"));
+        assert_eq!(
+            capability.status, "planned",
+            "{id} must not be promoted without its own implemented evidence"
         );
     }
 

@@ -30,6 +30,35 @@ pub struct TextPosition {
     pub byte_column: usize,
 }
 
+/// Returns the nearest UTF-8 byte boundary for a terminal-cell column.
+/// Wide graphemes use their midpoint, matching editor mouse hit testing.
+pub fn closest_text_byte_column(line: &str, target_column: usize) -> usize {
+    let mut byte_column = 0usize;
+    let mut terminal_column = 0usize;
+    for grapheme in Span::raw(line).styled_graphemes(Style::default()) {
+        let start_byte = byte_column;
+        byte_column = byte_column.saturating_add(grapheme.symbol.len());
+        let width = usize::from(grapheme.symbol.cell_width());
+        if width == 0 {
+            continue;
+        }
+        let end_column = terminal_column.saturating_add(width);
+        if target_column < end_column {
+            return if target_column
+                .saturating_sub(terminal_column)
+                .saturating_mul(2)
+                < width
+            {
+                start_byte
+            } else {
+                byte_column
+            };
+        }
+        terminal_column = end_column;
+    }
+    line.len()
+}
+
 /// A half-open selection range in terminal-cell coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectionRange {
@@ -55,6 +84,30 @@ pub struct StyleSpan {
     pub style: Style,
 }
 
+/// A presentation-only decoration anchored to one terminal cell.
+///
+/// `glyph` is written only when the destination cell is blank. This lets
+/// whitespace markers and vertical guides coexist with the immutable source
+/// text used for hit testing. When `style_on_text` is true, the style is also
+/// patched onto an occupied cell (used by wrap guides).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellDecoration {
+    pub row: usize,
+    pub column: usize,
+    pub glyph: Option<String>,
+    pub style: Style,
+    pub style_on_text: bool,
+}
+
+/// Virtual text placed after a display line without changing its source text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineAnnotation {
+    pub row: usize,
+    pub column: usize,
+    pub text: String,
+    pub style: Style,
+}
+
 /// The document position displayed at the top-left of the body.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Viewport {
@@ -77,6 +130,95 @@ pub struct OverlaySnapshot {
     pub selected: Option<usize>,
 }
 
+/// Renders an [`OverlaySnapshot`] as a full workspace dock instead of a
+/// floating editor overlay. The domain model chooses and windows the rows;
+/// this widget only owns terminal-cell presentation and hit testing.
+pub struct OverlayPanelWidget<'a> {
+    snapshot: &'a OverlaySnapshot,
+    focused: bool,
+}
+
+impl<'a> OverlayPanelWidget<'a> {
+    pub fn new(snapshot: &'a OverlaySnapshot, focused: bool) -> Self {
+        Self { snapshot, focused }
+    }
+
+    pub fn row_at(area: Rect, position: Position) -> Option<usize> {
+        let inner = Block::default().borders(Borders::ALL).inner(area);
+        if !inner.contains(position) {
+            return None;
+        }
+        Some(usize::from(position.y.saturating_sub(inner.y)))
+    }
+
+    pub fn row_budget(area: Rect) -> usize {
+        usize::from(Block::default().borders(Borders::ALL).inner(area).height)
+    }
+}
+
+impl Widget for OverlayPanelWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 3 || area.height < 3 {
+            return;
+        }
+
+        Clear.render(area, buf);
+        let border_style = if self.focused {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(self.snapshot.title.as_str())
+            .border_style(border_style);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.is_empty() {
+            return;
+        }
+
+        let selected = self
+            .snapshot
+            .selected
+            .filter(|selected| *selected < self.snapshot.rows.len());
+        for (screen_row, row) in self
+            .snapshot
+            .rows
+            .iter()
+            .take(usize::from(inner.height))
+            .enumerate()
+        {
+            let y = inner
+                .y
+                .saturating_add(u16::try_from(screen_row).unwrap_or(inner.height));
+            let row_area = Rect::new(inner.x, y, inner.width, 1);
+            let mut style = Style::default();
+            if selected == Some(screen_row) {
+                style = style.add_modifier(Modifier::REVERSED);
+            } else if !row.enabled {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            buf.set_style(row_area, style);
+            let prefix = if selected == Some(screen_row) {
+                "› "
+            } else {
+                "  "
+            };
+            render_line(
+                &format!("{prefix}{}", row.text),
+                style,
+                &[],
+                y,
+                inner,
+                inner,
+                0,
+                buf,
+            );
+        }
+    }
+}
+
 /// Immutable, Zed-independent input to the terminal renderer.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderSnapshot {
@@ -96,6 +238,9 @@ pub struct RenderSnapshot {
     /// from changing while scrolling or folding.
     pub widest_line_number: u32,
     pub cursor: Option<Cursor>,
+    /// Software-rendered cursors. The primary cursor remains the terminal's
+    /// hardware cursor so prompts and IME behaviour stay native.
+    pub secondary_cursors: Vec<Cursor>,
     /// One-based buffer line number containing the cursor, even when offscreen.
     pub cursor_line_number: Option<u32>,
     pub selections: Vec<SelectionRange>,
@@ -103,6 +248,8 @@ pub struct RenderSnapshot {
     pub gutter_style: Style,
     pub line_styles: Vec<Vec<StyleSpan>>,
     pub background_ranges: Vec<BackgroundRange>,
+    pub cell_decorations: Vec<CellDecoration>,
+    pub inline_annotations: Vec<InlineAnnotation>,
     pub viewport: Viewport,
     pub status: String,
     /// Terminal-cell column for an input cursor on the status row.
@@ -170,6 +317,18 @@ impl<'a> EditorWidget<'a> {
     /// Cells in the gutter, status row, outside `area`, or below the captured text
     /// do not identify an editor position.
     pub fn text_position_at(&self, area: Rect, position: Position) -> Option<TextPosition> {
+        self.text_position_and_column_at(area, position)
+            .map(|(position, _)| position)
+    }
+
+    /// Maps a terminal body cell to both its source position and unclipped
+    /// document-cell column. The latter remains past EOL and is used to keep a
+    /// rectangular selection aligned across short lines.
+    pub fn text_position_and_column_at(
+        &self,
+        area: Rect,
+        position: Position,
+    ) -> Option<(TextPosition, usize)> {
         if area.width == 0 || area.height <= 1 {
             return None;
         }
@@ -219,15 +378,18 @@ impl<'a> EditorWidget<'a> {
                 } else {
                     byte_column
                 };
-                return Some(TextPosition { row, byte_column });
+                return Some((TextPosition { row, byte_column }, target_column));
             }
             terminal_column = end_column;
         }
 
-        Some(TextPosition {
-            row,
-            byte_column: line.len(),
-        })
+        Some((
+            TextPosition {
+                row,
+                byte_column: line.len(),
+            },
+            target_column,
+        ))
     }
 
     fn line_number_digits(&self) -> usize {
@@ -317,7 +479,15 @@ impl<'a> EditorWidget<'a> {
                 .or_else(|| self.snapshot.line_number(cursor.row))
                 .map(|line| line.to_string())
                 .unwrap_or_else(|| cursor.row.saturating_add(1).to_string());
-            format!("Ln {line}, Col {}", cursor.column.saturating_add(1))
+            let count = self.snapshot.secondary_cursors.len().saturating_add(1);
+            if count > 1 {
+                format!(
+                    "Ln {line}, Col {}  {count} cursors",
+                    cursor.column.saturating_add(1)
+                )
+            } else {
+                format!("Ln {line}, Col {}", cursor.column.saturating_add(1))
+            }
         });
 
         match (self.snapshot.status.is_empty(), cursor) {
@@ -400,8 +570,12 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
             buf,
         );
         render_background_row(snapshot, document_row, line, y, text_rect, text_area, buf);
+        render_cell_decorations(snapshot, document_row, y, text_rect, text_area, buf);
+        render_inline_annotations(snapshot, document_row, y, text_rect, text_area, buf);
         render_selection_row(snapshot, document_row, line, y, text_rect, text_area, buf);
     }
+
+    render_secondary_cursors(snapshot, text_rect, text_area, buf);
 
     if let Some(overlay) = &snapshot.overlay {
         render_overlay(overlay, body_rect, clipped, snapshot.text_style, buf);
@@ -429,6 +603,154 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
         0,
         buf,
     );
+}
+
+fn render_inline_annotations(
+    snapshot: &RenderSnapshot,
+    document_row: usize,
+    y: u16,
+    area: Rect,
+    clipped: Rect,
+    buf: &mut Buffer,
+) {
+    if area.is_empty() || clipped.is_empty() {
+        return;
+    }
+
+    let viewport_left = snapshot.viewport.left_column;
+    let viewport_right = viewport_left.saturating_add(usize::from(area.width));
+    for annotation in snapshot
+        .inline_annotations
+        .iter()
+        .filter(|annotation| annotation.row == document_row)
+    {
+        let annotation_end = annotation
+            .column
+            .saturating_add(usize::from(annotation.text.cell_width()));
+        if annotation_end <= viewport_left || annotation.column >= viewport_right {
+            continue;
+        }
+        let visible_start = annotation.column.max(viewport_left);
+        let screen_column = visible_start - viewport_left;
+        let Some(x) = u16::try_from(screen_column)
+            .ok()
+            .and_then(|column| area.x.checked_add(column))
+        else {
+            continue;
+        };
+        let width = area
+            .width
+            .saturating_sub(u16::try_from(screen_column).unwrap_or(area.width));
+        if width == 0 {
+            continue;
+        }
+        let annotation_area = Rect::new(x, y, width, 1);
+        render_line(
+            &annotation.text,
+            annotation.style,
+            &[],
+            y,
+            annotation_area,
+            clipped,
+            visible_start - annotation.column,
+            buf,
+        );
+    }
+}
+
+fn render_cell_decorations(
+    snapshot: &RenderSnapshot,
+    document_row: usize,
+    y: u16,
+    area: Rect,
+    clipped: Rect,
+    buf: &mut Buffer,
+) {
+    if area.is_empty() || clipped.is_empty() {
+        return;
+    }
+
+    let viewport_left = snapshot.viewport.left_column;
+    let viewport_right = viewport_left.saturating_add(usize::from(area.width));
+    for decoration in snapshot
+        .cell_decorations
+        .iter()
+        .filter(|decoration| decoration.row == document_row)
+    {
+        if decoration.column < viewport_left || decoration.column >= viewport_right {
+            continue;
+        }
+        let screen_column = decoration.column - viewport_left;
+        let Some(x) = u16::try_from(screen_column)
+            .ok()
+            .and_then(|column| area.x.checked_add(column))
+        else {
+            continue;
+        };
+        if x < clipped.x || x >= clipped.right() || y < clipped.y || y >= clipped.bottom() {
+            continue;
+        }
+        let Some(cell) = buf.cell_mut((x, y)) else {
+            continue;
+        };
+        let blank = cell.symbol() == " ";
+        if blank {
+            if let Some(glyph) = decoration.glyph.as_deref() {
+                if glyph.cell_width() == 1 {
+                    cell.set_symbol(glyph);
+                }
+            }
+            cell.set_style(decoration.style);
+        } else if decoration.style_on_text {
+            cell.set_style(decoration.style);
+        }
+    }
+}
+
+fn render_secondary_cursors(
+    snapshot: &RenderSnapshot,
+    area: Rect,
+    clipped: Rect,
+    buf: &mut Buffer,
+) {
+    if area.is_empty() || clipped.is_empty() {
+        return;
+    }
+    let body_height = usize::from(area.height);
+    let body_width = usize::from(area.width);
+    for cursor in &snapshot.secondary_cursors {
+        if snapshot.line(cursor.row).is_none() {
+            continue;
+        }
+        let Some(row) = cursor.row.checked_sub(snapshot.viewport.top_row) else {
+            continue;
+        };
+        let Some(column) = cursor.column.checked_sub(snapshot.viewport.left_column) else {
+            continue;
+        };
+        if row >= body_height || column >= body_width {
+            continue;
+        }
+        let Some(x) = u16::try_from(column)
+            .ok()
+            .and_then(|column| area.x.checked_add(column))
+        else {
+            continue;
+        };
+        let Some(y) = u16::try_from(row)
+            .ok()
+            .and_then(|row| area.y.checked_add(row))
+        else {
+            continue;
+        };
+        let cursor_area = Rect::new(x, y, 1, 1).intersection(clipped);
+        if !cursor_area.is_empty() {
+            buf.set_style(
+                cursor_area,
+                Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            );
+        }
+    }
 }
 
 fn render_overlay(
@@ -715,8 +1037,8 @@ mod tests {
     };
 
     use super::{
-        BackgroundRange, Cursor, EditorWidget, OverlayRow, OverlaySnapshot, RenderSnapshot,
-        SelectionRange, StyleSpan, TextPosition, Viewport,
+        BackgroundRange, CellDecoration, Cursor, EditorWidget, OverlayPanelWidget, OverlayRow,
+        OverlaySnapshot, RenderSnapshot, SelectionRange, StyleSpan, TextPosition, Viewport,
     };
 
     fn row(buf: &Buffer, y: u16) -> String {
@@ -734,12 +1056,15 @@ mod tests {
             line_numbers: Vec::new(),
             widest_line_number: 0,
             cursor: Some(Cursor { row: 2, column: 1 }),
+            secondary_cursors: Vec::new(),
             cursor_line_number: None,
             selections: Vec::new(),
             text_style: Style::default(),
             gutter_style: Style::default(),
             line_styles: Vec::new(),
             background_ranges: Vec::new(),
+            cell_decorations: Vec::new(),
+            inline_annotations: Vec::new(),
             viewport: Viewport {
                 top_row: 1,
                 left_column: 0,
@@ -763,6 +1088,27 @@ mod tests {
                 .modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn renders_secondary_cursors_and_reports_the_total_cursor_count() {
+        let snapshot = RenderSnapshot {
+            first_row: 0,
+            total_rows: 1,
+            lines: vec!["abc".into()],
+            cursor: Some(Cursor { row: 0, column: 0 }),
+            secondary_cursors: vec![Cursor { row: 0, column: 2 }],
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 24, 2);
+        let mut buf = Buffer::empty(area);
+
+        EditorWidget::new(&snapshot).render(area, &mut buf);
+
+        let cursor = buf.cell((2, 0)).expect("secondary cursor cell");
+        assert!(cursor.modifier.contains(Modifier::REVERSED));
+        assert!(cursor.modifier.contains(Modifier::BOLD));
+        assert!(row(&buf, 1).contains("2 cursors"));
     }
 
     #[test]
@@ -1141,12 +1487,15 @@ mod tests {
             line_numbers: Vec::new(),
             widest_line_number: 0,
             cursor: Some(Cursor { row: 3, column: 7 }),
+            secondary_cursors: Vec::new(),
             cursor_line_number: None,
             selections: Vec::new(),
             text_style: Style::default(),
             gutter_style: Style::default(),
             line_styles: Vec::new(),
             background_ranges: Vec::new(),
+            cell_decorations: Vec::new(),
+            inline_annotations: Vec::new(),
             viewport: Viewport {
                 top_row: 2,
                 left_column: 4,
@@ -1332,6 +1681,7 @@ mod tests {
             line_numbers: vec![Some(41), Some(42)],
             widest_line_number: 100,
             cursor: Some(Cursor { row: 41, column: 1 }),
+            secondary_cursors: Vec::new(),
             cursor_line_number: Some(42),
             selections: vec![SelectionRange {
                 start: Cursor { row: 40, column: 1 },
@@ -1347,6 +1697,8 @@ mod tests {
                 },
                 style: Style::new().bg(Color::Blue),
             }],
+            cell_decorations: Vec::new(),
+            inline_annotations: Vec::new(),
             viewport: Viewport {
                 top_row: 40,
                 left_column: 0,
@@ -1374,6 +1726,120 @@ mod tests {
         assert_eq!(
             buf.cell((4, 1)).expect("visible background range").bg,
             Color::Blue
+        );
+    }
+
+    #[test]
+    fn cell_decorations_preserve_text_coordinates_and_layer_below_selection() {
+        let snapshot = RenderSnapshot {
+            total_rows: 1,
+            lines: vec!["a b界".into()],
+            selections: vec![SelectionRange {
+                start: Cursor { row: 0, column: 1 },
+                end: Cursor { row: 0, column: 2 },
+            }],
+            text_style: Style::new().fg(Color::White).bg(Color::Black),
+            cell_decorations: vec![
+                CellDecoration {
+                    row: 0,
+                    column: 1,
+                    glyph: Some("·".into()),
+                    style: Style::new().fg(Color::Yellow),
+                    style_on_text: false,
+                },
+                CellDecoration {
+                    row: 0,
+                    column: 0,
+                    glyph: Some("│".into()),
+                    style: Style::new().fg(Color::Red),
+                    style_on_text: false,
+                },
+                CellDecoration {
+                    row: 0,
+                    column: 3,
+                    glyph: Some("│".into()),
+                    style: Style::new().bg(Color::Blue),
+                    style_on_text: true,
+                },
+                CellDecoration {
+                    row: 0,
+                    column: 5,
+                    glyph: Some("│".into()),
+                    style: Style::new().fg(Color::Green),
+                    style_on_text: true,
+                },
+            ],
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 8, 2);
+        let mut buf = Buffer::empty(area);
+        let widget = EditorWidget::new(&snapshot);
+
+        widget.render(area, &mut buf);
+
+        assert_eq!(buf.cell((1, 0)).expect("space marker").symbol(), "·");
+        assert_eq!(buf.cell((1, 0)).expect("space marker").fg, Color::Yellow);
+        assert!(
+            buf.cell((1, 0))
+                .expect("selected marker")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(
+            buf.cell((0, 0)).expect("occupied source cell").symbol(),
+            "a"
+        );
+        assert_eq!(
+            buf.cell((0, 0)).expect("occupied source cell").fg,
+            Color::White
+        );
+        assert_eq!(buf.cell((3, 0)).expect("wide source cell").symbol(), "界");
+        assert_eq!(
+            buf.cell((3, 0)).expect("styled source cell").bg,
+            Color::Blue
+        );
+        assert_eq!(buf.cell((5, 0)).expect("blank guide cell").symbol(), "│");
+        assert_eq!(
+            widget.text_position_at(area, Position::new(1, 0)),
+            Some(TextPosition {
+                row: 0,
+                byte_column: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn inline_annotations_clip_without_entering_source_text() {
+        let snapshot = RenderSnapshot {
+            total_rows: 1,
+            lines: vec!["abc".into()],
+            text_style: Style::new().fg(Color::White).bg(Color::Black),
+            inline_annotations: vec![super::InlineAnnotation {
+                row: 0,
+                column: 5,
+                text: "error".into(),
+                style: Style::new().fg(Color::Red).bg(Color::Blue),
+            }],
+            viewport: Viewport {
+                top_row: 0,
+                left_column: 6,
+            },
+            ..RenderSnapshot::default()
+        };
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        let widget = EditorWidget::new(&snapshot);
+
+        widget.render(area, &mut buf);
+
+        assert_eq!(row(&buf, 0), "rror");
+        assert_eq!(buf.cell((0, 0)).expect("clipped annotation").fg, Color::Red);
+        assert_eq!(
+            widget.text_position_at(area, Position::new(0, 0)),
+            Some(TextPosition {
+                row: 0,
+                byte_column: 3,
+            })
         );
     }
 
@@ -1458,5 +1924,42 @@ mod tests {
                 .contains(Modifier::REVERSED)
         );
         assert!(row(&buf, 5).contains('└'));
+    }
+
+    #[test]
+    fn overlay_panel_uses_bordered_rows_for_rendering_and_hit_testing() {
+        let snapshot = OverlaySnapshot {
+            title: " Diagnostics ".into(),
+            rows: vec![
+                OverlayRow {
+                    text: "W src/main.rs:1:4 warning".into(),
+                    enabled: true,
+                },
+                OverlayRow {
+                    text: "collecting".into(),
+                    enabled: false,
+                },
+            ],
+            selected: Some(0),
+        };
+        let area = Rect::new(4, 3, 32, 5);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+
+        OverlayPanelWidget::new(&snapshot, true).render(area, &mut buf);
+
+        assert!(row(&buf, 3).contains("Diagnostics"));
+        assert!(row(&buf, 4).contains("› W src/main.rs:1:4 warning"));
+        assert!(
+            buf.cell((5, 4))
+                .expect("selected diagnostics row")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(OverlayPanelWidget::row_budget(area), 3);
+        assert_eq!(
+            OverlayPanelWidget::row_at(area, Position::new(10, 4)),
+            Some(0)
+        );
+        assert_eq!(OverlayPanelWidget::row_at(area, Position::new(10, 3)), None);
     }
 }

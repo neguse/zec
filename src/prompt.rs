@@ -89,6 +89,15 @@ impl LinePrompt {
             KeyCode::Right if event.modifiers == KeyModifiers::NONE => self.move_right(),
             KeyCode::Home if event.modifiers == KeyModifiers::NONE => self.move_home(),
             KeyCode::End if event.modifiers == KeyModifiers::NONE => self.move_end(),
+            KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                if self.text.is_empty() {
+                    PromptAction::Ignored
+                } else {
+                    self.text.clear();
+                    self.cursor = 0;
+                    PromptAction::Changed
+                }
+            }
             KeyCode::Char(character)
                 if !character.is_control()
                     && !event.modifiers.intersects(
@@ -312,6 +321,24 @@ mod tests {
             prompt.handle_key(&key(KeyCode::Backspace)),
             PromptAction::Ignored
         );
+    }
+
+    #[test]
+    fn control_u_clears_the_entire_prompt_and_reports_empty_no_op() {
+        let mut prompt = LinePrompt::with_text("日本🦀abc");
+        prompt.handle_key(&key(KeyCode::Left));
+
+        assert_eq!(
+            prompt.handle_key(&modified_key(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            PromptAction::Changed
+        );
+        assert_eq!(prompt.text(), "");
+        assert_eq!(prompt.cursor(), 0);
+        assert_eq!(
+            prompt.handle_key(&modified_key(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            PromptAction::Ignored
+        );
+        assert_cursor_is_valid(&prompt);
     }
 
     #[test]

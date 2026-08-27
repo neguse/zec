@@ -29,6 +29,7 @@ use project::{
     buffer_store::BufferStore,
     search::{MatchPositionHint, SearchQuery},
 };
+use util::{paths::PathStyle, rel_path::RelPath};
 use worktree::decode_byte_header;
 use zed_fs::Fs;
 
@@ -40,7 +41,7 @@ pub const PROJECT_SEARCH_DISPLAY_LIMIT: usize = 100;
 const MAX_PROJECT_SEARCH_WORKERS: usize = 4;
 const PROJECT_SEARCH_QUEUE_PER_WORKER: usize = 2;
 const PROJECT_SEARCH_SNAPSHOT_CHUNK_BYTES: usize = 8 * 1024;
-const PROJECT_SEARCH_SOURCE_FILE_LIMIT: usize = 5_000;
+const PROJECT_SEARCH_SOURCE_FILE_LIMIT: usize = 10_000;
 const PROJECT_SEARCH_SOURCE_RANGE_LIMIT: usize = 10_000;
 
 /// One explicit repository root.
@@ -52,6 +53,8 @@ const PROJECT_SEARCH_SOURCE_RANGE_LIMIT: usize = 10_000;
 pub struct RepositoryRoot {
     requested_path: Arc<Path>,
     canonical_path: Arc<Path>,
+    path_style: PathStyle,
+    remote: bool,
 }
 
 impl RepositoryRoot {
@@ -91,6 +94,50 @@ impl RepositoryRoot {
         Self::from_paths(requested_path, canonical_path)
     }
 
+    /// Construct an identity from a path interpreted by the connected host.
+    /// Canonicalization is performed by the remote worktree service; before
+    /// that response arrives this lexical normalized spelling is the only
+    /// authority available on the local machine.
+    pub fn remote(path: impl AsRef<Path>, path_style: PathStyle) -> Result<Self> {
+        let path = path
+            .as_ref()
+            .to_str()
+            .context("remote repository path must be UTF-8")?;
+        ensure!(!path.contains('\0'), "remote repository path contains NUL");
+        ensure!(
+            path_style.is_absolute(path),
+            "remote repository root must be absolute: {path}"
+        );
+        let normalized = PathBuf::from(path_style.normalize(path));
+        Ok(Self {
+            requested_path: normalized.clone().into(),
+            canonical_path: normalized.into(),
+            path_style,
+            remote: true,
+        })
+    }
+
+    pub fn with_remote_canonical_path(&self, path: impl AsRef<Path>) -> Result<Self> {
+        ensure!(
+            self.remote,
+            "only a remote root can accept a remote canonical path"
+        );
+        let path = path
+            .as_ref()
+            .to_str()
+            .context("remote canonical repository path must be UTF-8")?;
+        ensure!(
+            self.path_style.is_absolute(path),
+            "remote canonical repository root must be absolute: {path}"
+        );
+        Ok(Self {
+            requested_path: self.requested_path.clone(),
+            canonical_path: PathBuf::from(self.path_style.normalize(path)).into(),
+            path_style: self.path_style,
+            remote: true,
+        })
+    }
+
     fn from_paths(requested_path: PathBuf, canonical_path: PathBuf) -> Result<Self> {
         ensure!(
             requested_path.is_absolute(),
@@ -103,6 +150,8 @@ impl RepositoryRoot {
         Ok(Self {
             requested_path: requested_path.into(),
             canonical_path: canonical_path.into(),
+            path_style: PathStyle::local(),
+            remote: false,
         })
     }
 
@@ -115,7 +164,81 @@ impl RepositoryRoot {
         &self.canonical_path
     }
 
+    pub fn path_style(&self) -> PathStyle {
+        self.path_style
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote
+    }
+
+    pub fn join(&self, relative: impl AsRef<Path>) -> Result<PathBuf> {
+        self.path_style
+            .join_path(self.canonical_path(), relative)
+            .context("join repository-relative path")
+    }
+
+    pub fn relative_path(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
+        let path = path.as_ref();
+        let path_text = path.to_str().context("repository path must be UTF-8")?;
+        if self.path_style.is_absolute(path_text) {
+            let candidate = self.path_style.normalize(path_text);
+            let canonical = self
+                .path_style
+                .normalize(&self.canonical_path.to_string_lossy());
+            let requested = self
+                .path_style
+                .normalize(&self.requested_path.to_string_lossy());
+            let relative = strip_path_text_prefix(&candidate, &canonical, self.path_style)
+                .or_else(|| strip_path_text_prefix(&candidate, &requested, self.path_style))
+                .context("path is outside the repository root")?;
+            let relative = RelPath::new(Path::new(relative), self.path_style)
+                .context("repository-relative path is invalid")?;
+            Ok(PathBuf::from(relative.as_unix_str()))
+        } else {
+            let relative = RelPath::new(path, self.path_style)
+                .context("repository-relative path is invalid")?;
+            Ok(PathBuf::from(relative.as_unix_str()))
+        }
+    }
+
+    pub fn equivalent_path(&self, path: &Path) -> bool {
+        let Some(path) = path.to_str() else {
+            return false;
+        };
+        path_text_eq(
+            &self.path_style.normalize(path),
+            &self
+                .path_style
+                .normalize(&self.canonical_path.to_string_lossy()),
+            self.path_style,
+        )
+    }
+
+    pub fn contains_path(&self, path: &Path) -> bool {
+        let Some(path) = path.to_str() else {
+            return false;
+        };
+        let candidate = self.path_style.normalize(path);
+        let root = self
+            .path_style
+            .normalize(&self.canonical_path.to_string_lossy());
+        if path_text_eq(&candidate, &root, self.path_style) {
+            return true;
+        }
+        strip_path_text_prefix(&candidate, &root, self.path_style).is_some()
+    }
+
     pub fn label(&self) -> String {
+        if self.remote {
+            let path = self.canonical_path.to_string_lossy();
+            return path
+                .trim_end_matches(self.path_style.separators_ch())
+                .rsplit(self.path_style.separators_ch())
+                .find(|part| !part.is_empty())
+                .unwrap_or(path.as_ref())
+                .to_owned();
+        }
         self.canonical_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -123,9 +246,47 @@ impl RepositoryRoot {
     }
 }
 
+fn path_text_eq(left: &str, right: &str, path_style: PathStyle) -> bool {
+    if path_style.is_windows() {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn strip_path_text_prefix<'a>(
+    candidate: &'a str,
+    root: &str,
+    path_style: PathStyle,
+) -> Option<&'a str> {
+    if path_text_eq(candidate, root, path_style) {
+        return Some("");
+    }
+    let prefix = if root.ends_with(path_style.primary_separator()) {
+        root.to_owned()
+    } else {
+        format!("{root}{}", path_style.primary_separator())
+    };
+    let candidate_prefix = candidate.get(..prefix.len())?;
+    if path_text_eq(candidate_prefix, &prefix, path_style) {
+        candidate.get(prefix.len()..)
+    } else {
+        None
+    }
+}
+
 impl PartialEq for RepositoryRoot {
     fn eq(&self, other: &Self) -> bool {
-        self.canonical_path == other.canonical_path
+        self.path_style == other.path_style
+            && path_text_eq(
+                &self
+                    .path_style
+                    .normalize(&self.canonical_path.to_string_lossy()),
+                &other
+                    .path_style
+                    .normalize(&other.canonical_path.to_string_lossy()),
+                self.path_style,
+            )
     }
 }
 
@@ -133,7 +294,15 @@ impl Eq for RepositoryRoot {}
 
 impl Hash for RepositoryRoot {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.canonical_path.hash(state);
+        self.path_style.hash(state);
+        let canonical = self
+            .path_style
+            .normalize(&self.canonical_path.to_string_lossy());
+        if self.path_style.is_windows() {
+            canonical.to_ascii_lowercase().hash(state);
+        } else {
+            canonical.hash(state);
+        }
     }
 }
 
@@ -202,6 +371,7 @@ struct CandidateFile {
     relative_path: String,
     canonical_path: PathBuf,
     is_symlink_alias: bool,
+    ignored: bool,
     project_path: Option<ProjectPath>,
 }
 
@@ -211,6 +381,7 @@ pub struct IndexedFile {
     relative_path: Arc<str>,
     canonical_path: Arc<Path>,
     aliases: Arc<[Arc<str>]>,
+    ignored: bool,
     project_path: Option<ProjectPath>,
 }
 
@@ -228,6 +399,10 @@ impl IndexedFile {
         &self.aliases
     }
 
+    pub fn is_ignored(&self) -> bool {
+        self.ignored
+    }
+
     /// The representative path supplied by Zed's worktree.
     pub fn project_path(&self) -> Option<&ProjectPath> {
         self.project_path.as_ref()
@@ -238,7 +413,9 @@ impl IndexedFile {
 #[derive(Clone, Debug)]
 pub struct RepositoryIndex {
     worktree_id: Option<WorktreeId>,
+    root_label: Arc<str>,
     files: Vec<IndexedFile>,
+    default_file_count: usize,
     alias_to_file: BTreeMap<String, usize>,
     identity_to_file: BTreeMap<PathBuf, usize>,
 }
@@ -253,7 +430,7 @@ impl RepositoryIndex {
             "cannot index repository before the Zed worktree scan completes"
         );
         let snapshot = worktree.snapshot();
-        let entries = snapshot.files(false, 0).map(|entry| RepositoryEntry {
+        let entries = snapshot.files(true, 0).map(|entry| RepositoryEntry {
             relative_path: entry.path.as_unix_str().to_owned(),
             canonical_path: entry
                 .canonical_path
@@ -277,6 +454,7 @@ impl RepositoryIndex {
         root: RepositoryRoot,
         entries: impl IntoIterator<Item = RepositoryEntry>,
     ) -> Result<Self> {
+        let root_label: Arc<str> = Arc::from(root.label());
         let mut by_identity: BTreeMap<PathBuf, Vec<CandidateFile>> = BTreeMap::new();
         let mut worktree_id = None;
 
@@ -292,15 +470,21 @@ impl RepositoryIndex {
                     worktree_id = Some(project_path.worktree_id);
                 }
             }
-            if (entry.ignored && !entry.always_included) || entry.external || entry.is_fifo {
+            if entry.external || entry.is_fifo {
                 continue;
             }
+
+            let ignored = entry.ignored && !entry.always_included;
 
             let is_symlink_alias = entry.canonical_path.is_some();
             let canonical_path = entry
                 .canonical_path
-                .unwrap_or_else(|| root.canonical_path.join(Path::new(&entry.relative_path)));
-            if !canonical_path.is_absolute() {
+                .map(Ok)
+                .unwrap_or_else(|| root.join(Path::new(&entry.relative_path)))?;
+            let canonical_is_absolute = canonical_path
+                .to_str()
+                .is_some_and(|path| root.path_style.is_absolute(path));
+            if !canonical_is_absolute {
                 bail!(
                     "canonical file path must be absolute: {}",
                     canonical_path.display()
@@ -308,7 +492,7 @@ impl RepositoryIndex {
             }
             // A symlink may be visible in the worktree while resolving outside
             // it. Such entries are never repository search candidates.
-            if !canonical_path.starts_with(root.canonical_path()) {
+            if !root.contains_path(&canonical_path) {
                 continue;
             }
 
@@ -319,6 +503,7 @@ impl RepositoryIndex {
                     relative_path: entry.relative_path,
                     canonical_path,
                     is_symlink_alias,
+                    ignored,
                     project_path: entry.project_path,
                 });
         }
@@ -326,8 +511,9 @@ impl RepositoryIndex {
         let mut files = Vec::with_capacity(by_identity.len());
         for (_, mut candidates) in by_identity {
             candidates.sort_by(|left, right| {
-                left.is_symlink_alias
-                    .cmp(&right.is_symlink_alias)
+                left.ignored
+                    .cmp(&right.ignored)
+                    .then_with(|| left.is_symlink_alias.cmp(&right.is_symlink_alias))
                     .then_with(|| left.relative_path.cmp(&right.relative_path))
             });
             let representative = candidates
@@ -344,11 +530,17 @@ impl RepositoryIndex {
                 relative_path: Arc::from(representative.relative_path.as_str()),
                 canonical_path: representative.canonical_path.clone().into(),
                 aliases: aliases.clone().into(),
+                ignored: candidates.iter().all(|candidate| candidate.ignored),
                 project_path: representative.project_path.clone(),
             });
         }
 
-        files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        files.sort_by(|left, right| {
+            left.ignored
+                .cmp(&right.ignored)
+                .then_with(|| left.relative_path.cmp(&right.relative_path))
+        });
+        let default_file_count = files.partition_point(|file| !file.ignored);
         let mut alias_to_file = BTreeMap::new();
         let mut identity_to_file = BTreeMap::new();
         for (index, file) in files.iter().enumerate() {
@@ -362,13 +554,19 @@ impl RepositoryIndex {
 
         Ok(Self {
             worktree_id,
+            root_label,
             files,
+            default_file_count,
             alias_to_file,
             identity_to_file,
         })
     }
 
     pub fn files(&self) -> &[IndexedFile] {
+        &self.files[..self.default_file_count]
+    }
+
+    fn all_files(&self) -> &[IndexedFile] {
         &self.files
     }
 
@@ -570,7 +768,55 @@ pub fn start_literal_project_search(
         false,
         None,
     )?);
+    start_project_search(zed_query, repository, fs, buffer_store, open_buffers, cx)
+}
+
+/// Start one fully configured Zed project search. Literal/regex, case, word,
+/// ignored-file, include/exclude and open-buffer-only semantics all come from
+/// `query`; the bounded worker lifecycle is shared with the Alpha 1 literal
+/// entry point above.
+pub fn start_project_search(
+    zed_query: Arc<SearchQuery>,
+    repository: Arc<RepositoryIndex>,
+    fs: Arc<dyn Fs>,
+    buffer_store: Entity<BufferStore>,
+    open_buffers: Vec<Entity<Buffer>>,
+    cx: &mut App,
+) -> Result<RunningLiteralSearch> {
+    start_project_search_with_disk_prefilter(
+        zed_query,
+        repository,
+        fs,
+        buffer_store,
+        open_buffers,
+        true,
+        cx,
+    )
+}
+
+/// Start a Zed-authoritative project search with an optional local-disk
+/// prefilter. Remote projects disable this stage because their BufferStore is
+/// remote while the Fs retained for settings and extensions is local.
+pub fn start_project_search_with_disk_prefilter(
+    zed_query: Arc<SearchQuery>,
+    repository: Arc<RepositoryIndex>,
+    fs: Arc<dyn Fs>,
+    buffer_store: Entity<BufferStore>,
+    open_buffers: Vec<Entity<Buffer>>,
+    disk_prefilter: bool,
+    cx: &mut App,
+) -> Result<RunningLiteralSearch> {
+    ensure!(
+        !zed_query.is_empty(),
+        "project search query cannot be empty"
+    );
+    ensure!(
+        !zed_query.as_str().contains(['\r', '\n', '\0']),
+        "project search query must fit on one prompt line"
+    );
     let cancellation = LiteralSearchCancellation::new();
+
+    let open_buffers = zed_query.buffers().cloned().unwrap_or(open_buffers);
 
     // Only caller-declared repository documents may bypass disk prefiltering.
     // BufferStore also contains non-searchable scratch buffers (including
@@ -585,7 +831,7 @@ pub fn start_literal_project_search(
             }
             let project_path = ProjectPath::from_file(file.as_ref(), cx);
             let file_index = repository.file_index_for_project_path(&project_path)?;
-            let indexed_file = &repository.files()[file_index];
+            let indexed_file = repository.file(file_index)?;
             Some((
                 file_index,
                 OpenLiteralSearchBuffer {
@@ -609,21 +855,28 @@ pub fn start_literal_project_search(
         order_open_literal_search_buffers(buffers);
     }
 
-    let mut work = Vec::with_capacity(repository.files().len());
-    for (file_index, file) in repository.files().iter().enumerate() {
+    let mut work = Vec::with_capacity(repository.all_files().len());
+    for (file_index, file) in repository.all_files().iter().enumerate() {
+        if !project_search_path_matches(&repository, file, &zed_query) {
+            continue;
+        }
         let Some(project_path) = file.project_path().cloned() else {
             continue;
         };
+        let open_buffers = open_buffers_by_file
+            .remove(&file_index)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|open| open.buffer)
+            .collect::<Vec<_>>();
+        if zed_query.is_opened_only() && open_buffers.is_empty() {
+            continue;
+        }
         work.push(LiteralSearchWork {
             ordinal: work.len(),
             project_path,
             canonical_path: file.canonical_path().to_path_buf(),
-            open_buffers: open_buffers_by_file
-                .remove(&file_index)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|open| open.buffer)
-                .collect(),
+            open_buffers,
         });
     }
 
@@ -679,6 +932,7 @@ pub fn start_literal_project_search(
                 matches_tx,
                 query,
                 fs,
+                disk_prefilter,
                 worker_control,
             )
             .await;
@@ -715,7 +969,7 @@ pub fn start_literal_project_search(
     drop(matches_tx);
 
     let task_cancellation = cancellation.clone();
-    let query_for_output: Arc<str> = query.into();
+    let query_for_output: Arc<str> = Arc::from(zed_query.as_str());
     let collector = cx.background_executor().spawn(async move {
         let mut candidates = OrderedSearchCandidates::default();
         let mut ordered = OrderedFileResults::default();
@@ -779,6 +1033,25 @@ pub fn start_literal_project_search(
     });
 
     Ok(RunningLiteralSearch { task, cancellation })
+}
+
+fn project_search_path_matches(
+    repository: &RepositoryIndex,
+    file: &IndexedFile,
+    query: &SearchQuery,
+) -> bool {
+    if file.ignored && !query.include_ignored() {
+        return false;
+    }
+    if !query.filters_path() {
+        return true;
+    }
+    let path = if query.match_full_paths() {
+        format!("{}/{}", repository.root_label, file.relative_path)
+    } else {
+        file.relative_path.to_string()
+    };
+    RelPath::new(path.as_ref(), PathStyle::local()).is_ok_and(|path| query.match_path(&path))
 }
 
 fn project_search_worker_count(num_cpus: usize) -> usize {
@@ -1068,6 +1341,7 @@ async fn run_literal_prefilter_worker(
     matches_tx: async_channel::Sender<LiteralSearchWorkerResult>,
     query: Arc<SearchQuery>,
     fs: Arc<dyn Fs>,
+    disk_prefilter: bool,
     control: LiteralSearchRunControl,
 ) {
     while let Some(work) = recv_unless_stopped(&work_rx, &control).await {
@@ -1077,7 +1351,7 @@ async fn run_literal_prefilter_worker(
             canonical_path,
             open_buffers,
         } = work;
-        let hint = if open_buffers.is_empty() {
+        let hint = if open_buffers.is_empty() && disk_prefilter {
             match detect_literal_candidate(
                 query.clone(),
                 fs.clone(),
@@ -1401,6 +1675,34 @@ async fn search_snapshot_with_chunk_bytes(
     chunk_bytes: usize,
 ) -> SnapshotSearchMatches {
     let len = snapshot.len();
+    // Regexes may contain arbitrary look-around or span any number of lines,
+    // so a fixed overlap cannot preserve their semantics. Search one immutable
+    // Zed snapshot as a whole, then enforce the same per-source publication cap.
+    if query.is_regex() {
+        if control.is_stopped() {
+            return SnapshotSearchMatches {
+                ranges: Vec::new(),
+                source_limit_reached: false,
+            };
+        }
+        let mut byte_ranges = query.search(&snapshot, None).await;
+        if control.is_stopped() {
+            return SnapshotSearchMatches {
+                ranges: Vec::new(),
+                source_limit_reached: false,
+            };
+        }
+        let source_limit_reached = byte_ranges.len() > PROJECT_SEARCH_SOURCE_RANGE_LIMIT;
+        byte_ranges.truncate(PROJECT_SEARCH_SOURCE_RANGE_LIMIT);
+        let ranges = byte_ranges
+            .into_iter()
+            .map(|range| snapshot.anchor_before(range.start)..snapshot.anchor_after(range.end))
+            .collect();
+        return SnapshotSearchMatches {
+            ranges,
+            source_limit_reached,
+        };
+    }
     let mut chunk_start = match hint {
         MatchPositionHint::Line(line) if line > 0 => {
             snapshot.point_to_offset(Point::new(line.min(snapshot.max_point().row), 0))
@@ -1504,8 +1806,7 @@ fn finalize_literal_search(
     });
 
     let total_hits = candidates.len();
-    candidates.truncate(PROJECT_SEARCH_DISPLAY_LIMIT);
-    let matches = candidates
+    let all_matches = candidates
         .into_iter()
         .map(|candidate| ProjectSearchHit {
             summary: candidate.summary,
@@ -1514,10 +1815,16 @@ fn finalize_literal_search(
             anchor_range: candidate.anchor_range,
             byte_range: candidate.byte_range,
         })
+        .collect::<Vec<_>>();
+    let matches = all_matches
+        .iter()
+        .take(PROJECT_SEARCH_DISPLAY_LIMIT)
+        .cloned()
         .collect();
     ProjectSearchOutput {
         query,
         matches,
+        all_matches,
         total_hits,
         source_limit_reached,
     }
@@ -1681,7 +1988,10 @@ impl fmt::Debug for ProjectSearchHit {
 #[derive(Clone, Debug)]
 pub struct ProjectSearchOutput {
     pub query: Arc<str>,
+    /// Fixed-size terminal overlay prefix.
     pub matches: Vec<ProjectSearchHit>,
+    /// Complete bounded source set used by MultiBuffer and replace preview.
+    pub all_matches: Vec<ProjectSearchHit>,
     /// Full de-duplicated count before the fixed display truncation.
     pub total_hits: usize,
     /// Zed's own safety cap was reached, so `total_hits` is a lower bound.
@@ -1691,6 +2001,12 @@ pub struct ProjectSearchOutput {
 /// Opaque token identifying one project-search request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SearchGeneration(u64);
+
+impl SearchGeneration {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionDisposition {
@@ -1821,6 +2137,52 @@ mod tests {
     }
 
     #[test]
+    fn unix_remote_root_uses_remote_lexical_paths_without_local_io() {
+        let root = RepositoryRoot::remote("/srv/project/../project/.", PathStyle::Unix).unwrap();
+
+        assert!(root.is_remote());
+        assert_eq!(root.path_style(), PathStyle::Unix);
+        assert_eq!(root.canonical_path(), Path::new("/srv/project"));
+        assert_eq!(root.label(), "project");
+        assert!(root.contains_path(Path::new("/srv/project/src/main.rs")));
+        assert!(!root.contains_path(Path::new("/srv/project-other/main.rs")));
+        assert_eq!(
+            root.relative_path("/srv/project/src/main.rs").unwrap(),
+            PathBuf::from("src/main.rs")
+        );
+        assert_eq!(
+            root.join("src/main.rs").unwrap(),
+            PathBuf::from("/srv/project/src/main.rs")
+        );
+        assert!(root.relative_path("../outside").is_err());
+    }
+
+    #[test]
+    fn windows_remote_root_is_case_insensitive_on_a_unix_client() {
+        let root =
+            RepositoryRoot::remote(r"C:/Users/Alice/project/./", PathStyle::Windows).unwrap();
+        let same = RepositoryRoot::remote(r"c:\users\alice\PROJECT", PathStyle::Windows).unwrap();
+
+        assert!(root.is_remote());
+        assert_eq!(root.path_style(), PathStyle::Windows);
+        assert_eq!(root.canonical_path(), Path::new(r"C:\Users\Alice\project"));
+        assert_eq!(root, same);
+        assert_eq!(HashSet::from([root.clone(), same]).len(), 1);
+        assert!(root.equivalent_path(Path::new(r"c:\USERS\ALICE\PROJECT")));
+        assert!(root.contains_path(Path::new(r"c:\users\alice\PROJECT\src\main.rs")));
+        assert!(!root.contains_path(Path::new(r"C:\Users\Alice\project-other\main.rs")));
+        assert_eq!(
+            root.relative_path(r"c:\users\alice\PROJECT\src\main.rs")
+                .unwrap(),
+            PathBuf::from("src/main.rs")
+        );
+        assert_eq!(
+            root.join("src/main.rs").unwrap(),
+            PathBuf::from(r"C:\Users\Alice\project\src\main.rs")
+        );
+    }
+
+    #[test]
     fn index_filters_zed_ignore_and_external_decisions() {
         let index = RepositoryIndex::from_entries(
             root("/repo", "/repo"),
@@ -1847,6 +2209,60 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![".env.example", "src/main.rs"]
         );
+        let ignored = index.file_for_alias("target/hidden").unwrap();
+        assert!(ignored.is_ignored());
+        assert_eq!(index.all_files().len(), 3);
+    }
+
+    #[test]
+    fn configured_search_filters_paths_and_can_include_ignored_files() {
+        use util::paths::PathMatcher;
+
+        let index = RepositoryIndex::from_entries(
+            root("/repo", "/repo"),
+            [
+                RepositoryEntry::file("src/main.rs", 1),
+                RepositoryEntry::file("tests/main.rs", 1),
+                RepositoryEntry::file("src/generated.rs", 1).ignored(true),
+            ],
+        )
+        .unwrap();
+        let query = SearchQuery::text(
+            "needle",
+            false,
+            true,
+            true,
+            PathMatcher::new(["repo/src/**"], PathStyle::Unix).unwrap(),
+            PathMatcher::new(["**/generated.rs"], PathStyle::Unix).unwrap(),
+            true,
+            None,
+        )
+        .unwrap();
+
+        let matched = index
+            .all_files()
+            .iter()
+            .filter(|file| project_search_path_matches(&index, file, &query))
+            .map(IndexedFile::relative_path)
+            .collect::<Vec<_>>();
+        assert_eq!(matched, vec!["src/main.rs"]);
+
+        let ignored_query = SearchQuery::text(
+            "needle",
+            false,
+            true,
+            true,
+            Default::default(),
+            Default::default(),
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(project_search_path_matches(
+            &index,
+            index.file_for_alias("src/generated.rs").unwrap(),
+            &ignored_query
+        ));
     }
 
     #[test]
@@ -2112,6 +2528,8 @@ mod tests {
 
     #[test]
     fn source_budget_flags_only_the_first_excess_file_or_range() {
+        assert_eq!(PROJECT_SEARCH_SOURCE_FILE_LIMIT, 10_000);
+        assert_eq!(PROJECT_SEARCH_SOURCE_RANGE_LIMIT, 10_000);
         let mut files = ProjectSearchSourceBudget::default();
         for _ in 0..PROJECT_SEARCH_SOURCE_FILE_LIMIT {
             assert_eq!(files.admit(1, false), (1, false));
@@ -2366,6 +2784,62 @@ mod tests {
         assert_eq!(
             result_receiver.recv().expect("receive range cap result"),
             (PROJECT_SEARCH_SOURCE_RANGE_LIMIT, true)
+        );
+    }
+
+    #[test]
+    fn regex_snapshot_search_preserves_multiline_and_lookaround_semantics() {
+        let text = "before\nleft\nmiddle\nright\nafter\n".to_owned();
+        let expected_start = text.find("left").unwrap();
+        let expected_end = text.find("right").unwrap() + "right".len();
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        gpui_platform::headless().run(move |cx| {
+            let buffer = cx.new(|cx| Buffer::local(text, cx));
+            let snapshot = buffer.read(cx).snapshot();
+            let offsets_snapshot = snapshot.clone();
+            let query = Arc::new(
+                SearchQuery::regex(
+                    r"(?s)(?<=before\n)left.*right(?=\nafter)",
+                    false,
+                    true,
+                    false,
+                    false,
+                    Default::default(),
+                    Default::default(),
+                    false,
+                    None,
+                )
+                .unwrap(),
+            );
+            cx.spawn(async move |cx| {
+                let result = cx
+                    .background_spawn(search_snapshot_with_chunk_bytes(
+                        query,
+                        snapshot,
+                        MatchPositionHint::default(),
+                        run_control(),
+                        3,
+                    ))
+                    .await;
+                let offsets = result
+                    .ranges
+                    .iter()
+                    .map(|range| {
+                        offsets_snapshot.summary_for_anchor(&range.start)
+                            ..offsets_snapshot.summary_for_anchor(&range.end)
+                    })
+                    .collect::<Vec<_>>();
+                result_sender
+                    .send((offsets, result.source_limit_reached))
+                    .unwrap();
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+
+        assert_eq!(
+            result_receiver.recv().unwrap(),
+            (vec![expected_start..expected_end], false)
         );
     }
 

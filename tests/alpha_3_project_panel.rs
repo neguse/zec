@@ -1,0 +1,9 @@
+//! Alpha 3 project-panel identity, mutation, and confinement contract tests.
+
+#[path = "../src/project_panel.rs"]
+mod project_panel;
+
+#[test]
+fn alpha_3_project_panel_contract_module_is_linked_into_the_gate() {
+    assert!(std::mem::size_of::<project_panel::ProjectPanelState>() > 0);
+}

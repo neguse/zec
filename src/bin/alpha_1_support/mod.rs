@@ -65,6 +65,7 @@ const CLEANUP_ESCAPES: &[u8] = concat!(
     "\x1b[?1003l",
     "\x1b[?1002l",
     "\x1b[?1000l",
+    "\x1b[?1004l",
     "\x1b[?2004l",
     "\x1b[?1049l",
 )
@@ -1437,6 +1438,57 @@ impl PtySession {
     pub fn paste_marked(&mut self, text: &str) -> Result<OperationMark> {
         let generation = self.generation;
         mark_around_action(generation, || self.paste(text))
+    }
+
+    pub fn resize(&mut self, columns: u16, rows: u16) -> Result<OperationMark> {
+        ensure!(columns > 0 && rows > 0, "PTY dimensions must be non-zero");
+        let generation = self.generation;
+        mark_around_action(generation, || {
+            self.master
+                .as_ref()
+                .context("PTY master is closed")?
+                .resize(PtySize {
+                    rows,
+                    cols: columns,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .context("resize PTY")?;
+            self.parser.screen_mut().set_size(rows, columns);
+            Ok(())
+        })
+    }
+
+    pub fn sgr_mouse(
+        &mut self,
+        button_code: u8,
+        column: u16,
+        row: u16,
+        released: bool,
+    ) -> Result<()> {
+        let suffix = if released { 'm' } else { 'M' };
+        self.send(
+            format!(
+                "\x1b[<{};{};{}{}",
+                button_code,
+                column.saturating_add(1),
+                row.saturating_add(1),
+                suffix
+            )
+            .as_bytes(),
+        )
+    }
+
+    pub fn mouse_down(&mut self, column: u16, row: u16) -> Result<()> {
+        self.sgr_mouse(0, column, row, false)
+    }
+
+    pub fn mouse_drag(&mut self, column: u16, row: u16) -> Result<()> {
+        self.sgr_mouse(32, column, row, false)
+    }
+
+    pub fn mouse_up(&mut self, column: u16, row: u16) -> Result<()> {
+        self.sgr_mouse(0, column, row, true)
     }
 
     pub fn wait_contains(

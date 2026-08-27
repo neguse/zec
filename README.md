@@ -1,10 +1,12 @@
 # zec
 
-Zed の編集コアを使う CUI エディタです。Linux向け基盤の実現可能性PoCとAlpha 1の
-repository editing loopはcanonical gateを通過しています。現在は、Zed Projectをauthorityにした
-language editing loopを実装したAlpha 2 candidateです。341 caseのactual-binary acceptance、
-15種のLSP failure matrix、latency/VmHWM benchmarkをhosted gateで検証してから昇格します。
-まだproduction-readyではありません。
+Zed の編集コアを使う CUI エディタです。repository/language editingとTerminal Workspace、
+Git/terminal/tasks/DAPのlocal development loopに加え、Zed extension host、theme、settings/keymap、
+manifest検証付きupdate、6-target release pipeline、Zed remote protocolによるSSH workspace、
+Markdown/画像、10万行large-file pathまで
+implemented candidateです。Alpha 3の361-case actual-binary acceptanceと860-ID benchmarkはlocalで完走し、
+hosted evidence待ちです。AI、collaboration、notebookはまだparity未達であり、
+production-readyではありません。
 
 現在は、GPUI runtime 上で `editor::Editor` を動かし、Crossterm から Zed の
 keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを描画します。
@@ -15,7 +17,9 @@ PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](doc
 長期のZed体験parityは [docs/zed-parity.md](docs/zed-parity.md) と
 [docs/zed-parity-v1.json](docs/zed-parity-v1.json)で追跡します。repository editing loopは
 [docs/alpha-1.md](docs/alpha-1.md)、次のProject-backed language editing loopは
-[docs/alpha-2.md](docs/alpha-2.md)の機械判定contractで管理します。
+[docs/alpha-2.md](docs/alpha-2.md)、Terminal Workspaceは[docs/alpha-3.md](docs/alpha-3.md)、
+local development loopは[docs/beta-1.md](docs/beta-1.md)、ecosystemと配布は
+[docs/beta-2.md](docs/beta-2.md)の機械判定contractで管理します。
 
 Alpha 2の通常回帰は、unit/PTYに加えて次のactual-binary integration testで確認できます。
 canonicalな20-process acceptanceとbenchmark、Alpha 1再検証、evidence-only promotionを含む完全な
@@ -112,7 +116,7 @@ Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsynt
 します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な
 parser/queryを遅延loadします。repository modeでは同じZed `Project`がLanguageRegistryと
 LspStoreも所有し、各language adapterの通常のPATH discoveryでlanguage serverを起動します。
-Node runtimeは現在unavailableとして初期化するため、Nodeを必須とするadapterはまだ利用できません。
+Node runtimeはZedの設定に従ってconfigured/system pathを探索し、必要ならdownloadできる状態で初期化します。
 `NO_COLOR` が設定された環境ではCrosstermの規約どおり色を出しません。
 
 `F1`または`Ctrl-Shift-P`はaction ID、表示名、binding、現在のenabled stateを持つcommand
@@ -122,6 +126,54 @@ symbolsを開きます。移動後は`Alt-Left` / `Alt-Right`でselectionとview
 `F6`はprepareRename後にrename promptを開き、`Ctrl-.`はcode action picker、`Shift-Alt-F`は文書、
 `Ctrl-Alt-F`はselectionをformatします。複数fileに及ぶrename/code actionはZedの
 `ProjectTransaction`として保持し、`Ctrl-Z` / `Ctrl-Y`で全対象Bufferを一括undo/redoします。
+
+`Ctrl-Shift-G`はZedのactive repository snapshotをGit panelへ投影します。panel内では個別または
+全changeのstage/unstage、discardをZed GitStoreへ適用できます。`Ctrl-\``はbottom dockの
+integrated terminal、`Ctrl-Shift-\``は新しいZed terminalを開きます。terminal focus中のkey、paste、
+resize、scrollbackはZed terminalへ渡し、`Esc`でeditorへ戻ります。
+
+`Ctrl-Shift-B`はZed TaskInventoryが解決したtask picker、`Ctrl-Alt-B`は完了済みの最後のtaskの
+rerunです。taskはintegrated terminalで実行され、同時実行禁止、reveal、save、cwd、environmentなど
+Zed taskの設定を保持します。untrusted worktreeではprocessを開始しません。
+
+`F5`は`.zed/debug.json`とtask由来のdebug scenarioを選び、登録済みZed DAP adapterを起動します。
+`Ctrl-Shift-D`でDebugger panel、`Ctrl-F9`でsource breakpoint、`Ctrl-F5` / `Ctrl-F6` /
+`Shift-F5`でcontinue / pause / stop、`Alt-F10` / `Alt-F11` / `Alt-Shift-F11`でstep over / in / outを
+操作します。`Ctrl-Shift-R`（panel focus中は`:`）のdebug consoleはadapter-nativeなREPL commandを
+評価します。終了済みsessionは操作対象から外れますが、最後のadapter outputはpost-mortem用に残ります。
+詳細と実GDB受け入れ試験は[docs/beta-1.md](docs/beta-1.md)を参照してください。
+
+`Ctrl-Shift-X`はZed ExtensionStoreのall/installed/updates viewです。`Enter`でinstall/update、
+`Delete`を2回でuninstall、`Ctrl-D`で`extension.toml`を持つdevelopment extensionを追加し、
+追加後の`Enter`でsourceからrebuildします。`Ctrl-Alt-T` / `Ctrl-Alt-I`はextension由来を含む
+theme/icon theme、`Ctrl-,` / `Ctrl-Alt-,`は実際のZed settings/keymap fileを開きます。
+`Ctrl-Alt-U`はupdate manifestを確認します。CLIによる検証・download・適用とrelease形式の詳細は
+[docs/beta-2.md](docs/beta-2.md)を参照してください。
+
+Markdown tabでは`Ctrl-Shift-V`でZed互換のfeature flagを使うpreviewを開き、`Tab`でlink/imageを
+選び`Enter`で開きます。local linkはZed ProjectPath内だけに制限し、外部URLは確認後にOSへ渡します。
+PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/PNM系画像はQuick Open、Project Panel、`Ctrl-O`、または
+`zec image.png`でread-only tabとして開けます。Kitty/iTerm2/Sixelを能力検出し、未対応端末では
+format・寸法・sizeを表示します。Markdown/画像tabよりtrustやcommand overlayが常に前面です。
+
+10万行と64 KiB単一行を含むactual-binary gateで、open、`Ctrl-G`移動、描画、編集、保存、Linux
+`VmHWM ≤ 1 GiB`、terminal復元を検証しています。これは専用の簡略text modelではなく通常のZed
+Editor/Buffer経路です。
+
+`zec remote ssh`はZedと同じremote protocol/serverを使ってremote Projectを開きます。editor、
+BufferStore、WorktreeStore、LSP、Git、terminal、tasks、DAP、project search、project panelのauthorityは
+接続先のZed Projectに残ります。passwordは引数に受け付けず、必要な認証は端末内のmasked askpassで
+行います。WSLとDocker/Podman transportも同じ入口から選べます。
+
+```sh
+zec --version
+zec remote ssh HOST /absolute/project
+zec remote wsl DISTRO /absolute/project
+zec remote container NAME /absolute/project
+zec update check
+zec update download --output ./zec-new
+zec update apply
+```
 
 端末を使わず、Zed Editorへの挿入とundoを確認するheadless smoke:
 

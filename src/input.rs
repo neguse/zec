@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers as CrosstermModifiers};
 use gpui::{Keystroke, Modifiers as GpuiModifiers};
 
+use crate::workspace_model::Direction as PaneDirection;
+
 pub fn is_quit(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('q')
@@ -73,11 +75,227 @@ pub fn is_project_search(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::ALT
 }
 
+pub fn is_toggle_project_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::F(7) && event.modifiers == CrosstermModifiers::NONE)
+            || (matches!(event.code, KeyCode::Char('e' | 'E'))
+                && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)))
+}
+
+pub fn is_toggle_git_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('g' | 'G'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_toggle_outline_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::F(9) && event.modifiers == CrosstermModifiers::NONE)
+            || (matches!(event.code, KeyCode::Char('o' | 'O'))
+                && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)))
+}
+
+pub fn is_toggle_terminal_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::F(3) && event.modifiers == CrosstermModifiers::NONE)
+            || (event.code == KeyCode::Char('`') && event.modifiers == CrosstermModifiers::CONTROL))
+}
+
+pub fn is_inline_assist(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Enter
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_show_edit_prediction(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('\\')
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_accept_edit_prediction(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((matches!(event.code, KeyCode::Char('l' | 'L'))
+            && event.modifiers == CrosstermModifiers::ALT)
+            || (event.code == KeyCode::Tab && event.modifiers == CrosstermModifiers::ALT))
+}
+
+pub fn is_accept_next_word_edit_prediction(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('k' | 'K'))
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_accept_next_line_edit_prediction(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('j' | 'J'))
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_toggle_edit_prediction(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('e' | 'E'))
+        && event.modifiers
+            == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_edit_prediction_shortcut(event: &KeyEvent) -> bool {
+    is_show_edit_prediction(event)
+        || is_accept_edit_prediction(event)
+        || is_accept_next_word_edit_prediction(event)
+        || is_accept_next_line_edit_prediction(event)
+        || is_toggle_edit_prediction(event)
+}
+
+pub fn is_new_terminal(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('`' | '~'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_run_task(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('b' | 'B'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_rerun_task(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('b' | 'B'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_toggle_debugger_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('d' | 'D'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_start_debugging(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(5)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_toggle_breakpoint(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(9)
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_continue_debugging(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(5)
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_pause_debugging(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(6)
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_stop_debugging(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(5)
+        && event.modifiers == CrosstermModifiers::SHIFT
+}
+
+pub fn is_step_over(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(10)
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_step_into(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(11)
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_step_out(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(11)
+        && event.modifiers == (CrosstermModifiers::ALT | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_debug_repl(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('r' | 'R'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
 pub fn is_command_palette(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && ((event.code == KeyCode::F(1) && event.modifiers == CrosstermModifiers::NONE)
             || (matches!(event.code, KeyCode::Char('p' | 'P'))
                 && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)))
+}
+
+pub fn is_extensions(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('x' | 'X'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_select_theme(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('t' | 'T'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_select_icon_theme(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('i' | 'I'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_open_settings(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char(',')
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_open_keymap(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char(',')
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_reload_extensions(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('r' | 'R'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_check_updates(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('u' | 'U'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_terminal_capabilities(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(4)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_toggle_markdown_preview(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('v' | 'V'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_toggle_agent_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('a' | 'A'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_toggle_collaboration_panel(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('c' | 'C'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
 }
 
 pub fn is_completion(event: &KeyEvent) -> bool {
@@ -146,6 +364,73 @@ pub fn is_format_selection(event: &KeyEvent) -> bool {
         && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
 }
 
+pub fn is_toggle_fold(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(11)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_fold_all(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(11)
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_unfold_all(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(11)
+        && event.modifiers == CrosstermModifiers::SHIFT
+}
+
+pub fn is_toggle_soft_wrap(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('z' | 'Z'))
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_toggle_inlay_hints(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && ((event.code == KeyCode::Char(':') && event.modifiers == CrosstermModifiers::CONTROL)
+            || (event.code == KeyCode::Char(';')
+                && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)))
+}
+
+pub fn is_add_selection_above(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Up
+        && event.modifiers == (CrosstermModifiers::SHIFT | CrosstermModifiers::ALT)
+}
+
+pub fn is_add_selection_below(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Down
+        && event.modifiers == (CrosstermModifiers::SHIFT | CrosstermModifiers::ALT)
+}
+
+pub fn is_select_next_occurrence(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('d' | 'D'))
+        && event.modifiers == CrosstermModifiers::CONTROL
+}
+
+pub fn is_select_all_occurrences(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('l' | 'L'))
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_advanced_editor_shortcut(event: &KeyEvent) -> bool {
+    is_toggle_fold(event)
+        || is_fold_all(event)
+        || is_unfold_all(event)
+        || is_toggle_soft_wrap(event)
+        || is_toggle_inlay_hints(event)
+        || is_add_selection_above(event)
+        || is_add_selection_below(event)
+        || is_select_next_occurrence(event)
+        || is_select_all_occurrences(event)
+}
+
 pub fn is_undo(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::Char('z')
@@ -189,6 +474,98 @@ pub fn is_next_tab(event: &KeyEvent) -> bool {
         && event.modifiers == CrosstermModifiers::CONTROL
 }
 
+pub fn is_split_right(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(10)
+        && event.modifiers == CrosstermModifiers::NONE
+}
+
+pub fn is_split_down(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::F(10)
+        && event.modifiers == CrosstermModifiers::SHIFT
+}
+
+pub fn focus_pane_direction(event: &KeyEvent) -> Option<PaneDirection> {
+    if event.kind != KeyEventKind::Press
+        || event.modifiers != (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+    {
+        return None;
+    }
+    match event.code {
+        KeyCode::Left => Some(PaneDirection::Left),
+        KeyCode::Right => Some(PaneDirection::Right),
+        KeyCode::Up => Some(PaneDirection::Up),
+        KeyCode::Down => Some(PaneDirection::Down),
+        _ => None,
+    }
+}
+
+pub fn move_item_direction(event: &KeyEvent) -> Option<PaneDirection> {
+    if event.kind != KeyEventKind::Press
+        || event.modifiers
+            != (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT | CrosstermModifiers::SHIFT)
+    {
+        return None;
+    }
+    match event.code {
+        KeyCode::Left => Some(PaneDirection::Left),
+        KeyCode::Right => Some(PaneDirection::Right),
+        KeyCode::Up => Some(PaneDirection::Up),
+        KeyCode::Down => Some(PaneDirection::Down),
+        _ => None,
+    }
+}
+
+pub fn is_grow_pane(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && matches!(event.code, KeyCode::Char('=' | '+'))
+        && event
+            .modifiers
+            .contains(CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_shrink_pane(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Char('-')
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+}
+
+pub fn is_pin_tab(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::Enter
+        && event.modifiers == CrosstermModifiers::ALT
+}
+
+pub fn is_move_tab_left(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::PageUp
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_move_tab_right(event: &KeyEvent) -> bool {
+    event.kind == KeyEventKind::Press
+        && event.code == KeyCode::PageDown
+        && event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+}
+
+pub fn is_workspace_layout_shortcut(event: &KeyEvent) -> bool {
+    is_toggle_project_panel(event)
+        || is_toggle_git_panel(event)
+        || is_toggle_outline_panel(event)
+        || is_toggle_terminal_panel(event)
+        || is_new_terminal(event)
+        || is_split_right(event)
+        || is_split_down(event)
+        || focus_pane_direction(event).is_some()
+        || move_item_direction(event).is_some()
+        || is_grow_pane(event)
+        || is_shrink_pane(event)
+        || is_pin_tab(event)
+        || is_move_tab_left(event)
+        || is_move_tab_right(event)
+}
+
 pub fn is_scroll_page_up(event: &KeyEvent) -> bool {
     event.kind == KeyEventKind::Press
         && event.code == KeyCode::PageUp
@@ -202,7 +579,22 @@ pub fn is_scroll_page_down(event: &KeyEvent) -> bool {
 }
 
 pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
-    is_command_palette(event)
+    is_workspace_layout_shortcut(event)
+        || is_run_task(event)
+        || is_rerun_task(event)
+        || is_toggle_debugger_panel(event)
+        || is_start_debugging(event)
+        || is_toggle_breakpoint(event)
+        || is_continue_debugging(event)
+        || is_pause_debugging(event)
+        || is_stop_debugging(event)
+        || is_step_over(event)
+        || is_step_into(event)
+        || is_step_out(event)
+        || is_debug_repl(event)
+        || is_advanced_editor_shortcut(event)
+        || is_command_palette(event)
+        || is_toggle_markdown_preview(event)
         || is_completion(event)
         || is_hover(event)
         || is_project_diagnostics(event)
@@ -240,6 +632,41 @@ pub fn is_intercepted_shortcut(event: &KeyEvent) -> bool {
                 event.code,
                 KeyCode::Char('f') | KeyCode::PageUp | KeyCode::PageDown
             ))
+        || (event.code == KeyCode::F(10)
+            && matches!(
+                event.modifiers,
+                CrosstermModifiers::NONE | CrosstermModifiers::SHIFT
+            ))
+        || (event.code == KeyCode::F(7) && event.modifiers == CrosstermModifiers::NONE)
+        || (event.code == KeyCode::F(3) && event.modifiers == CrosstermModifiers::NONE)
+        || (event
+            .modifiers
+            .contains(CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+            && matches!(
+                event.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Char('=' | '+' | '-')
+            ))
+        || (matches!(event.code, KeyCode::Char('b' | 'B'))
+            && matches!(
+                event.modifiers,
+                modifiers if modifiers
+                    == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+                    || modifiers
+                        == (CrosstermModifiers::CONTROL | CrosstermModifiers::ALT)
+            ))
+        || (event.modifiers == CrosstermModifiers::ALT && event.code == KeyCode::Enter)
+        || (event.modifiers == (CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT)
+            && matches!(
+                event.code,
+                KeyCode::Char('e' | 'E' | 'g' | 'G' | 'v' | 'V' | '`' | '~')
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+            ))
+        || (event.code == KeyCode::Char('`') && event.modifiers == CrosstermModifiers::CONTROL)
 }
 
 pub fn to_gpui_keystroke(event: KeyEvent) -> Option<Keystroke> {
@@ -623,7 +1050,7 @@ mod tests {
                 CrosstermModifiers::CONTROL,
                 KeyEventKind::Release,
             )));
-            assert!(!is_intercepted_shortcut(&KeyEvent::new(
+            assert!(is_intercepted_shortcut(&KeyEvent::new(
                 code,
                 CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
             )));
@@ -740,6 +1167,46 @@ mod tests {
         assert!(!is_command_palette(&KeyEvent::new_with_kind(
             KeyCode::F(1),
             CrosstermModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+    }
+
+    #[test]
+    fn recognizes_advanced_editor_shortcuts_without_modifier_aliases() {
+        for event in [
+            KeyEvent::new(KeyCode::F(11), CrosstermModifiers::NONE),
+            KeyEvent::new(KeyCode::F(11), CrosstermModifiers::CONTROL),
+            KeyEvent::new(KeyCode::F(11), CrosstermModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('z'), CrosstermModifiers::ALT),
+            KeyEvent::new(KeyCode::Char(':'), CrosstermModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char(';'),
+                CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+            ),
+            KeyEvent::new(
+                KeyCode::Up,
+                CrosstermModifiers::SHIFT | CrosstermModifiers::ALT,
+            ),
+            KeyEvent::new(
+                KeyCode::Down,
+                CrosstermModifiers::SHIFT | CrosstermModifiers::ALT,
+            ),
+            KeyEvent::new(KeyCode::Char('d'), CrosstermModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char('l'),
+                CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+            ),
+        ] {
+            assert!(is_advanced_editor_shortcut(&event), "{event:?}");
+            assert!(is_intercepted_shortcut(&event), "{event:?}");
+        }
+        assert!(!is_advanced_editor_shortcut(&KeyEvent::new(
+            KeyCode::F(11),
+            CrosstermModifiers::ALT,
+        )));
+        assert!(!is_advanced_editor_shortcut(&KeyEvent::new_with_kind(
+            KeyCode::Char('d'),
+            CrosstermModifiers::CONTROL,
             KeyEventKind::Release,
         )));
     }

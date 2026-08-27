@@ -1,4 +1,6 @@
 use std::{
+    env,
+    ffi::OsString,
     io::{self, Stdout, stdout},
     path::PathBuf,
     sync::{
@@ -13,8 +15,9 @@ use async_channel::Sender;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyEvent, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyEvent, KeyboardEnhancementFlags,
+        MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -22,6 +25,8 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode,
     },
 };
+use dap::RunInTerminalRequestArguments;
+use futures::channel::mpsc as futures_mpsc;
 use lsp::{LanguageServerId, WorkspaceEdit};
 use project::CodeAction;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -35,6 +40,206 @@ use signal_hook::{
 use crate::{ProjectSearchRequestKey, actions::TerminalAction, repository::ProjectSearchOutput};
 
 pub type ZecTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyboardProtocol {
+    Kitty,
+    ModifyOtherKeys,
+    Legacy,
+}
+
+impl KeyboardProtocol {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Kitty => "kitty",
+            Self::ModifyOtherKeys => "modifyOtherKeys",
+            Self::Legacy => "legacy+F1",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalColorCapability {
+    TrueColor,
+    Ansi256,
+    Ansi16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalImageProtocol {
+    Kitty,
+    Iterm2,
+    Sixel,
+    None,
+}
+
+impl TerminalImageProtocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Kitty => "kitty",
+            Self::Iterm2 => "iterm2",
+            Self::Sixel => "sixel",
+            Self::None => "none",
+        }
+    }
+}
+
+impl TerminalColorCapability {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TrueColor => "truecolor",
+            Self::Ansi256 => "256-color",
+            Self::Ansi16 => "16-color",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalCapabilities {
+    pub keyboard: KeyboardProtocol,
+    pub color: TerminalColorCapability,
+    pub utf8: bool,
+    pub mouse_motion_requested: bool,
+    pub focus_requested: bool,
+    pub osc52_attempted: bool,
+    pub osc8_available: bool,
+    pub image_protocol: TerminalImageProtocol,
+    pub external_media_available: bool,
+    pub mouse_observed: bool,
+    pub focus_observed: bool,
+}
+
+impl TerminalCapabilities {
+    pub fn detect() -> Self {
+        Self::detect_with(|name| env::var_os(name))
+    }
+
+    fn detect_with(mut value: impl FnMut(&str) -> Option<OsString>) -> Self {
+        let text = |name: &str, value: &mut dyn FnMut(&str) -> Option<OsString>| {
+            value(name).map(|value| value.to_string_lossy().to_ascii_lowercase())
+        };
+        let term = text("TERM", &mut value).unwrap_or_default();
+        let term_program = text("TERM_PROGRAM", &mut value).unwrap_or_default();
+        let override_protocol = text("ZEC_KEYBOARD_PROTOCOL", &mut value);
+        let inside_tmux = value("TMUX").is_some();
+        let kitty_environment = value("KITTY_WINDOW_ID").is_some()
+            || value("WEZTERM_PANE").is_some()
+            || term.contains("kitty")
+            || term.starts_with("foot")
+            || matches!(term_program.as_str(), "wezterm" | "ghostty");
+        let modify_other_keys_environment = value("XTERM_VERSION").is_some()
+            || term.starts_with("xterm")
+            || matches!(term_program.as_str(), "iterm.app" | "apple_terminal");
+        let keyboard = match override_protocol.as_deref() {
+            Some("kitty") => KeyboardProtocol::Kitty,
+            Some("modifyotherkeys" | "modify_other_keys" | "xterm") => {
+                KeyboardProtocol::ModifyOtherKeys
+            }
+            Some("legacy") => KeyboardProtocol::Legacy,
+            _ if kitty_environment && !inside_tmux => KeyboardProtocol::Kitty,
+            _ if modify_other_keys_environment && !inside_tmux => KeyboardProtocol::ModifyOtherKeys,
+            _ => KeyboardProtocol::Legacy,
+        };
+        let color_term = text("COLORTERM", &mut value).unwrap_or_default();
+        let color = if matches!(color_term.as_str(), "truecolor" | "24bit") {
+            TerminalColorCapability::TrueColor
+        } else if term.contains("256color") {
+            TerminalColorCapability::Ansi256
+        } else {
+            TerminalColorCapability::Ansi16
+        };
+        let locale = text("LC_ALL", &mut value)
+            .filter(|locale| !locale.is_empty())
+            .or_else(|| text("LC_CTYPE", &mut value).filter(|locale| !locale.is_empty()))
+            .or_else(|| text("LANG", &mut value))
+            .unwrap_or_default();
+        let usable_terminal = term != "dumb";
+        let image_override = text("ZEC_IMAGE_PROTOCOL", &mut value);
+        let image_protocol = match image_override.as_deref() {
+            Some("kitty") => TerminalImageProtocol::Kitty,
+            Some("iterm" | "iterm2" | "osc1337") => TerminalImageProtocol::Iterm2,
+            Some("sixel") => TerminalImageProtocol::Sixel,
+            Some("none" | "off" | "text") => TerminalImageProtocol::None,
+            Some(_) => TerminalImageProtocol::None,
+            None if !usable_terminal || inside_tmux => TerminalImageProtocol::None,
+            None if kitty_environment => TerminalImageProtocol::Kitty,
+            None if term_program == "iterm.app" => TerminalImageProtocol::Iterm2,
+            None if term.contains("sixel") || value("DEC_SIXEL").is_some() => {
+                TerminalImageProtocol::Sixel
+            }
+            None => TerminalImageProtocol::None,
+        };
+        let external_media_available = value("ZEC_EXTERNAL_MEDIA")
+            .is_some_and(|value| value != "0" && !value.is_empty())
+            || value("DISPLAY").is_some()
+            || value("WAYLAND_DISPLAY").is_some()
+            || cfg!(target_os = "macos")
+            || cfg!(windows);
+
+        Self {
+            keyboard,
+            color,
+            utf8: locale.contains("utf-8") || locale.contains("utf8"),
+            mouse_motion_requested: usable_terminal,
+            focus_requested: usable_terminal,
+            osc52_attempted: usable_terminal,
+            osc8_available: usable_terminal,
+            image_protocol,
+            external_media_available,
+            mouse_observed: false,
+            focus_observed: false,
+        }
+    }
+
+    pub fn observe_mouse(&mut self) {
+        self.mouse_observed = true;
+    }
+
+    pub fn observe_focus(&mut self) {
+        self.focus_observed = true;
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "terminal keyboard={} mouse={}/{} focus={}/{} OSC52={} OSC8={} image={} external-media={} color={} UTF-8={}",
+            self.keyboard.label(),
+            if self.mouse_motion_requested {
+                "on"
+            } else {
+                "off"
+            },
+            if self.mouse_observed {
+                "seen"
+            } else {
+                "unverified"
+            },
+            if self.focus_requested { "on" } else { "off" },
+            if self.focus_observed {
+                "seen"
+            } else {
+                "unverified"
+            },
+            if self.osc52_attempted {
+                "attempt"
+            } else {
+                "off"
+            },
+            if self.osc8_available {
+                "available"
+            } else {
+                "off"
+            },
+            self.image_protocol.label(),
+            if self.external_media_available {
+                "available"
+            } else {
+                "off"
+            },
+            self.color.label(),
+            if self.utf8 { "yes" } else { "no" },
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollDirection {
@@ -111,8 +316,48 @@ pub enum TerminalEvent {
     Paste(String),
     Mouse(MouseEvent),
     MouseScroll(ScrollDirection),
+    FocusChanged(bool),
     Resize,
     Redraw,
+    /// The remote transport status or terminal askpass prompt changed.
+    RemoteChanged,
+    ExtensionsFetched {
+        generation: u64,
+        result: Result<Vec<crate::extension_picker::ExtensionRecord>, String>,
+    },
+    ExtensionStoreChanged {
+        message: String,
+    },
+    ZedTerminalClosed {
+        entity_id: u64,
+    },
+    TaskFinished {
+        entity_id: u64,
+        success: bool,
+        hide: task::HideStrategy,
+    },
+    AgentTerminalAuthenticationFinished {
+        entity_id: u64,
+        method_id: String,
+        success: bool,
+    },
+    InlineAssistChunk {
+        generation: u64,
+        chunk: String,
+    },
+    InlineAssistFinished {
+        generation: u64,
+        result: Result<String, String>,
+    },
+    DapNotification(String),
+    DapRunInTerminal {
+        session: gpui::Entity<project::debugger::session::Session>,
+        request: RunInTerminalRequestArguments,
+        sender: futures_mpsc::Sender<anyhow::Result<u32>>,
+    },
+    OutlineChanged {
+        buffer_id: u64,
+    },
     ReloadFinished {
         buffer_id: u64,
         result: Result<(), String>,
@@ -179,25 +424,53 @@ pub enum TerminalEvent {
 
 pub struct TerminalSession {
     active: bool,
+    capabilities: TerminalCapabilities,
 }
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
-        Self::activate()?;
-        Ok(Self { active: true })
+        let capabilities = TerminalCapabilities::detect();
+        Self::activate(&capabilities)?;
+        Ok(Self {
+            active: true,
+            capabilities,
+        })
     }
 
-    fn activate() -> io::Result<()> {
+    fn activate(capabilities: &TerminalCapabilities) -> io::Result<()> {
         enable_raw_mode()?;
         if let Err(error) = execute!(
             stdout(),
             EnterAlternateScreen,
             Clear(ClearType::All),
             EnableBracketedPaste,
+            EnableFocusChange,
             EnableMouseCapture,
             Hide
         ) {
-            let _ = restore_terminal();
+            let _ = restore_terminal(capabilities);
+            return Err(error);
+        }
+        let keyboard_result = match capabilities.keyboard {
+            KeyboardProtocol::Kitty => execute!(
+                stdout(),
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                )
+            ),
+            KeyboardProtocol::ModifyOtherKeys => {
+                use std::io::Write as _;
+                let mut output = stdout();
+                output
+                    .write_all(b"\x1b[>4;2m")
+                    .and_then(|()| output.flush())
+            }
+            KeyboardProtocol::Legacy => Ok(()),
+        };
+        if let Err(error) = keyboard_result {
+            let _ = restore_terminal(capabilities);
             return Err(error);
         }
         Ok(())
@@ -206,11 +479,15 @@ impl TerminalSession {
     pub fn terminal(&self) -> io::Result<ZecTerminal> {
         Terminal::new(CrosstermBackend::new(stdout()))
     }
+
+    pub fn capabilities(&self) -> &TerminalCapabilities {
+        &self.capabilities
+    }
 }
 
 impl TerminalSession {
     pub fn restore(mut self) -> io::Result<()> {
-        let result = restore_terminal();
+        let result = restore_terminal(&self.capabilities);
         if result.is_ok() {
             self.active = false;
         }
@@ -221,23 +498,33 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.active {
-            let _ = restore_terminal();
+            let _ = restore_terminal(&self.capabilities);
         }
     }
 }
 
-fn restore_terminal() -> io::Result<()> {
+fn restore_terminal(capabilities: &TerminalCapabilities) -> io::Result<()> {
+    let keyboard_result = match capabilities.keyboard {
+        KeyboardProtocol::Kitty => execute!(stdout(), PopKeyboardEnhancementFlags),
+        KeyboardProtocol::ModifyOtherKeys => {
+            use std::io::Write as _;
+            let mut output = stdout();
+            output.write_all(b"\x1b[>4m").and_then(|()| output.flush())
+        }
+        KeyboardProtocol::Legacy => Ok(()),
+    };
     let display_result = execute!(
         stdout(),
         Show,
         DisableMouseCapture,
+        DisableFocusChange,
         DisableBracketedPaste,
         LeaveAlternateScreen
     );
     let raw_result = disable_raw_mode();
-    match (display_result, raw_result) {
-        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+    match (keyboard_result, display_result, raw_result) {
+        (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -253,12 +540,15 @@ pub fn is_suspend_signal(signal: i32) -> bool {
     }
 }
 
-pub fn suspend_and_resume(terminal: &mut ZecTerminal) -> io::Result<()> {
+pub fn suspend_and_resume(
+    terminal: &mut ZecTerminal,
+    capabilities: &TerminalCapabilities,
+) -> io::Result<()> {
     #[cfg(unix)]
     {
-        restore_terminal()?;
+        restore_terminal(capabilities)?;
         signal_hook::low_level::raise(SIGSTOP)?;
-        TerminalSession::activate()?;
+        TerminalSession::activate(capabilities)?;
         // The physical screen is already clear. Reset Ratatui's previous
         // buffer without querying the cursor, so the next draw is complete.
         terminal.swap_buffers();
@@ -266,7 +556,7 @@ pub fn suspend_and_resume(terminal: &mut ZecTerminal) -> io::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let _ = terminal;
+        let _ = (terminal, capabilities);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "job control is unavailable on this platform",
@@ -461,12 +751,15 @@ fn map_event(event: Event) -> Option<TerminalEvent> {
             _ => None,
         },
         Event::Resize(_, _) => Some(TerminalEvent::Resize),
-        Event::FocusGained | Event::FocusLost => None,
+        Event::FocusGained => Some(TerminalEvent::FocusChanged(true)),
+        Event::FocusLost => Some(TerminalEvent::FocusChanged(false)),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton};
 
     use super::*;
@@ -538,6 +831,64 @@ mod tests {
     }
 
     #[test]
+    fn preserves_focus_events() {
+        assert!(matches!(
+            map_event(Event::FocusGained),
+            Some(TerminalEvent::FocusChanged(true))
+        ));
+        assert!(matches!(
+            map_event(Event::FocusLost),
+            Some(TerminalEvent::FocusChanged(false))
+        ));
+    }
+
+    #[test]
+    fn capability_detection_is_conservative_and_overrideable() {
+        let detect = |pairs: &[(&str, &str)]| {
+            let values = pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+                .collect::<BTreeMap<_, _>>();
+            TerminalCapabilities::detect_with(|name| values.get(name).cloned())
+        };
+
+        let kitty = detect(&[
+            ("TERM", "xterm-kitty"),
+            ("COLORTERM", "truecolor"),
+            ("LANG", "C.UTF-8"),
+            ("KITTY_WINDOW_ID", "1"),
+        ]);
+        assert_eq!(kitty.keyboard, KeyboardProtocol::Kitty);
+        assert_eq!(kitty.color, TerminalColorCapability::TrueColor);
+        assert_eq!(kitty.image_protocol, TerminalImageProtocol::Kitty);
+        assert!(kitty.utf8 && kitty.mouse_motion_requested && kitty.focus_requested);
+
+        let multiplexed = detect(&[
+            ("TERM", "xterm-kitty"),
+            ("KITTY_WINDOW_ID", "1"),
+            ("TMUX", "/tmp/tmux"),
+        ]);
+        assert_eq!(multiplexed.keyboard, KeyboardProtocol::Legacy);
+        assert_eq!(multiplexed.image_protocol, TerminalImageProtocol::None);
+
+        let iterm = detect(&[("TERM", "xterm-256color"), ("TERM_PROGRAM", "iTerm.app")]);
+        assert_eq!(iterm.image_protocol, TerminalImageProtocol::Iterm2);
+
+        let sixel = detect(&[("TERM", "xterm-256color"), ("ZEC_IMAGE_PROTOCOL", "sixel")]);
+        assert_eq!(sixel.image_protocol, TerminalImageProtocol::Sixel);
+
+        let invalid_image = detect(&[("ZEC_IMAGE_PROTOCOL", "unknown")]);
+        assert_eq!(invalid_image.image_protocol, TerminalImageProtocol::None);
+
+        let overridden = detect(&[("TERM", "dumb"), ("ZEC_KEYBOARD_PROTOCOL", "kitty")]);
+        assert_eq!(overridden.keyboard, KeyboardProtocol::Kitty);
+        assert!(!overridden.mouse_motion_requested);
+        assert!(!overridden.focus_requested);
+        assert!(!overridden.osc52_attempted);
+        assert!(!overridden.osc8_available);
+    }
+
+    #[test]
     fn preserves_button_mouse_events() {
         let events = [
             mouse_event(MouseEventKind::Down(MouseButton::Left)),
@@ -589,7 +940,13 @@ mod tests {
             map_event(Event::Resize(80, 24)),
             Some(TerminalEvent::Resize)
         ));
-        assert!(map_event(Event::FocusGained).is_none());
-        assert!(map_event(Event::FocusLost).is_none());
+        assert!(matches!(
+            map_event(Event::FocusGained),
+            Some(TerminalEvent::FocusChanged(true))
+        ));
+        assert!(matches!(
+            map_event(Event::FocusLost),
+            Some(TerminalEvent::FocusChanged(false))
+        ));
     }
 }

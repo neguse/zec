@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_root="${1:?usage: run-alpha-1-and-2-gates OUTPUT_DIR}"
+zec="${ZEC_ALPHA3_ZEC:-./target/release/zec}"
+lsp="${ZEC_ALPHA3_FIXTURE_LSP:-./target/release/alpha_2_fixture_lsp}"
+alpha_1_acceptance="${ZEC_ALPHA3_ALPHA1_ACCEPTANCE:-./target/release/alpha_1_acceptance}"
+alpha_1_bench="${ZEC_ALPHA3_ALPHA1_BENCH:-./target/release/alpha_1_bench}"
+alpha_2_acceptance="${ZEC_ALPHA3_ALPHA2_ACCEPTANCE:-./target/release/alpha_2_acceptance}"
+alpha_2_bench="${ZEC_ALPHA3_ALPHA2_BENCH:-./target/release/alpha_2_bench}"
+
+mkdir -p "$output_root/alpha-2/alpha-1"
+artifact_root="$(realpath "$output_root/alpha-2")"
+
+timeout --signal=TERM --kill-after=5s 45m \
+  "$alpha_1_acceptance" --zec "$zec" --repo . --assert \
+  --report "$artifact_root/alpha-1/acceptance.json"
+"$alpha_1_acceptance" \
+  --verify-report "$artifact_root/alpha-1/acceptance.json"
+
+timeout --signal=TERM --kill-after=5s 20m \
+  "$alpha_1_bench" --zec "$zec" --assert \
+  --report "$artifact_root/alpha-1/benchmark.json"
+"$alpha_1_bench" --verify-report "$artifact_root/alpha-1/benchmark.json"
+
+timeout --signal=TERM --kill-after=5s 45m \
+  "$alpha_2_acceptance" --zec "$zec" --lsp "$lsp" --assert \
+  --report "$artifact_root/acceptance.json"
+"$alpha_2_acceptance" --verify-report "$artifact_root/acceptance.json"
+
+timeout --signal=TERM --kill-after=5s 20m \
+  "$alpha_2_bench" --zec "$zec" --lsp "$lsp" --assert \
+  --report "$artifact_root/benchmark.json"
+"$alpha_2_bench" --verify-report "$artifact_root/benchmark.json"
+
+(
+  cd "$artifact_root"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > SHA256SUMS
+)
+./script/verify-alpha-2-artifact "$artifact_root"
+
+echo "Alpha 1/2 regression artifact verified: $artifact_root"

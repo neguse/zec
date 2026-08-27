@@ -237,6 +237,21 @@ fn main() -> Result<()> {
                     }),
                 )?;
             }
+            Some("textDocument/inlayHint") => respond(
+                &mut writer,
+                log_path.as_deref(),
+                id,
+                json!([
+                    {
+                        "position": { "line": 0, "character": 18 },
+                        "label": ": fixture_type",
+                        "kind": 1,
+                        "paddingLeft": false,
+                        "paddingRight": false,
+                        "tooltip": "Deterministic fixture inlay hint"
+                    }
+                ]),
+            )?,
             Some("textDocument/definition") | Some("textDocument/typeDefinition") => respond(
                 &mut writer,
                 log_path.as_deref(),
@@ -422,6 +437,7 @@ fn initialize_result() -> Value {
                 "triggerCharacters": ["."]
             },
             "hoverProvider": true,
+            "inlayHintProvider": { "resolveProvider": false },
             "definitionProvider": true,
             "typeDefinitionProvider": true,
             "referencesProvider": true,

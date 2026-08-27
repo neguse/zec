@@ -236,6 +236,106 @@ themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。
 parse完了は非同期なので `BufferEvent::Reparsed` をterminal event channelへ戻して再描画
 する。これにより、入力イベントを待たずにhighlightが現れる。
 
+## Terminal Workspace, panels, and recovery
+
+Alpha 3以降はpane、item、dock、panel、overlay、focusを`WorkspaceModel`だけが所有する。layoutは
+stable `PaneId`をleafに持つbinary split tree、paneはstable `ItemId`のordered list、dockは
+`PanelKind`のordered listである。すべての操作はreducerを通り、layout leafとpane mapの一致、itemの
+一意性、有効なactive/focus、preview/pin、overlayの単調IDをtransaction後に検査する。renderer、
+mouse hit test、session writerは同じimmutable snapshotを読むため、別々のpane/tab配列を同期しない。
+
+各itemの本文、selection、fold、wrap、undoは引き続きZed `Editor` / `Buffer` / `DisplayMap`がauthorityである。
+splitは同じBufferを別Editor viewportへ投影する新しいitemを作るが、Buffer Entityを複製しない。
+4-pane、dock、tab strip、statusは`workspace_render`が1回のlayout projectionで非重複Rectへ割り当て、狭幅では
+active paneを優先して縮退する。keyboard routeが常にあり、mouse対応時だけsplit/dock境界dragとpanel row
+hit targetを追加する。
+
+Project panelはZed Worktree snapshotからstable entry IDを投影し、filter中はancestorだけでなく最初の実matchへ
+selectionを移す。create/rename/delete/copyはcanonical path、trust、special-file、symlink/case-fold collisionを
+preview時とapply時に再検査し、成功後のscanだけでtreeを更新する。dirty fileのdeleteでもBuffer Entityを残し、
+通常のdiscard guardへ接続する。
+
+Project Searchはliteral/regex、case、word、ignored、open-buffer-only、full-path/include/exclude optionを1つの
+generation付きcoordinatorで実行する。表示は先頭100 hitにvirtualizeする一方、replace-allは最大10,000 rangeの
+`all_matches`を保持する。previewは全sourceのBuffer generationとdisk fingerprintを記録し、accept直前の1件でも
+変化していれば部分適用せず全体を中止する。検索結果、references、diagnostics、適用結果はsource BufferとAnchorを
+共有するeditable MultiBufferとして描画する。
+
+Outlineとdiagnosticsは一時popupではなくright/bottom dockのpersistent panelである。非同期outline/LSP completionは
+source Buffer IDとgenerationを照合してstale resultを捨てる。panel filter、fold、soft wrap、multiple cursor、
+inlay hint、inline diagnostic、indent/whitespace guideはZed snapshotから可視cellだけへ投影する。terminal幅は
+Unicode graphemeのcell幅で計算し、mouse drag/double/triple clickも同じprojectionを逆変換してZed selection actionへ
+戻す。
+
+sessionはrepository identity、workspace、item、dock、navigation、selection、viewport、fold/wrapをversioned JSONへ
+保存する。generation fileはimmutableでpayload SHA-256をfilenameとenvelopeの両方に持ち、temporary fileのfsyncと
+atomic renameでcommitする。dirty/scratch/MultiBuffer sourceはcontent-addressed blobへ分離し、clean save後のGCも
+store全generationを走査して到達可能blobを残す。restoreは新しいgenerationから検証し、truncated/hash/schema不正を
+`.rejected-*.session`へ隔離して前世代またはfresh workspaceへfallbackする。同一repositoryの複数processはleaseと
+単調generationにより互いのsessionを上書きしない。
+
+Kitty keyboard、modifyOtherKeys、SGR/legacy mouse、focus reporting、OSC 52、OSC 8は起動時に能力検出し、F4 statusへ
+routeを表示する。区別不能なchordや未対応mouse操作にはcommand palette/key routeを残し、入力を無言で捨てない。
+
+## Local development services
+
+Git panelはZed `GitStore`のactive repository snapshotをframeごとにimmutable projectionへ変換する。
+stage/unstage/discardは選択pathまたはrepository全体のZed APIへ戻し、zec側で`git status`をparseした並行modelは
+作らない。terminal panelは`Entity<zed_terminal::Terminal>`を保持し、Zed terminalのcell、cursor、scroll state、
+process statusをdockへ描画する。task pickerは`TaskInventory`へactive worktree/bufferの`TaskContexts`を渡し、
+resolved `SpawnInTerminal`を`Project::create_terminal_task`で同じterminal collectionへ追加する。
+
+debug configurationも同じTaskInventoryから取得し、登録済み`DapRegistry` adapterだけを表示する。relative path、
+Zed task variable、build task、debug locatorを解決した`DebugTaskDefinition`を`DapStore::new_session`と
+`boot_session`へ渡す。sessionのthread/frame/scope/variable/outputは`DebugSession`からその都度snapshot化し、
+breakpointはProjectの`BreakpointStore`をauthorityにする。DAP reverse `runInTerminal`はZed integrated terminalを
+作成してPIDをadapterへ返すため、debuggee processだけを別のshell pathで起動しない。
+
+Zed DapStoreはshutdown eventでsession mapからEntityを除く。error outputが同時に消えるのを防ぐため、zecは最近の
+8 Entityだけをpresentation historyとして保持する。これはsession stateの複製ではなく参照寿命の延長であり、
+terminated Entityへのcontrol/REPLは拒否する。GDBのようにcontinue eventを抑制するadapterでは、古いglobal stop
+flagより具体的なthread statusを優先してpanel stateを投影する。
+
+## Extension ecosystem and distribution
+
+interactive起動ではZed production `Client`、`NodeRuntime`、extension host、language/debug/theme extension bridgeを
+初期化し、1つの`ExtensionStore`をregistry、installed state、operation lifecycleのauthorityにする。zecのextension
+pickerはstore snapshotのbounded projectionであり、install/upgrade/uninstall/reloadとdevelopment extensionの
+install/rebuildを公開APIへ戻す。remote registry失敗時もinstalled recordsを消さず、failureをstatusへ出す。
+
+theme/icon theme pickerは`ThemeRegistry`の現在値と全候補を投影し、選択結果をZed user settings APIで永続化する。
+settings/keymap actionはZedが解決した実fileを通常のBufferとして開く。watcherからのsettings/keymap reloadを共有event
+loopへ戻すため、編集直後に新しいtheme、editor projection、bindingが反映され、parse failureは旧valid stateを保つ。
+
+standalone updateはstrictなversion 1 JSON manifestから現在OS/architectureのraw executableを選ぶ。remote inputは
+HTTPSに限定し、sizeとSHA-256を検証したcandidateだけを一時fileへ同期し、`--version`の完全一致を確認してから同じ
+directoryへatomic persistする。明示downloadは既存pathを上書きせず、Unixのself-updateはresolved current regular
+executableだけを置換する。Windowsはrunning executableを置換せず、verified download後の明示的な入替を要求する。
+
+release workflowはLinux/Windows/macOSのx86-64/ARM64をnative runnerでbuildし、raw binaryと最小archiveを生成する。
+`script/release-manifest`がmetadata、archive member、raw/archive同一性、全checksum、target一意性を検証し、そのfile set
+だけをGitHub attestationとreleaseへ渡す。OS signing/notarizationは秘密鍵を必要とする別境界で、資格情報がない状態を
+署名済みとして扱わない。normativeな安全条件とgateは[`beta-2.md`](beta-2.md)に置く。
+
+## Rich content and large files
+
+Markdown previewはpinned Zedと同じparse optionを使い、terminal cell向けのbounded snapshotへ変換する。
+source Bufferは引き続きZedがauthorityで、previewは毎frameの変更検出で更新する。local linkはactive
+worktreeの`ProjectPath`へ解決し、heading fragmentをBuffer位置へ変換して通常tabへ移動する。外部URLは
+scheme allowlist、再確認、platform opener capabilityの三段階を通す。
+
+画像はextension判定だけで直接読むのではなく`Project::open_image`へ渡し、Zedが返すImageItemのbytesと
+metadataだけをpresentationへ写す。入力byte数、decoded pixel数、protocol outputをそれぞれ制限する。
+Kittyはimage IDのdelete、iTerm2/Sixelはalternate-screen clear後の全frame redrawで残像を消す。protocolが
+なければ同じtabにformat・寸法・byte数を表示する。画像tabは`SessionItemKind::Image`としてpathだけを永続化し、
+実装用scratch Bufferをdirty recoveryとして保存しない。overlayがあるframeではEditor snapshotを描いてから
+Rich Contentを抑止し、trust/picker/confirmationを不可視のまま入力だけ奪う状態を作らない。
+
+large-file用の別text modelやtruncateされた保存経路は設けない。通常のZed Editor/Buffer、DisplaySnapshot、
+Go-to-line、BufferStore saveを使い、10万行・64 KiB行のactual-binary PTY gateでfirst frame、long-line render、
+末尾edit、disk内容、Linux VmHWM、terminal lifecycleを測る。Alpha 1の500-edit benchmarkとBeta 2の境界形状試験は
+別oracleとして維持する。
+
 ## Buffer search (`Ctrl-F`, active Buffer only)
 
 この節のBuffer内検索は`Alt-F`のrepository-wide Project Searchとは別機能である。

@@ -72,15 +72,26 @@ format、language系MultiBufferをconsoleから完結させる。normative contr
 
 pane/dock、project panel、outline、breadcrumbs、完全なproject search/replace、navigation history、
 advanced editingとsession restoreを共通Terminal Workspace上へ統合する。
+normative contractは[`alpha-3.md`](alpha-3.md)とする。実装とlocal shortened actual-binary gateは完了し、
+固定scaleのhosted evidence待ちである。
 
 ### Beta 1: local development loop
 
-Git、integrated terminal、tasks、test、DAP debugger、REPL/notebookとcrash recoveryを保証する。
+Git、integrated terminal、tasks/test、DAP debugger、REPL/notebookとcrash recoveryを保証する。
+Git、terminal、tasks、DAP debugger、debug console、Alpha 3由来のsession/crash recoveryは
+implemented candidateであり、[`beta-1.md`](beta-1.md)がcontractとlocal machine evidenceを定める。
+Notebookは別capabilityとして未実装のまま残し、debug consoleの完成から推論してはならない。
 
 ### Beta 2: ecosystem and remote
 
 extension、theme、全keymap、package/update、large-file path、rich content、SSH/WSL/dev-container、
 Linux/Windows/macOSの配布と互換性を保証する。
+ExtensionStore/host、development extension、theme/icon theme、settings/keymap、manifest検証付きupdate、
+6-target release assembly、Zed remote protocolを使うSSH remote workspaceはimplemented candidateであり、
+Markdown preview、画像protocol/fallback、画像tab/session、10万行・64 KiB行のlarge-file pathも
+implemented candidateである。[`beta-2.md`](beta-2.md)がcontractとlocal machine evidenceを定める。
+public registryのhosted実証、OS署名、WSL/containerのnative-platform実証は未完了であり、配布workflowや
+SSH実証の存在だけからそれらを推論してはならない。
 
 ### Parity 1: AI and collaboration
 
