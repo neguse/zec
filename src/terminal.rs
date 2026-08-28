@@ -988,7 +988,14 @@ mod tests {
             ("LANG", "C.UTF-8"),
             ("KITTY_WINDOW_ID", "1"),
         ]);
-        assert_eq!(kitty.keyboard, KeyboardProtocol::Kitty);
+        // Windows clamps kitty to the legacy route: crossterm cannot push
+        // enhancement flags through the console API.
+        let expected_kitty = if cfg!(windows) {
+            KeyboardProtocol::Legacy
+        } else {
+            KeyboardProtocol::Kitty
+        };
+        assert_eq!(kitty.keyboard, expected_kitty);
         assert_eq!(kitty.color, TerminalColorCapability::TrueColor);
         assert_eq!(kitty.image_protocol, TerminalImageProtocol::Kitty);
         assert!(kitty.utf8 && kitty.mouse_motion_requested && kitty.focus_requested);
