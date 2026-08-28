@@ -21997,12 +21997,24 @@ fn synchronize_terminal_wrap(
         .text_system()
         .em_width(font_id, font_size)
         .unwrap_or_else(|_| gpui::px(1.0));
-    let editor_width = em_width * f32::from(terminal_columns);
+    // The display map wraps by summing real glyph advances. On the headless
+    // platform every advance equals the em width, but a native platform can
+    // resolve a proportional font whose ASCII advances are narrower, which
+    // would place the wrap boundary past the terminal width. A representative
+    // ASCII advance keeps one wrap column close to one terminal cell.
+    let cell_width = window
+        .text_system()
+        .advance(font_id, font_size, 'x')
+        .map(|advance| advance.width)
+        .ok()
+        .filter(|width| *width > gpui::px(0.0))
+        .unwrap_or(em_width);
+    let editor_width = cell_width * f32::from(terminal_columns);
     let wrap_width = match editor.soft_wrap_mode(cx) {
         EditorSoftWrap::None | EditorSoftWrap::GitDiff => None,
         EditorSoftWrap::EditorWidth => Some(editor_width),
         EditorSoftWrap::Bounded(columns) => {
-            Some(editor_width.min(em_width * columns.max(1) as f32))
+            Some(editor_width.min(cell_width * columns.max(1) as f32))
         }
     };
     editor

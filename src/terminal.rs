@@ -140,6 +140,14 @@ impl TerminalCapabilities {
             _ if modify_other_keys_environment && !inside_tmux => KeyboardProtocol::ModifyOtherKeys,
             _ => KeyboardProtocol::Legacy,
         };
+        // Crossterm cannot push keyboard enhancement flags through the
+        // Windows console API; requesting kitty there aborts startup, so it
+        // clamps to the legacy route.
+        let keyboard = if cfg!(windows) && keyboard == KeyboardProtocol::Kitty {
+            KeyboardProtocol::Legacy
+        } else {
+            keyboard
+        };
         let color_term = text("COLORTERM", &mut value).unwrap_or_default();
         let color = if matches!(color_term.as_str(), "truecolor" | "24bit") {
             TerminalColorCapability::TrueColor
