@@ -24844,7 +24844,7 @@ async fn root_identity_probe(
 
     let excluded_search = collect_project_search(
         &repository,
-        "PROBE_EXCLUDED_SENTINEL".to_owned(),
+        "E2E_EXCLUDED_SENTINEL".to_owned(),
         services,
         project_searchable_buffers(&tabs),
         cx,
@@ -24983,7 +24983,7 @@ async fn stale_result_probe(
 
     let request_a = scheduler
         .request(
-            prompt.request("PROBE_STALE_A".to_owned())?,
+            prompt.request("E2E_STALE_A".to_owned())?,
             ProjectSearchChange::Paste,
         )?
         .next
@@ -24992,7 +24992,7 @@ async fn stale_result_probe(
         start_zed_project_search_command(request_a, &repository, services, Vec::new(), cx)?;
     let request_b = scheduler
         .request(
-            prompt.request("PROBE_STALE_B".to_owned())?,
+            prompt.request("E2E_STALE_B".to_owned())?,
             ProjectSearchChange::Paste,
         )?
         .next
@@ -25075,7 +25075,7 @@ async fn search_failure_probe(
         async_channel::bounded::<std::result::Result<ProjectSearchOutput, String>>(1);
     let request = scheduler
         .request(
-            prompt.request("PROBE_SEARCH_FAILURE".to_owned())?,
+            prompt.request("E2E_SEARCH_FAILURE".to_owned())?,
             ProjectSearchChange::Paste,
         )?
         .next
@@ -25145,14 +25145,14 @@ async fn search_failure_probe(
 
     tabs[0].editor_window.update(cx, |editor, window, cx| {
         editor.select_all(&SelectAll, window, cx);
-        editor.insert("PROBE_SEARCH_FAILURE_CONTINUED", window, cx);
+        editor.insert("E2E_SEARCH_FAILURE_CONTINUED", window, cx);
     })?;
     save_document(&tabs[0].document, services, cx).await?;
     let control_disk_token = services
         .file_system
         .load(control_file.canonical_path())
         .await?;
-    let continued_edit_saved = control_disk_token == "PROBE_SEARCH_FAILURE_CONTINUED"
+    let continued_edit_saved = control_disk_token == "E2E_SEARCH_FAILURE_CONTINUED"
         && !document_state(&tabs[0].document, cx).dirty;
 
     Ok(serde_json::json!({
@@ -25241,16 +25241,16 @@ mod tests {
             std::fs::create_dir_all(root.join("aliases")).expect("create repository aliases");
             std::fs::create_dir_all(root.join("target")).expect("create ignored target");
             std::fs::create_dir_all(root.join(".git")).expect("create excluded git metadata");
-            std::fs::write(root.join("README.md"), "PROBE_READY_SENTINEL\n")
+            std::fs::write(root.join("README.md"), "E2E_READY_SENTINEL\n")
                 .expect("write repository README");
             std::fs::write(
                 root.join("src/日本 語.rs"),
                 "pub const TOKEN: &str = \"inside\";\n",
             )
             .expect("write canonical repository file");
-            std::fs::write(root.join("target/excluded.rs"), "PROBE_EXCLUDED_SENTINEL\n")
+            std::fs::write(root.join("target/excluded.rs"), "E2E_EXCLUDED_SENTINEL\n")
                 .expect("write ignored repository file");
-            std::fs::write(root.join(".git/hidden"), "PROBE_EXCLUDED_SENTINEL\n")
+            std::fs::write(root.join(".git/hidden"), "E2E_EXCLUDED_SENTINEL\n")
                 .expect("write git metadata fixture");
             std::fs::write(root.join(".gitignore"), "target/\n")
                 .expect("write repository ignore rules");
@@ -25328,7 +25328,7 @@ mod tests {
 
         let first = scheduler
             .request(
-                prompt.request("PROBE_STALE_A".to_owned()).unwrap(),
+                prompt.request("E2E_STALE_A".to_owned()).unwrap(),
                 ProjectSearchChange::Paste,
             )
             .unwrap()
@@ -25351,7 +25351,7 @@ mod tests {
 
         let latest = scheduler
             .request(
-                prompt.request("PROBE_STALE_B".to_owned()).unwrap(),
+                prompt.request("E2E_STALE_B".to_owned()).unwrap(),
                 ProjectSearchChange::Paste,
             )
             .unwrap()
@@ -25359,7 +25359,7 @@ mod tests {
             .expect("atomic replacement paste uses the reserved second slot");
         assert_eq!(
             [first.query.as_str(), latest.query.as_str()],
-            ["PROBE_STALE_A", "PROBE_STALE_B"]
+            ["E2E_STALE_A", "E2E_STALE_B"]
         );
         assert_eq!(scheduler.active_count(), 2);
 
@@ -25980,11 +25980,11 @@ mod tests {
                         .context("partial startup kept no control document")?;
                     let control_window = cx.update(|cx| open_editor(control.buffer.clone(), cx))?;
                     control_window.update(cx, |editor, window, cx| {
-                        editor.insert("PROBE_PARTIAL_STARTUP_EDIT ", window, cx);
+                        editor.insert("E2E_PARTIAL_STARTUP_EDIT ", window, cx);
                     })?;
                     save_document(control, &services, cx).await?;
                     let continued_saved = std::fs::read_to_string(root.join("README.md"))?
-                        .starts_with("PROBE_PARTIAL_STARTUP_EDIT ");
+                        .starts_with("E2E_PARTIAL_STARTUP_EDIT ");
 
                     Ok((
                         repository.root.label(),
@@ -26035,7 +26035,7 @@ mod tests {
 
         assert_eq!(root_label, "repo");
         assert_eq!(canonical_root, expected_root);
-        assert_eq!(initial_text, "PROBE_READY_SENTINEL\n");
+        assert_eq!(initial_text, "E2E_READY_SENTINEL\n");
         assert!(indexed_paths.iter().any(|path| path == "README.md"));
         assert!(!indexed_paths.iter().any(|path| path.starts_with(".git/")));
         assert!(!indexed_paths.iter().any(|path| path.starts_with("target/")));

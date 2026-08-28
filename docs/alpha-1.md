@@ -154,7 +154,7 @@ The actual-binary PTY cases fix `Ctrl-P = 0x10` as quick open and
 - Result paths, lines, columns, previews, and order match the per-query
   expected JSON exactly, and the caret after Enter lands on the expected
   match start. Restoring the pre-restart cursor is not required.
-- `PROBE_EXCLUDED_SENTINEL` is placed in ignored, binary, and outside
+- `E2E_EXCLUDED_SENTINEL` is placed in ignored, binary, and outside
   files, and exactly one in-scope control file carrying the same sentinel
   is asserted to return.
 - Esc during a search removes the prompt, a different query produces the
