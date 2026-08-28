@@ -1,11 +1,8 @@
-#![cfg(target_os = "linux")]
-
 use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read as _, Write as _},
     net::{TcpListener, TcpStream},
-    os::unix::fs::{PermissionsExt as _, symlink},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
@@ -14,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(unix)]
 use nix::{
     sys::{
         signal::{Signal, killpg},
@@ -25,6 +23,8 @@ use nix::{
 use portable_pty::{
     Child, CommandBuilder, ExitStatus, MasterPty, PtyPair, PtySize, native_pty_system,
 };
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Parser};
 
 const INITIAL_SIZE: PtySize = PtySize {
@@ -122,10 +122,7 @@ fn zed_edit_prediction_renders_and_accepts_through_the_actual_binary() -> Result
     fs::write(&path, ORIGINAL).context("write edit prediction fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [(
         OsStr::new("ZEC_EDIT_PREDICTION_FIXTURE"),
         OsStr::new(PREDICTION),
@@ -195,10 +192,7 @@ fn zed_inline_assistant_streams_previews_rejects_accepts_and_undoes_through_the_
     fs::write(&path, ORIGINAL).context("write inline assistant fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [(
         OsStr::new("ZEC_INLINE_ASSIST_FIXTURE_RESPONSE"),
         OsStr::new(REPLACEMENT),
@@ -309,15 +303,19 @@ fn actual_binary_preserves_edits_and_restores_the_pty_on_every_exit_path() -> Re
     corrupt_workspace_generation_is_quarantined_and_falls_back(temp.path())?;
     workspace_session_restores_layout_dock_and_unsaved_content(temp.path())?;
     workspace_session_restores_a_live_editable_multibuffer(temp.path())?;
-    periodic_session_snapshot_survives_sigkill(temp.path())?;
-    directory_quick_open_deduplicates_symlink_alias(temp.path())?;
     failed_save_keeps_dirty_text_and_quit_guard(temp.path())?;
     restricted_worktree_requires_confirmation_before_lsp(temp.path())?;
-    signal_exit_restores_terminal(temp.path(), Signal::SIGINT)?;
-    signal_exit_restores_terminal(temp.path(), Signal::SIGQUIT)?;
-    signal_exit_restores_terminal(temp.path(), Signal::SIGTERM)?;
-    signal_exit_restores_terminal(temp.path(), Signal::SIGHUP)?;
-    suspend_restores_and_resume_reenters_the_terminal(temp.path())?;
+    // Process signals, job control, and symlink aliases are Unix semantics.
+    #[cfg(unix)]
+    {
+        periodic_session_snapshot_survives_sigkill(temp.path())?;
+        directory_quick_open_deduplicates_symlink_alias(temp.path())?;
+        signal_exit_restores_terminal(temp.path(), Signal::SIGINT)?;
+        signal_exit_restores_terminal(temp.path(), Signal::SIGQUIT)?;
+        signal_exit_restores_terminal(temp.path(), Signal::SIGTERM)?;
+        signal_exit_restores_terminal(temp.path(), Signal::SIGHUP)?;
+        suspend_restores_and_resume_reenters_the_terminal(temp.path())?;
+    }
 
     Ok(())
 }
@@ -355,10 +353,7 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
         .context("modify Beta 1 README")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str(), readme.as_os_str()])?;
     session.wait_for_screen("Beta 1 worktree trust", STARTUP_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("beta-1-repo")
@@ -452,6 +447,7 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     session.assert_terminal_restored(&termios_before)
 }
 
+#[cfg(unix)]
 #[test]
 fn remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Result<()> {
     const READY: &str = "REMOTE_WORKSPACE_READY";
@@ -531,10 +527,7 @@ fn remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Result<()> 
         (OsStr::new("ZEC_DISABLE_UPDATE_CHECK"), OsStr::new("1")),
     ];
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn_with_env(pair, &argument_refs, &environment)?;
     session.wait_for_screen("remote worktree trust", REMOTE_STARTUP_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("remote-project")
@@ -677,10 +670,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
         .context("write PNG fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let fallback_environment = [
         (OsStr::new("ZEC_IMAGE_PROTOCOL"), OsStr::new("none")),
         (OsStr::new("ZEC_EXTERNAL_MEDIA"), OsStr::new("0")),
@@ -791,10 +781,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
     session.assert_terminal_restored(&termios_before)?;
 
     let kitty_pair = open_pty()?;
-    let kitty_termios = kitty_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let kitty_termios = capture_baseline(&kitty_pair)?;
     let kitty_environment = [(OsStr::new("ZEC_IMAGE_PROTOCOL"), OsStr::new("kitty"))];
     let mut kitty =
         PtySession::spawn_with_env(kitty_pair, &[root.as_os_str()], &kitty_environment)?;
@@ -842,10 +829,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
         (OsStr::new("ZEC_IMAGE_PROTOCOL"), OsStr::new("none")),
     ];
     let first_session_pair = open_pty()?;
-    let first_session_termios = first_session_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let first_session_termios = capture_baseline(&first_session_pair)?;
     let mut first_session = PtySession::spawn_with_env(
         first_session_pair,
         &[root.as_os_str()],
@@ -876,10 +860,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
     first_session.assert_terminal_restored(&first_session_termios)?;
 
     let restored_pair = open_pty()?;
-    let restored_termios = restored_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let restored_termios = capture_baseline(&restored_pair)?;
     let mut restored =
         PtySession::spawn_with_env(restored_pair, &[root.as_os_str()], &session_environment)?;
     restored.wait_for_screen("restored image worktree trust", STARTUP_TIMEOUT, |screen| {
@@ -909,10 +890,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
     restored.assert_terminal_restored(&restored_termios)?;
 
     let startup_pair = open_pty()?;
-    let startup_termios = startup_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let startup_termios = capture_baseline(&startup_pair)?;
     let startup_environment = [(OsStr::new("ZEC_IMAGE_PROTOCOL"), OsStr::new("none"))];
     let image_path = root.join("assets/checker.png");
     let mut startup = PtySession::spawn_with_env(
@@ -970,10 +948,7 @@ fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<(
     fs::write(&path, contents).context("write Beta 2 large-file fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let startup = Instant::now();
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_for_screen("large-file first frame", STARTUP_TIMEOUT, |screen| {
@@ -1078,10 +1053,7 @@ fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
     }))
     .context("encode ACP fixture configuration")?;
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [(
         OsStr::new("ZEC_ACP_AGENT"),
         OsStr::new(&agent_configuration),
@@ -1259,10 +1231,7 @@ fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result
     .context("write native Agent skill")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
     session.wait_for_screen("native Agent worktree trust", STARTUP_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("native-agent-project")
@@ -1322,6 +1291,7 @@ fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result
     session.assert_terminal_restored(&termios_before)
 }
 
+#[cfg(unix)]
 #[test]
 fn collaboration_notes_follow_invites_and_media_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "E2E_COLLABORATION_EDITOR_READY";
@@ -1391,10 +1361,7 @@ fn collaboration_notes_follow_invites_and_media_run_through_the_actual_binary() 
     .context("serialize media bridge configuration")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [
         (
             OsStr::new("ZEC_COLLABORATION_FIXTURE"),
@@ -1581,6 +1548,7 @@ fn collaboration_notes_follow_invites_and_media_run_through_the_actual_binary() 
     session.assert_terminal_restored(&termios_before)
 }
 
+#[cfg(unix)]
 #[test]
 fn notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary() -> Result<()>
 {
@@ -1668,10 +1636,7 @@ fi
     ))
     .context("construct Notebook fixture PATH")?;
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [
         (OsStr::new("PATH"), fixture_path.as_os_str()),
         (
@@ -1858,6 +1823,7 @@ fi
     session.assert_terminal_restored(&termios_before)
 }
 
+#[cfg(unix)]
 fn process_group_id(pid: u32) -> Option<u32> {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()?
@@ -1869,6 +1835,7 @@ fn process_group_id(pid: u32) -> Option<u32> {
         .ok()
 }
 
+#[cfg(unix)]
 fn process_is_live(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
@@ -1877,6 +1844,7 @@ fn process_is_live(pid: u32) -> bool {
         .is_some_and(|state| state != char::from(90_u8))
 }
 
+#[cfg(unix)]
 fn notebook_kernel_pids(path: &Path) -> Result<Vec<u32>> {
     fs::read_to_string(path)
         .with_context(|| format!("read Notebook kernel log {}", path.display()))?
@@ -1891,6 +1859,7 @@ fn notebook_kernel_pids(path: &Path) -> Result<Vec<u32>> {
         .collect()
 }
 
+#[cfg(unix)]
 fn open_collaboration_panel(session: &mut PtySession) -> Result<()> {
     session.send(F1)?;
     session.wait_for_screen("collaboration command palette", ACTION_TIMEOUT, |screen| {
@@ -1900,6 +1869,7 @@ fn open_collaboration_panel(session: &mut PtySession) -> Result<()> {
     session.send(ENTER)
 }
 
+#[cfg(unix)]
 fn bridge_pid(path: &Path, kind: &str) -> Result<u32> {
     let log = fs::read_to_string(path)
         .with_context(|| format!("read {} bridge log {}", kind, path.display()))?;
@@ -1923,6 +1893,7 @@ fn open_markdown_preview(session: &mut PtySession) -> Result<()> {
     session.send(ENTER)
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn debugger_and_repl_run_through_zed_dap_in_the_actual_binary() -> Result<()> {
     let require_gdb_dap = std::env::var_os("ZEC_REQUIRE_GDB_DAP").is_some();
@@ -2026,10 +1997,7 @@ int main(void) {
     ensure!(binary.is_file(), "Beta 1 debuggee binary is missing");
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str(), source.as_os_str()])?;
     session.wait_for_screen("Beta 1 worktree trust", STARTUP_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("beta-1-debugger")
@@ -2234,10 +2202,7 @@ themes = ["themes/beta-2-dev-theme.json"]
     .context("write Beta 2 dev extension theme")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [
         (OsStr::new("XDG_CONFIG_HOME"), xdg_config.as_os_str()),
         (OsStr::new("XDG_DATA_HOME"), xdg_data.as_os_str()),
@@ -2397,6 +2362,7 @@ fn git(root: &Path, arguments: &[&str]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 struct SshdFixture {
     child: std::process::Child,
     port: u16,
@@ -2404,6 +2370,7 @@ struct SshdFixture {
     client_key: PathBuf,
 }
 
+#[cfg(unix)]
 impl SshdFixture {
     fn start(directory: &Path, sshd: &Path) -> Result<Self> {
         let user = std::env::var("USER").context("remote acceptance requires USER")?;
@@ -2500,6 +2467,7 @@ fn sshd_executable() -> Option<PathBuf> {
         .and_then(|path| fs::canonicalize(path).ok())
 }
 
+#[cfg(unix)]
 impl Drop for SshdFixture {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -2507,6 +2475,7 @@ impl Drop for SshdFixture {
     }
 }
 
+#[cfg(unix)]
 fn generate_ssh_key(path: &Path) -> Result<()> {
     let output = Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-f"])
@@ -2543,10 +2512,7 @@ fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) 
     ];
 
     let first_pair = open_pty()?;
-    let first_termios = first_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let first_termios = capture_baseline(&first_pair)?;
     let mut first = PtySession::spawn_with_env(
         first_pair,
         &[root.as_os_str(), path.as_os_str()],
@@ -2594,10 +2560,7 @@ fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) 
     first.assert_terminal_restored(&first_termios)?;
 
     let second_pair = open_pty()?;
-    let second_termios = second_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let second_termios = capture_baseline(&second_pair)?;
     let mut second = PtySession::spawn_with_env(
         second_pair,
         &[root.as_os_str(), path.as_os_str()],
@@ -2653,10 +2616,7 @@ fn corrupt_workspace_generation_is_quarantined_and_falls_back(directory: &Path) 
     ];
 
     let first_pair = open_pty()?;
-    let first_termios = first_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let first_termios = capture_baseline(&first_pair)?;
     let mut first = PtySession::spawn_with_env(
         first_pair,
         &[root.as_os_str(), path.as_os_str()],
@@ -2708,10 +2668,7 @@ fn corrupt_workspace_generation_is_quarantined_and_falls_back(directory: &Path) 
     fs::write(&corrupt, b"{truncated").context("write corrupt newest generation")?;
 
     let second_pair = open_pty()?;
-    let second_termios = second_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let second_termios = capture_baseline(&second_pair)?;
     let mut second = PtySession::spawn_with_env(
         second_pair,
         &[root.as_os_str(), path.as_os_str()],
@@ -2771,10 +2728,7 @@ fn advanced_editor_actions_use_zed_display_and_selection_state(directory: &Path)
     .context("write advanced editor fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_until(
         "advanced editor fixture or trust prompt",
@@ -2881,10 +2835,7 @@ fn mouse_drag_multi_click_and_additive_selection_use_zed_ranges(directory: &Path
     .context("write mouse selection fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_until(
         "mouse selection fixture or trust prompt",
@@ -3037,10 +2988,7 @@ fn editor_projection_settings_render_whitespace_and_guides(directory: &Path) -> 
     fs::write(config.join("zed/keymap.json"), "[]").context("write projection fixture keymap")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [(OsStr::new("XDG_CONFIG_HOME"), config.as_os_str())];
     let mut session = PtySession::spawn_with_env(pair, &[path.as_os_str()], &environment)?;
     session.wait_until(
@@ -3096,10 +3044,7 @@ fn workspace_session_restores_a_live_editable_multibuffer(directory: &Path) -> R
     ];
 
     let first_pair = open_pty()?;
-    let first_termios = first_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let first_termios = capture_baseline(&first_pair)?;
     let mut first = PtySession::spawn_with_env(first_pair, &[root.as_os_str()], &environment)?;
     first.wait_for_screen(
         "MultiBuffer session trust prompt",
@@ -3138,10 +3083,7 @@ fn workspace_session_restores_a_live_editable_multibuffer(directory: &Path) -> R
     first.assert_terminal_restored(&first_termios)?;
 
     let second_pair = open_pty()?;
-    let second_termios = second_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let second_termios = capture_baseline(&second_pair)?;
     let mut second = PtySession::spawn_with_env(second_pair, &[root.as_os_str()], &environment)?;
     second.wait_for_screen(
         "restored MultiBuffer trust prompt",
@@ -3203,10 +3145,7 @@ fn outline_filters_follows_and_jumps_through_zed_symbols(directory: &Path) -> Re
     .context("write outline fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_until(
         "outline fixture or trust prompt",
@@ -3273,6 +3212,7 @@ fn outline_filters_follows_and_jumps_through_zed_symbols(directory: &Path) -> Re
     session.assert_terminal_restored(&termios_before)
 }
 
+#[cfg(unix)]
 fn periodic_session_snapshot_survives_sigkill(directory: &Path) -> Result<()> {
     const READY: &str = "E2E_CRASH_SESSION_READY";
     const RECOVERED: &str = "E2E_PERIODIC_SNAPSHOT_SURVIVED_SIGKILL";
@@ -3325,10 +3265,7 @@ fn periodic_session_snapshot_survives_sigkill(directory: &Path) -> Result<()> {
     ensure!(!killed.success(), "SIGKILL fixture exited successfully");
 
     let restored_pair = open_pty()?;
-    let restored_termios = restored_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let restored_termios = capture_baseline(&restored_pair)?;
     let mut restored =
         PtySession::spawn_with_env(restored_pair, &[root.as_os_str()], &environment)?;
     restored.wait_for_screen("crash recovery trust prompt", ACTION_TIMEOUT, |screen| {
@@ -3363,10 +3300,7 @@ fn workspace_session_restores_layout_dock_and_unsaved_content(directory: &Path) 
     ];
 
     let first_pair = open_pty()?;
-    let first_termios = first_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let first_termios = capture_baseline(&first_pair)?;
     let mut first = PtySession::spawn_with_env(first_pair, &[root.as_os_str()], &environment)?;
     first.wait_for_screen("session fixture trust prompt", ACTION_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("workspace-session-repo")
@@ -3415,10 +3349,7 @@ fn workspace_session_restores_layout_dock_and_unsaved_content(directory: &Path) 
     );
 
     let second_pair = open_pty()?;
-    let second_termios = second_pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let second_termios = capture_baseline(&second_pair)?;
     let mut second = PtySession::spawn_with_env(second_pair, &[root.as_os_str()], &environment)?;
     second.wait_for_screen("restored session trust prompt", ACTION_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("workspace-session-repo")
@@ -3473,10 +3404,7 @@ fn project_panel_mutations_preserve_dirty_buffer_identity(directory: &Path) -> R
     let renamed = root.join("renamed.txt");
     let copied = root.join("copied.txt");
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
     session.wait_for_screen(
         "project mutation worktree trust",
@@ -3631,10 +3559,7 @@ fn project_panel_previews_and_replaces_by_entry_identity(directory: &Path) -> Re
         .context("write second project panel file")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
     session.wait_for_screen("project panel worktree trust", ACTION_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("project-panel-repo")
@@ -3705,10 +3630,7 @@ fn workspace_split_focus_move_and_collapse(directory: &Path) -> Result<()> {
     fs::write(&path, format!("{BODY}\nsecond row\n")).context("write split fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_for_screen("workspace split fixture ready", STARTUP_TIMEOUT, |screen| {
         screen.contains(BODY)
@@ -3785,10 +3707,7 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
     fs::write(&path, INITIAL).context("write normal editing fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&termios_before)?;
@@ -3819,8 +3738,17 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
     })?;
 
     session.send(CTRL_Z)?;
+    // Unix paste is one atomic transaction, so a single undo returns to
+    // the inserted state. Windows paste arrives as keystrokes (a ConPTY
+    // property), and Zed's time-based grouping folds the rapid harness
+    // input into one transaction covering both edits.
+    #[cfg(unix)]
     session.wait_for_screen("Zed undo", ACTION_TIMEOUT, |screen| {
         screen.contains("先頭-seed line") && !screen.contains("置換🧪")
+    })?;
+    #[cfg(windows)]
+    session.wait_for_screen("Zed undo", ACTION_TIMEOUT, |screen| {
+        screen.contains("seed line") && !screen.contains("置換🧪")
     })?;
 
     session.resize(RESIZED)?;
@@ -3833,8 +3761,14 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
         })?;
         session.resize_immediately(RESIZED)?;
     }
+    // The Windows undo above returned to the original seed text.
+    let post_undo_body = if cfg!(unix) {
+        "先頭-seed line"
+    } else {
+        "seed line"
+    };
     session.wait_for_screen("redraw after PTY resize storm", ACTION_TIMEOUT, |screen| {
-        screen.contains("zec ") && screen.contains("先頭-seed line")
+        screen.contains("zec ") && screen.contains(post_undo_body)
     })?;
     session.send(F4)?;
     session.wait_for_screen("input after PTY resize storm", ACTION_TIMEOUT, |screen| {
@@ -3868,6 +3802,7 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn directory_quick_open_deduplicates_symlink_alias(directory: &Path) -> Result<()> {
     const READY: &str = "E2E_READY_SENTINEL";
     const OPENED: &str = "E2E_QUICK_OPEN_BODY";
@@ -3882,10 +3817,7 @@ fn directory_quick_open_deduplicates_symlink_alias(directory: &Path) -> Result<(
         .context("create quick-open symlink alias")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
     session.wait_for_screen("restricted Markdown worktree", ACTION_TIMEOUT, |screen| {
         screen.contains("Worktree Trust") && screen.contains("quick-open-repo")
@@ -3945,10 +3877,7 @@ fn failed_save_keeps_dirty_text_and_quit_guard(directory: &Path) -> Result<()> {
         .context("write the non-directory save blocker")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[directory.as_os_str()])?;
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&termios_before)?;
@@ -4084,26 +4013,25 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
         .context("write restricted global settings")?;
     fs::write(xdg_config.join("zed/keymap.json"), "[]").context("write restricted keymap")?;
 
-    symlink(
-        Path::new(env!("CARGO_BIN_EXE_fixture_lsp")),
-        bin_dir.join("rust-analyzer"),
-    )
-    .context("link PTY fixture language server")?;
-    let fake_rustup = bin_dir.join("rustup");
-    fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n").context("write fake rustup")?;
-    let mut permissions = fs::metadata(&fake_rustup)
-        .context("read fake rustup metadata")?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_rustup, permissions).context("make fake rustup executable")?;
+    install_fixture_language_server(Path::new(env!("CARGO_BIN_EXE_fixture_lsp")), &bin_dir)
+        .context("link PTY fixture language server")?;
+    // Unix masks any real rustup with an always-failing stub; the Windows
+    // restricted PATH simply omits it.
+    #[cfg(unix)]
+    {
+        let fake_rustup = bin_dir.join("rustup");
+        fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n").context("write fake rustup")?;
+        let mut permissions = fs::metadata(&fake_rustup)
+            .context("read fake rustup metadata")?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_rustup, permissions).context("make fake rustup executable")?;
+    }
 
     let log = workspace.join("lsp.jsonl");
-    let path = format!("{}:/usr/local/bin:/usr/bin:/bin", bin_dir.display());
+    let path = restricted_path(&bin_dir)?;
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let environment = [
         (OsStr::new("PATH"), OsStr::new(&path)),
         (OsStr::new("HOME"), home.as_os_str()),
@@ -4231,15 +4159,13 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
     session.assert_terminal_restored_with_cleanup(&termios_before, KITTY_CLEANUP_ESCAPES)
 }
 
+#[cfg(unix)]
 fn signal_exit_restores_terminal(directory: &Path, signal: Signal) -> Result<()> {
     let path = directory.join(format!("signal-{}.txt", signal as i32));
     fs::write(&path, "clean signal fixture\n").context("write signal fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&termios_before)?;
@@ -4255,16 +4181,14 @@ fn signal_exit_restores_terminal(directory: &Path, signal: Signal) -> Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
 fn suspend_restores_and_resume_reenters_the_terminal(directory: &Path) -> Result<()> {
     const TOKEN: &str = "resumed-after-sigtstp";
     let path = directory.join("suspend-resume.txt");
     fs::write(&path, "before suspend\n").context("write suspend fixture")?;
 
     let pair = open_pty()?;
-    let termios_before = pair
-        .master
-        .get_termios()
-        .context("PTY does not expose its initial termios")?;
+    let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&termios_before)?;
@@ -4302,6 +4226,28 @@ fn open_pty() -> Result<PtyPair> {
     native_pty_system()
         .openpty(INITIAL_SIZE)
         .context("open native PTY")
+}
+
+/// Pre-start snapshot of the outer terminal. Unix proves raw-mode entry and
+/// restoration against termios; ConPTY exposes no equivalent, so Windows
+/// relies on the emitted VT output instead.
+struct TerminalBaseline {
+    #[cfg(unix)]
+    termios: Termios,
+}
+
+fn capture_baseline(pair: &PtyPair) -> Result<TerminalBaseline> {
+    #[cfg(unix)]
+    {
+        Ok(TerminalBaseline {
+            termios: capture_baseline(&pair)?,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pair;
+        Ok(TerminalBaseline {})
+    }
 }
 
 enum ReaderEvent {
@@ -4356,6 +4302,10 @@ impl PtySession {
                             }
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                            let _ = event_sender.send(ReaderEvent::Eof);
+                            break;
+                        }
                         Err(error) => {
                             let _ = event_sender.send(ReaderEvent::Error(error));
                             break;
@@ -4423,25 +4373,43 @@ impl PtySession {
     fn wait_ready(&mut self) -> Result<()> {
         self.wait_until("zec initial frame", STARTUP_TIMEOUT, |session| {
             let screen = session.parser.screen();
-            contains_bytes(&session.transcript, b"Ctrl-N new")
-                && screen.alternate_screen()
-                && screen.bracketed_paste()
-                && screen.mouse_protocol_mode() != MouseProtocolMode::None
+            // ConPTY flattens alternate-screen, bracketed-paste, and
+            // mouse negotiation; only the repaint is observable there.
+            if cfg!(unix) {
+                contains_bytes(&session.transcript, b"Ctrl-N new")
+                    && screen.alternate_screen()
+                    && screen.bracketed_paste()
+                    && screen.mouse_protocol_mode() != MouseProtocolMode::None
+            } else {
+                contains_bytes(&session.transcript, b"F1 commands")
+                    && contains_bytes(&session.transcript, b"\x1b[2J")
+            }
         })
     }
 
-    fn assert_raw_mode_enabled(&self, initial: &Termios) -> Result<()> {
-        let current = self.termios()?;
-        ensure!(
-            &current != initial,
-            "zec rendered its UI without enabling terminal raw mode"
-        );
-        ensure!(
-            !current
-                .local_flags
-                .contains(LocalFlags::ICANON | LocalFlags::ECHO),
-            "zec left canonical input or terminal echo enabled in raw mode"
-        );
+    fn assert_raw_mode_enabled(&self, initial: &TerminalBaseline) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let current = self.termios()?;
+            ensure!(
+                &current != &initial.termios,
+                "zec rendered its UI without enabling terminal raw mode"
+            );
+            ensure!(
+                !current
+                    .local_flags
+                    .contains(LocalFlags::ICANON | LocalFlags::ECHO),
+                "zec left canonical input or terminal echo enabled in raw mode"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = initial;
+            ensure!(
+                contains_bytes(&self.transcript, b"\x1b[2J"),
+                "zec did not repaint the ConPTY screen"
+            );
+        }
         Ok(())
     }
 
@@ -4452,9 +4420,42 @@ impl PtySession {
     }
 
     fn paste(&mut self, text: &str) -> Result<()> {
-        self.send(b"\x1b[200~")?;
-        self.send(text.as_bytes())?;
-        self.send(b"\x1b[201~")
+        #[cfg(unix)]
+        {
+            self.send(b"\x1b[200~")?;
+            self.send(text.as_bytes())?;
+            self.send(b"\x1b[201~")
+        }
+        #[cfg(windows)]
+        {
+            // ConPTY has no bracketed paste: conhost cooks raw pipe input,
+            // turning LF into Ctrl-Enter and dropping non-BMP characters.
+            // conhost requests win32-input-mode at startup, and encoding
+            // the text as win32 key events - the same thing Windows
+            // Terminal does - carries every character losslessly.
+            self.send_text_as_win32_input(text)
+        }
+    }
+
+    /// Sends text the way it survives conhost's input cooking: BMP
+    /// characters as plain bytes (LF normalized to CR, which cooks into a
+    /// plain Enter), and astral characters as win32-input-mode key-down
+    /// events, whose surrogate pairs the cooked path would drop.
+    #[cfg(windows)]
+    fn send_text_as_win32_input(&mut self, text: &str) -> Result<()> {
+        let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+        let mut encoded = String::new();
+        for character in normalized.chars() {
+            if u32::from(character) > 0xFFFF {
+                let mut units = [0_u16; 2];
+                for unit in character.encode_utf16(&mut units) {
+                    encoded.push_str(&format!("\x1b[0;0;{unit};1;0;1_"));
+                }
+            } else {
+                encoded.push(character);
+            }
+        }
+        self.send(encoded.as_bytes())
     }
 
     fn find_screen_text(&self, needle: &str) -> Option<(u16, u16)> {
@@ -4543,6 +4544,7 @@ impl PtySession {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn send_signal(&self, signal: Signal) -> Result<()> {
         let pid = self
             .child
@@ -4554,6 +4556,7 @@ impl PtySession {
             .with_context(|| format!("send {signal:?} to zec process group {pid}"))
     }
 
+    #[cfg(unix)]
     fn wait_for_stop(&mut self, timeout: Duration) -> Result<()> {
         let pid = self
             .child
@@ -4671,28 +4674,49 @@ impl PtySession {
         }
     }
 
-    fn assert_terminal_restored(&mut self, initial: &Termios) -> Result<()> {
+    fn assert_terminal_restored(&mut self, initial: &TerminalBaseline) -> Result<()> {
         self.assert_terminal_restored_with_cleanup(initial, CLEANUP_ESCAPES)
     }
 
     fn assert_terminal_restored_with_cleanup(
         &mut self,
-        initial: &Termios,
+        initial: &TerminalBaseline,
         cleanup_escapes: &[u8],
     ) -> Result<()> {
-        self.wait_for_raw(
-            "ordered terminal cleanup escapes",
-            cleanup_escapes,
-            EXIT_TIMEOUT,
-        )?;
-        self.drain_available()?;
-
-        let current = self.termios()?;
-        ensure!(
-            &current == initial,
-            "stty state differs after zec exit\n{}",
-            self.diagnostic()
-        );
+        // ConPTY absorbs the client's cleanup escapes and synthesizes its
+        // own teardown, so the exact sequence and termios are Unix-only
+        // evidence.
+        #[cfg(unix)]
+        {
+            self.wait_for_raw(
+                "ordered terminal cleanup escapes",
+                cleanup_escapes,
+                EXIT_TIMEOUT,
+            )?;
+            self.drain_available()?;
+            let current = self.termios()?;
+            ensure!(
+                &current == &initial.termios,
+                "stty state differs after zec exit\n{}",
+                self.diagnostic()
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (initial, cleanup_escapes);
+            let deadline = Instant::now() + EXIT_TIMEOUT;
+            loop {
+                self.drain_available()?;
+                if !self.parser.screen().hide_cursor() {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                self.receive_one((deadline - now).min(EVENT_POLL))?;
+            }
+        }
 
         let screen = self.parser.screen();
         ensure!(
@@ -4722,6 +4746,7 @@ impl PtySession {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn termios(&self) -> Result<Termios> {
         self.master
             .as_ref()
@@ -4772,6 +4797,17 @@ impl PtySession {
                 self.parser.process(&bytes);
                 self.output_generation = self.output_generation.wrapping_add(1);
                 append_bounded(&mut self.transcript, &bytes);
+                // A ConPTY host must answer conhost's startup cursor-
+                // position report or client console I/O stays deferred.
+                if contains_bytes(&bytes, b"\x1b[6n") {
+                    let (row, column) = self.parser.screen().cursor_position();
+                    let reply = format!("\x1b[{};{}R", row + 1, column + 1);
+                    if let Some(writer) = self.writer.as_mut() {
+                        let _ = writer
+                            .write_all(reply.as_bytes())
+                            .and_then(|_| writer.flush());
+                    }
+                }
                 Ok(())
             }
             ReaderEvent::Eof => {
@@ -4826,6 +4862,42 @@ fn append_bounded(transcript: &mut Vec<u8>, bytes: &[u8]) {
         transcript.drain(..overflow);
     }
     transcript.extend_from_slice(bytes);
+}
+
+/// PATH limited to the fixture bin directory plus what processes need to
+/// start at all.
+fn restricted_path(bin_dir: &Path) -> Result<OsString> {
+    #[cfg(unix)]
+    {
+        Ok(OsString::from(format!(
+            "{}:/usr/local/bin:/usr/bin:/bin",
+            bin_dir.display()
+        )))
+    }
+    #[cfg(windows)]
+    {
+        let mut entries = vec![bin_dir.to_path_buf()];
+        if let Some(system_root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+            entries.push(system_root.join("System32"));
+            entries.push(system_root);
+        }
+        std::env::join_paths(entries).context("join restricted PATH entries")
+    }
+}
+
+fn install_fixture_language_server(server: &Path, bin_dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        symlink(server, bin_dir.join("rust-analyzer")).context("link fixture language server")
+    }
+    #[cfg(windows)]
+    {
+        let target = bin_dir.join("rust-analyzer.exe");
+        if fs::hard_link(server, &target).is_err() {
+            fs::copy(server, &target).context("copy fixture language server")?;
+        }
+        Ok(())
+    }
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
