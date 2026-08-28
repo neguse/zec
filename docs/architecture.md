@@ -4,32 +4,38 @@ Status: Accepted (2026-08-21)
 
 ## Goal
 
-Zed の `editor::Editor` を編集機能の本体として使い、端末固有の入出力だけを追加する。
-Editor、Buffer、selection、undo、keymap は再実装しない。
+Use Zed's `editor::Editor` as the body of the editing feature set and add
+only terminal-specific input and output. Editor, Buffer, selection, undo,
+and the keymap are not reimplemented.
 
-headless の挿入・undo PoCに加え、plain textの端末表示、キー入力、移動、undo/redo、
-selection表示、論理行番号、native languageのsyntax highlight、paste、resize、
-terminal viewportのscroll、
-本文のmouse clickによるcaret移動、
-現在directoryまたは明示した`DIRECTORY`をrootとするrepository mode、1つのZed Worktreeと
-`RepositoryIndex`によるfile discovery、`Ctrl-P`のQuick Open、`Alt-F`のproject-wide search、
-実ファイルのopen/save/save-as、`Ctrl-F`のBuffer内検索、go to line/column、terminal clipboard、dirty表示、
-複数tab、実行中のtab open/close、終了時の端末復元まで実装済み。
+Beyond the headless insert/undo PoC, the following are implemented: plain
+text rendering in the terminal, key input, movement, undo/redo, selection
+display, logical line numbers, syntax highlighting for the native language
+set, paste, resize, terminal viewport scrolling, caret movement by mouse
+click in the body, repository mode rooted at the current directory or an
+explicit `DIRECTORY`, file discovery through one Zed Worktree and the
+`RepositoryIndex`, `Ctrl-P` Quick Open, `Alt-F` project-wide search,
+open/save/save-as of real files, `Ctrl-F` in-buffer search, go to
+line/column, the terminal clipboard, dirty indicators, multiple tabs,
+opening/closing tabs at runtime, and terminal restoration on exit.
 
 ## Repository strategy
 
-Zed monorepoの fork ではなく、独立した binary crate から Zed の各 crate を Git
-dependency として使う。検証対象が勝手に変わらないよう revision は `Cargo.toml` で
-固定する。Zed 側の private API が本当に必要になるまでは fork や本体変更を持たない。
+Rather than forking the Zed monorepo, an independent binary crate consumes
+Zed's crates as Git dependencies. The revision is pinned in `Cargo.toml` so
+the verification target cannot drift. No fork or upstream modification is
+kept until a private Zed API becomes genuinely necessary.
 
-repository modeではcanonicalizeした`Directory root`につき、rootと一致するvisibleなZed Worktreeを
-1つだけ作る。scan完了後のWorktree snapshotからimmutableな`RepositoryIndex`を構築し、zec独自の
-filesystem walkやfileごとのworktreeは作らない。Zedのignore/external判定とcanonical file identityを
-使うため、symlink aliasも同じfileへ集約される。direct `FILE...` modeは独立した起動経路として残す。
+Repository mode creates exactly one visible Zed Worktree matching the
+canonicalized `Directory root`. An immutable `RepositoryIndex` is built
+from the Worktree snapshot after the scan completes; zec has no filesystem
+walk of its own and no per-file worktrees. Zed's ignore/external logic and
+canonical file identity are used, so symlink aliases collapse onto the same
+file. Direct `FILE...` mode remains an independent startup path.
 
 ## Decision
 
-構成は次の通りとする。
+The structure is as follows.
 
 ```text
 crossterm Event
@@ -37,12 +43,12 @@ crossterm Event
     -> GPUI foreground
     -> Zed Editor
     -> DisplaySnapshot
-    -> zec の Ratatui Widget
+    -> zec's Ratatui Widget
     -> ratatui::Buffer
     -> CrosstermBackend
     -> terminal
 
-DIRECTORY (no argsならcurrent directory)
+DIRECTORY (current directory when no args)
     -> canonical RepositoryRoot
     -> Zed RealFs
     -> 1 visible Worktree
@@ -62,476 +68,668 @@ Zed Buffer × N
 
 | Component | Responsibility |
 | --- | --- |
-| Zed Editor / Buffer | テキスト、カーソル、selection、編集 action、undo、dirty状態 |
-| Zed Search / Buffer / Anchor | project-wide matchの探索、本文、match range |
-| Zed BufferStore / WorktreeStore / RealFs | repository file集合とignore判定、ファイルのopen/save、encoding・改行・disk state |
-| Zed Language / tree-sitter | language query、parse、syntax highlight range |
-| GPUI headless | Zed の runtime と window/action context |
-| Crossterm | raw mode、キー・paste・resize入力、端末への出力 |
-| Ratatui | レイアウト、cell buffer、style、差分描画 |
-| zec RepositoryRoot / RepositoryIndex | root identity、alias dedupe、Quick Openの決定的な表示index |
-| zec | 端末イベント変換、Zed snapshot の cell 化、処理の接続 |
+| Zed Editor / Buffer | text, cursor, selection, edit actions, undo, dirty state |
+| Zed Search / Buffer / Anchor | project-wide match discovery, text, match ranges |
+| Zed BufferStore / WorktreeStore / RealFs | repository file set and ignore logic, open/save, encoding, line endings, disk state |
+| Zed Language / tree-sitter | language queries, parsing, syntax highlight ranges |
+| GPUI headless | Zed's runtime and window/action context |
+| Crossterm | raw mode; key, paste, and resize input; terminal output |
+| Ratatui | layout, cell buffer, styles, differential rendering |
+| zec RepositoryRoot / RepositoryIndex | root identity, alias dedupe, deterministic Quick Open display index |
+| zec | terminal event translation, Zed snapshot to cell conversion, wiring |
 
-編集状態の source of truth は常に Zed とする。端末入力は Zed の action/input 経路へ
-渡し、描画側は Zed の immutable な表示 snapshot を読むだけにする。
+The source of truth for editing state is always Zed. Terminal input feeds
+Zed's action/input paths, and the rendering side only reads Zed's immutable
+display snapshots.
 
-Ratatui は cell buffer、style、レイアウト、前後 frame の差分描画を既に提供するため
-採用する。入力 loop は所有しないので、Crossterm で読んだイベントを zec が Zed の
-入力へ変換する。
+Ratatui is adopted because it already provides the cell buffer, styles,
+layout, and frame-to-frame differential rendering. It does not own the
+input loop, so zec translates events read through Crossterm into Zed input.
 
 ## Frame capture and redraw
 
-通常のrepaintで文書全体をterminal snapshotへ複製しない。Ratatuiの`try_draw` callbackで
-そのframeのareaを取得し、cursor followとdocument末尾へのclipを済ませてから、確定した
-`[top_row, top_row + body_height)`だけを同じcallback内でZedの`DisplaySnapshot`から読む。
-これによりresizeとcaptureの間でviewportがずれず、最初のframeが空になるraceも避ける。
+A normal repaint does not copy the whole document into a terminal snapshot.
+Ratatui's `try_draw` callback provides the frame's area; after cursor
+follow and clipping to the document end, only the settled
+`[top_row, top_row + body_height)` range is read from Zed's
+`DisplaySnapshot` inside the same callback. The viewport therefore cannot
+shift between resize and capture, and the race that leaves the first frame
+empty is avoided.
 
-`RenderSnapshot`のtext、line number、syntax styleは`first_row`から始まるrow-local vectorで、
-`total_rows`、cursor、selection、background rangeはglobal display rowを使う。rendererとmouse
-hit testだけがglobal rowをlocal indexへ変換する。全体の行数と最大行番号はZedのsummary API、
-可視syntaxは`highlighted_chunks`のrow range、検索等の背景は可視範囲のAnchorを
-`background_highlights_in_range`へ渡して取得する。terminal側でfoldやwrapを再計算しない。
+`RenderSnapshot` keeps text, line numbers, and syntax styles in row-local
+vectors starting at `first_row`, while `total_rows`, cursor, selection, and
+background ranges use global display rows. Only the renderer and the mouse
+hit test convert global rows to local indices. Total row count and the
+widest line number come from Zed's summary APIs, visible syntax from
+`highlighted_chunks` over the row range, and search-style backgrounds from
+`background_highlights_in_range` over visible Anchors. The terminal never
+recomputes folds or wraps.
 
-terminal event channelはcapacity 1にする。重複したRedrawはdropしても次frameが最新snapshotを
-読むため安全であり、key/paste/mouseはreader threadでbackpressureして順序を保つ。
-`SIGTERM` / `SIGHUP`のhandlerはasync-signal-safeなatomic flag更新だけを行う。terminal readerが
-その番号を通常の`TerminalEvent`へ変換し、GPUI loopを終了する。cleanupはreader threadをjoinし、
-`TerminalSession`がraw mode、alternate screen、mouse capture、bracketed pasteを復元してから
-signal handlerを解除する順に固定する。復元処理はescape出力とraw mode解除の片方が失敗しても
-もう片方を必ず試し、明示的なrestore失敗は呼び出し元へ返す。
+The terminal event channel has capacity 1. Dropping duplicate Redraws is
+safe because the next frame reads the latest snapshot; key/paste/mouse
+events apply backpressure in the reader thread to preserve order. The
+`SIGTERM` / `SIGHUP` handlers only update an async-signal-safe atomic flag;
+the terminal reader converts the number into an ordinary `TerminalEvent`
+and ends the GPUI loop. Cleanup is fixed to: join the reader thread, let
+`TerminalSession` restore raw mode, the alternate screen, mouse capture,
+and bracketed paste, then remove the signal handlers. Restoration always
+attempts both the escape output and the raw-mode reset even if one fails,
+and explicit restore failures are returned to the caller.
 
-
-100,000行の構造testでは80x24の先頭・中央・末尾で保持行数が23に固定される。これは行数に対する
-repaintの上限であり、全文検索そのものを定数時間にする主張ではない。またZedの公開text APIは
-display row単位なので、数MBの単一行ではその行全体のmaterializeとterminal cell変換が残る。
-必要になった時点で独自text modelを作らず、Zed側のvisible-column iterator/hookを検討する。
+In the 100,000-line structural test the retained row count stays at 23 at
+the top, middle, and end of an 80x24 terminal. This is an upper bound on
+repaint relative to line count, not a claim that full-text search is
+constant time. Zed's public text APIs are display-row-based, so a
+multi-megabyte single line still materializes the whole line and converts
+it to terminal cells. If that ever matters, the plan is to explore
+visible-column iterators/hooks on the Zed side rather than a custom text
+model.
 
 ## Repository root, Quick Open, and Project Search
 
-引数なしの`zec`はcurrent directory、`zec DIRECTORY`は明示したdirectoryをrepository rootにする。
-rootはcanonical pathをidentityとし、同じrootの`.`、absolute path、symlink spellingが別repositoryや
-別Worktreeにならないようにする。Zed Worktreeのscan完了を待ってから、そのsnapshotだけを
-`RepositoryIndex`へ投影する。indexはrelative path、canonical identity、alias、`ProjectPath`を持つ
-presentation用のimmutable snapshotであり、file本文、selection、undo、dirty stateは所有しない。
+`zec` with no arguments uses the current directory; `zec DIRECTORY` uses
+the explicit directory as the repository root. Root identity is the
+canonical path, so `.`, absolute paths, and symlink spellings of the same
+root cannot become separate repositories or Worktrees. Only after the Zed
+Worktree scan completes is that snapshot projected into the
+`RepositoryIndex`. The index is an immutable presentation snapshot holding
+relative paths, canonical identity, aliases, and `ProjectPath`s; it owns no
+file contents, selection, undo, or dirty state.
 
-`Ctrl-P`のQuick Openは`RepositoryIndex`を絞り込み、決定的にrankした先頭100件から選択する。
-`Enter`後はindexが保持するZed `ProjectPath`を`BufferStore`へ渡すため、同じfileやsymlink aliasを
-別Bufferへ複製しない。Quick OpenとProject Searchはrepository modeだけの操作で、direct
-`zec FILE...` modeのopen/save経路はそのまま残す。
+`Ctrl-P` Quick Open filters the `RepositoryIndex` and selects from the
+first 100 deterministically ranked entries. After `Enter`, the Zed
+`ProjectPath` held by the index goes to the `BufferStore`, so the same file
+or a symlink alias is never duplicated into another Buffer. Quick Open and
+Project Search are repository-mode-only; the direct `zec FILE...`
+open/save path remains as is.
 
-`Alt-F`のProject Searchは`RepositoryIndex`の決定順file setとZed `SearchQuery`を使う
-case-sensitiveなliteral検索である。実行ごとのworker数はGPUIのCPU数を1〜4へclampし、dispatch済み
-fileもworker数の2倍までに制限する。closed fileのdisk prefilterとno-hitの決定順retireは固定
-background worker/collector内で完結し、disk hitまたはopen bufferだけをforeground `AsyncApp`へ渡す。
-open bufferはdisk prefilterを迂回して同一physical fileの全aliasを`BufferStore` snapshotから検索し、
-closed fileのhitは`BufferStore`でopenする。disk判定はbinary除外以外はoptimizationに留め、最終authorityは
-常にZed `BufferSnapshot`と`Anchor` rangeとする。
-zecはsnapshotからpath、1-based line、BOMを除いたUnicode scalar column、previewへ投影し、canonical
-file identityとrangeの重複を除いて決定順に並べる。sourceは5,000 matching filesまたは10,000 rangesの
-exact limitまで保持し、5,001件目または10,001件目を検出した場合だけlower-bound flagを立てる。全hit数を
-保持したままterminalへ表示するresultは先頭100件に制限し、`Enter`では保持していた同じBufferとAnchor
-rangeへcaretを移動する。
+`Alt-F` Project Search is a case-sensitive literal search over the
+`RepositoryIndex`'s deterministic file set using Zed `SearchQuery`. Worker
+count per run clamps GPUI's CPU count to 1–4, and dispatched files are
+limited to twice the worker count. The closed-file disk prefilter and
+deterministic retirement of no-hit files complete inside fixed background
+workers/collector, and only disk hits or open buffers reach the foreground
+`AsyncApp`. Open buffers bypass the disk prefilter and search every alias
+of the same physical file from the `BufferStore` snapshot; closed-file hits
+are opened through the `BufferStore`. Disk checks are an optimization apart
+from binary exclusion; final authority is always the Zed `BufferSnapshot`
+and `Anchor` ranges. zec projects path, 1-based line, BOM-less Unicode
+scalar column, and preview from the snapshot, dedupes by canonical file
+identity and range, and orders deterministically. The source retains up to
+the exact limits of 5,000 matching files or 10,000 ranges, setting a
+lower-bound flag only when the 5,001st file or 10,001st range is observed.
+The terminal shows the first 100 results while retaining the total count,
+and `Enter` moves the caret to the same retained Buffer and Anchor range.
 
-queryを変更するたびにprompt-local generationを増やし、app-wide coordinatorは同時に実行する
-project searchを最大2件、待機requestをlatest 1件に制限する。key editは旧runを直ちにcancelしてから
-16 msのtrailing debounceでまとめ、bracketed pasteはatomicな完成queryとして直ちにeligibleにする。
-debounce後のkey queryは実行中searchがある間も待機させるため、置換時のbackspace中間queryは2枠目を
-占有せず、完成したpasteだけが予約した2枠目へ直ちに進める。
+Every query change bumps a prompt-local generation; the app-wide
+coordinator limits concurrent project searches to 2 and pending requests to
+the latest 1. Key edits cancel the old run immediately and coalesce behind
+a 16 ms trailing debounce; a bracketed paste is an atomic completed query
+and becomes eligible immediately. Debounced key queries keep waiting while
+a search is running, so intermediate backspace queries during replacement
+do not occupy the second slot, and only a completed paste advances
+immediately into the reserved second slot.
 
-cancelはuser用signalを閉じ、file scan、queue待機、snapshot chunkの各境界をwakeする。source cap用の
-internal stopとは分離し、user cancelだけをerrorとして返す。producerと固定workerはdropせず自然終了まで
-joinし、app-wide coordinatorはfinish eventまで外側Task handleを保持する。pasteによるsupersede、空query、
-`Esc`、prompt closeはいずれもreducer/debounce/pendingをlogical cancelするが、in-flight Taskはdropしない。
-app teardownだけはcancel後に外側Taskをdetachし、そのTask自身がworker joinを完了する。
+Cancel closes the user signal and wakes the file-scan, queue-wait, and
+snapshot-chunk boundaries. It is separate from the internal stop used for
+the source cap, and only user cancel returns as an error. Producers and
+fixed workers are joined to natural completion rather than dropped, and the
+app-wide coordinator holds the outer Task handle until the finish event.
+Supersession by paste, an empty query, `Esc`, and prompt close all
+logically cancel the reducer/debounce/pending state without dropping the
+in-flight Task. Only app teardown detaches the outer Task after cancel, and
+that Task itself completes the worker join.
 
-各requestはprompt session IDとgenerationの組で識別するため、古いcompletionがcapacity 1の
-terminal channelへ既に入った後でpromptを開き直しても、新sessionへsuccess/errorをpublishしない。
-promptが存在しない間のfinish eventもcoordinator自身は処理し、ack済みslotを必ず解放する。
+Each request is identified by the prompt session id and generation, so a
+stale completion already sitting in the capacity-1 terminal channel never
+publishes success/error into a newly reopened prompt session. Finish events
+arriving while no prompt exists are still processed by the coordinator,
+which always releases the acknowledged slot.
 
-Alpha 1 benchmarkはactual production binaryをPTYで操作し、VT parserが描画したstatusを下矢印で
-1件ずつ進め、表示上限100件のpath、line、column、previewと順序をすべてspecと直接比較する。
-結果一覧をfixture fileやtest-only interfaceから読み出さず、production search pathにも
-test-only file hookを設けない。
+The repository benchmark drives the actual production binary through a
+PTY, walks the VT-parsed status with the down arrow one result at a time,
+and compares all of the 100 displayed paths, lines, columns, previews, and
+their order directly against the spec. Result lists are never read from
+fixture files or test-only interfaces, and the production search path has
+no test-only file hooks.
 
 ## File I/O
 
-repository modeでindexから選んだfileと、direct modeの`zec FILE...`はどちらも
-Zedの `RealFs -> WorktreeStore -> BufferStore` で開く。`Project` 全体や手書きの
-`std::fs::write` は使わない。これによりencoding、BOM、改行コード、保存version、
-外部ファイル状態をZed側の実装に任せられる。
+Files chosen from the index in repository mode and `zec FILE...` in direct
+mode both open through Zed's `RealFs -> WorktreeStore -> BufferStore`.
+Neither a whole `Project` nor hand-written `std::fs::write` is used, which
+leaves encoding, BOM, line endings, save versions, and external file state
+to Zed's implementation.
 
-該当worktreeがなければ、pathを含む既存の最寄りnon-root directoryを非表示worktreeとして扱う。
-これにより同じdirectory内の外部renameをZedのentry identityで追跡でき、未作成のnested Save As
-pathも作成後に追跡対象になる。該当するdirectoryがfilesystem rootしかない場合だけ、root全体を
-scan/watchせずファイル自身をsingle-file worktreeにする。directory worktreeは親配下を再帰的に
-scan/watchするため、rename追跡と初期I/Oの交換条件である。
+When no matching worktree exists, the nearest existing non-root directory
+containing the path becomes an invisible worktree. This lets external
+renames within the directory be tracked through Zed's entry identity, and
+not-yet-created nested Save As paths become tracked after creation. Only
+when the sole containing directory is the filesystem root does the file
+itself become a single-file worktree instead of scanning/watching the whole
+root. Directory worktrees recursively scan and watch their subtree — the
+trade for rename tracking is that initial I/O.
 
-未作成パスもfile付きの `DiskState::New` Bufferになるため、編集後の `save_buffer` で新規作成できる。
+Not-yet-created paths also become `DiskState::New` Buffers with files
+attached, so `save_buffer` after editing creates them.
 
-`Ctrl-N`で作るscratchも裸の `Buffer::local` にはせず、最初から同じ `BufferStore` の
-`create_local_buffer` で生成する。`Ctrl-S` ではterminal-ownedな1行promptから絶対化した
-保存先を `find_or_create_worktree -> save_buffer_as` へ渡す。成功後は同じBuffer Entityに
-fileが付き、Editor、selection、undo履歴、dirty versionを作り直さず通常の `save_buffer`
-へ移行できる。LspStoreを初期化していないため、save-as後の拡張子に対するlanguage選択だけは
-zecが明示的に再実行する。
+`Ctrl-N` scratch buffers are not bare `Buffer::local`s either; they are
+created from the start through the same `BufferStore`'s
+`create_local_buffer`. `Ctrl-S` passes the absolutized destination from a
+terminal-owned one-line prompt to `find_or_create_worktree ->
+save_buffer_as`. On success the same Buffer Entity gains a file and
+transitions to normal `save_buffer` without rebuilding the Editor,
+selection, undo history, or dirty version. Because the LspStore is not
+initialized, only the language selection for the post-save-as extension is
+explicitly rerun by zec.
 
-Save Asの相対パスは起動時working directory基準で、shell expansionは行わない。既存の
-regular fileは1回目のEnterで警告し、同じ入力で2回目のEnterを押した時だけ上書きする。
-directory、FIFO、その他のspecial fileは拒否する。この確認は操作ミスを防ぐUI境界であり、
-確認から保存までの外部filesystem raceを排除するatomic no-clobber保証ではない。
-複数tabは1組のLanguageRegistry、RealFs、WorktreeStore、BufferStoreを共有する。同じ
-ProjectPathのopenはBufferStoreが同じBuffer Entityへdedupeし、CLIの完全に同じpathも
-事前に除外する。Save As先が別tabのBufferとして既にopenなら、同じdisk pathに2 Bufferを
-結びつけず明示的に拒否する。
+Save As relative paths resolve against the startup working directory, with
+no shell expansion. An existing regular file warns on the first `Enter` and
+overwrites only on a second `Enter` with the same input. Directories,
+FIFOs, and other special files are rejected. This confirmation is a UI
+boundary against mistakes, not an atomic no-clobber guarantee against
+external filesystem races between confirmation and save. Multiple tabs
+share one LanguageRegistry, RealFs, WorktreeStore, and BufferStore. Opening
+the same ProjectPath dedupes to the same Buffer Entity in the BufferStore,
+and identical CLI paths are excluded up front. If a Save As target is
+already open as another tab's Buffer, binding two Buffers to one disk path
+is explicitly refused.
 
-Zed既定keymapの `Ctrl-S` はWorkspace actionだが、このbinaryのrootはEditorなので
-保存handlerがない。そのため `Ctrl-S` だけCLI側で捕捉して `BufferStore::save_buffer`
-を呼ぶ。編集・undo・移動などは引き続きZedのkey dispatchへ渡す。dirtyまたは外部delete状態での
-`Ctrl-Q` / `Ctrl-W` は初回に警告し、直後の2回目だけ破棄終了・closeにする。
+Zed's default `Ctrl-S` keymap entry is a Workspace action, and this
+binary's root is an Editor, so there is no save handler. `Ctrl-S` alone is
+therefore captured on the CLI side and calls `BufferStore::save_buffer`.
+Editing, undo, and movement continue through Zed's key dispatch. `Ctrl-Q` /
+`Ctrl-W` on a dirty or externally deleted state warn on the first press and
+discard/close only on the immediately following second press.
 
 ## External file changes
 
-`RealFs`のwatcherから`WorktreeStore`、`BufferStore`、`Buffer::file_updated`までの変更検知は
-Zedの既存経路を使う。cleanなBufferの`BufferEvent::ReloadNeeded`だけ、通常のZedでは
-`Project`が担う処理をtabのsubscriptionから`BufferStore::reload_buffers`へ渡す。
-zecは`Project`を生成せず、この薄いglue以外にreloadや差分適用を再実装しない。
+Change detection from the `RealFs` watcher through `WorktreeStore`,
+`BufferStore`, and `Buffer::file_updated` uses Zed's existing path. Only
+`BufferEvent::ReloadNeeded` on a clean Buffer — handled by `Project` in
+normal Zed — is forwarded from the tab's subscription to
+`BufferStore::reload_buffers`. zec creates no `Project` and reimplements no
+reload or diff application beyond this thin glue.
 
-dirtyなBufferは自動reloadせず`has_conflict`をstatusの`!`で示す。競合中の`Ctrl-S`は初回に
-警告し、再押下した場合だけdiskを上書きする。`Ctrl-R`はactive fileを明示的にreloadし、dirty
-なら同じキーの再押下を要求する。reloadにはhistoryを残すZedのtransactionを使うため、直後の
-`Ctrl-Z`でreload前の本文へ戻せる。
+A dirty Buffer is not auto-reloaded; `has_conflict` shows as `!` in the
+status. `Ctrl-S` during a conflict warns first and overwrites the disk only
+when pressed again. `Ctrl-R` reloads the active file explicitly, requiring
+a second press when dirty. Reload uses a Zed transaction that stays in
+history, so `Ctrl-Z` immediately afterwards returns to the pre-reload text.
 
-reload完了はterminal eventで描画loopを起こし、active tabで検索中ならmatchを再計算する。
-完了eventはBuffer IDでtabを引き直すため、処理中にtabが閉じられても古いhandleやlabelを参照しない。
-`OpenDocument`はfile path/labelをcacheしない。表示、save/reload可否、error context、終了保護は
-その時点の`Buffer::file()`と`DiskState`から導出するため、外部rename後は同じBufferの新pathと
-labelへ追従する。外部deleteはclean Bufferでも`!`を表示し、close/quitの破棄確認対象にする。
-`Ctrl-S`の再押下はZedの通常save経路で同じpathを再作成する。
+Reload completion wakes the render loop through a terminal event and
+recomputes matches when a search is active in the active tab. Completion
+events re-resolve the tab by Buffer id, so a tab closed mid-flight never
+leaves stale handles or labels referenced. `OpenDocument` caches no file
+path/label. Display, save/reload eligibility, error context, and exit
+protection derive from the current `Buffer::file()` and `DiskState`, so
+after an external rename they follow the same Buffer's new path and label.
+An external delete shows `!` even on a clean Buffer and joins the
+close/quit discard confirmation. Pressing `Ctrl-S` again recreates the same
+path through Zed's normal save path.
 
 ## Syntax highlighting
 
-Zedの `grammars` crateが同梱するnative parserを直接 `LanguageRegistry` に登録する。
-`native_grammars()` の20組に加え、TSX parserを共有するJavaScriptとRust parserを共有する
-Zed Keybind Contextを登録し、Zed本体と同じ22個のbundled language config/queryを扱う。
-通常ファイルとして選ばれるのはShell、C/C++、CSS、Diff、Go/Go Mod/Go Work、JSON/JSONC、
-JavaScript/TypeScript/TSX、Markdown、Python、Rust、YAML、Git Commitで、残りは主に
-injection用のhidden languageである。
+The native parsers bundled in Zed's `grammars` crate are registered
+directly into the `LanguageRegistry`. In addition to the 20 pairs from
+`native_grammars()`, JavaScript (sharing the TSX parser) and Zed Keybind
+Context (sharing the Rust parser) are registered, covering the same 22
+bundled language configs/queries as Zed itself. The languages selected for
+ordinary files are Shell, C/C++, CSS, Diff, Go/Go Mod/Go Work, JSON/JSONC,
+JavaScript/TypeScript/TSX, Markdown, Python, Rust, YAML, and Git Commit;
+the rest are mainly hidden languages for injections.
 
-`languages::init` はLSP adapterやNode runtimeまで初期化するため、この段階では使わない。
-つまり複数言語のtree-sitter解析は行うが、LSPや外部processは起動しない。現在は拡張子で
-言語を選ぶため、拡張子のないscriptをshebangだけで判定する処理と、native set外のgrammar、
-未登録言語へのinjectionは後続課題とする。
+`languages::init` initializes LSP adapters and the Node runtime, so it is
+not used at this stage: tree-sitter parsing for many languages happens, but
+no LSP or external process starts. Language selection is currently by
+extension; shebang-only detection for extensionless scripts, grammars
+outside the native set, and injection into unregistered languages are
+follow-up work.
 
-全languageを `Language::new` で起動時に構築すると、使わないqueryまでcompileして初画面が
-数秒遅れる。Zed本体と同じくnative grammarを先に登録し、各configは
-`LanguageRegistry::register_language` のloaderとして登録する。queryはroot languageまたは
-injectionが実際に要求した時だけload/compileする。このcheckoutのdebug buildでは、
-Rustファイルの初画面が約5.6秒から約0.6秒、JavaScriptが約5.4秒から約1.0秒になった。
+Building every language with `Language::new` at startup compiles queries
+that are never used and delays the first screen by seconds. Like Zed
+itself, native grammars are registered first and each config is registered
+as a `LanguageRegistry::register_language` loader; queries load and compile
+only when a root language or injection actually requests them. On this
+checkout's debug build, the first screen for a Rust file went from about
+5.6 s to about 0.6 s, and JavaScript from about 5.4 s to about 1.0 s.
 
-表示時は `DisplaySnapshot::highlighted_chunks` にtree-sitter stylingを要求し、Zedの
-themeで解決済みのstyleを行ごとのterminal-cell範囲へ変換する。Ratatuiではbase/syntaxを
-描いた後にselectionを重ねる。24-bit color、bold、italic、underline、strikethroughは
-端末へ写し、font weightの細分やwavy underlineなど端末にない表現は落とす。
+For display, `DisplaySnapshot::highlighted_chunks` is asked for tree-sitter
+styling and the theme-resolved styles are converted into per-row
+terminal-cell ranges. Ratatui draws base/syntax first, then overlays
+selection. 24-bit color, bold, italic, underline, and strikethrough map to
+the terminal; expressions the terminal lacks, such as fine-grained font
+weights or wavy underlines, are dropped.
 
-parse完了は非同期なので `BufferEvent::Reparsed` をterminal event channelへ戻して再描画
-する。これにより、入力イベントを待たずにhighlightが現れる。
+Parsing completes asynchronously, so `BufferEvent::Reparsed` is fed back
+into the terminal event channel for redraw. Highlights therefore appear
+without waiting for an input event.
 
-## Terminal Workspace, panels, and recovery
+## Terminal workspace, panels, and recovery
 
-Alpha 3以降はpane、item、dock、panel、overlay、focusを`WorkspaceModel`だけが所有する。layoutは
-stable `PaneId`をleafに持つbinary split tree、paneはstable `ItemId`のordered list、dockは
-`PanelKind`のordered listである。すべての操作はreducerを通り、layout leafとpane mapの一致、itemの
-一意性、有効なactive/focus、preview/pin、overlayの単調IDをtransaction後に検査する。renderer、
-mouse hit test、session writerは同じimmutable snapshotを読むため、別々のpane/tab配列を同期しない。
+Since the terminal-workspace work, panes, items, docks, panels, overlays,
+and focus are owned solely by the `WorkspaceModel`. The layout is a binary
+split tree with stable `PaneId` leaves; a pane is an ordered list of stable
+`ItemId`s; a dock is an ordered list of `PanelKind`s. Every operation goes
+through a reducer, and after each transaction the invariants are checked:
+layout leaves match the pane map, items are unique, active/focus are valid,
+preview/pin are consistent, and overlay ids are monotonic. The renderer,
+mouse hit test, and session writer read the same immutable snapshot, so
+there are no separate pane/tab arrays to keep in sync.
 
-各itemの本文、selection、fold、wrap、undoは引き続きZed `Editor` / `Buffer` / `DisplayMap`がauthorityである。
-splitは同じBufferを別Editor viewportへ投影する新しいitemを作るが、Buffer Entityを複製しない。
-4-pane、dock、tab strip、statusは`workspace_render`が1回のlayout projectionで非重複Rectへ割り当て、狭幅では
-active paneを優先して縮退する。keyboard routeが常にあり、mouse対応時だけsplit/dock境界dragとpanel row
-hit targetを追加する。
+Each item's text, selection, folds, wrap, and undo remain the authority of
+Zed `Editor` / `Buffer` / `DisplayMap`. A split creates a new item
+projecting the same Buffer into another Editor viewport without duplicating
+the Buffer Entity. The 4-pane layout, docks, tab strip, and status are
+assigned non-overlapping Rects in one layout projection by
+`workspace_render`; at narrow widths the active pane wins the degradation.
+A keyboard route always exists, and split/dock-boundary drag plus panel-row
+hit targets are added only where the mouse is supported.
 
-Project panelはZed Worktree snapshotからstable entry IDを投影し、filter中はancestorだけでなく最初の実matchへ
-selectionを移す。create/rename/delete/copyはcanonical path、trust、special-file、symlink/case-fold collisionを
-preview時とapply時に再検査し、成功後のscanだけでtreeを更新する。dirty fileのdeleteでもBuffer Entityを残し、
-通常のdiscard guardへ接続する。
+The Project panel projects stable entry ids from the Zed Worktree snapshot,
+and during filtering moves the selection to the first real match rather
+than an ancestor. Create/rename/delete/copy re-validate canonical paths,
+trust, special files, and symlink/case-fold collisions at preview time and
+apply time, and only the post-success scan updates the tree. Deleting a
+dirty file keeps the Buffer Entity and connects to the normal discard
+guard.
 
-Project Searchはliteral/regex、case、word、ignored、open-buffer-only、full-path/include/exclude optionを1つの
-generation付きcoordinatorで実行する。表示は先頭100 hitにvirtualizeする一方、replace-allは最大10,000 rangeの
-`all_matches`を保持する。previewは全sourceのBuffer generationとdisk fingerprintを記録し、accept直前の1件でも
-変化していれば部分適用せず全体を中止する。検索結果、references、diagnostics、適用結果はsource BufferとAnchorを
-共有するeditable MultiBufferとして描画する。
+Project Search runs literal/regex, case, word, ignored, open-buffer-only,
+and full-path/include/exclude options through one generation-tagged
+coordinator. Display virtualizes to the first 100 hits while replace-all
+retains `all_matches` up to 10,000 ranges. The preview records every
+source's Buffer generation and disk fingerprint; if even one changed just
+before accept, the whole application is aborted rather than partially
+applied. Search results, references, diagnostics, and application results
+render as editable MultiBuffers sharing source Buffers and Anchors.
 
-Outlineとdiagnosticsは一時popupではなくright/bottom dockのpersistent panelである。非同期outline/LSP completionは
-source Buffer IDとgenerationを照合してstale resultを捨てる。panel filter、fold、soft wrap、multiple cursor、
-inlay hint、inline diagnostic、indent/whitespace guideはZed snapshotから可視cellだけへ投影する。terminal幅は
-Unicode graphemeのcell幅で計算し、mouse drag/double/triple clickも同じprojectionを逆変換してZed selection actionへ
-戻す。
+Outline and diagnostics are persistent right/bottom-dock panels, not
+transient popups. Asynchronous outline/LSP completions match source Buffer
+id and generation and drop stale results. Panel filtering, folds, soft
+wrap, multiple cursors, inlay hints, inline diagnostics, and
+indent/whitespace guides are projected from Zed snapshots onto visible
+cells only. Terminal width is computed in Unicode grapheme cell widths, and
+mouse drag/double/triple clicks invert the same projection back into Zed
+selection actions.
 
-sessionはrepository identity、workspace、item、dock、navigation、selection、viewport、fold/wrapをversioned JSONへ
-保存する。generation fileはimmutableでpayload SHA-256をfilenameとenvelopeの両方に持ち、temporary fileのfsyncと
-atomic renameでcommitする。dirty/scratch/MultiBuffer sourceはcontent-addressed blobへ分離し、clean save後のGCも
-store全generationを走査して到達可能blobを残す。restoreは新しいgenerationから検証し、truncated/hash/schema不正を
-`.rejected-*.session`へ隔離して前世代またはfresh workspaceへfallbackする。同一repositoryの複数processはleaseと
-単調generationにより互いのsessionを上書きしない。
+A session saves repository identity, workspace, items, docks, navigation,
+selection, viewport, and fold/wrap into versioned JSON. Generation files
+are immutable, carry the payload SHA-256 in both filename and envelope, and
+commit via temporary-file fsync plus atomic rename. Dirty/scratch/
+MultiBuffer sources separate into content-addressed blobs, and GC after a
+clean save walks every generation in the store to keep reachable blobs.
+Restore validates from the newest generation, quarantines
+truncated/hash/schema failures into `.rejected-*.session`, and falls back
+to the previous generation or a fresh workspace. Multiple processes on the
+same repository never overwrite each other's sessions thanks to leases and
+monotonic generations.
 
-Kitty keyboard、modifyOtherKeys、SGR/legacy mouse、focus reporting、OSC 52、OSC 8は起動時に能力検出し、F4 statusへ
-routeを表示する。区別不能なchordや未対応mouse操作にはcommand palette/key routeを残し、入力を無言で捨てない。
+Kitty keyboard, modifyOtherKeys, SGR/legacy mouse, focus reporting, OSC 52,
+and OSC 8 are capability-detected at startup, and the route is shown in the
+F4 status. Indistinguishable chords and unsupported mouse operations keep a
+command palette/key route rather than silently dropping input.
 
 ## Local development services
 
-Git panelはZed `GitStore`のactive repository snapshotをframeごとにimmutable projectionへ変換する。
-stage/unstage/discardは選択pathまたはrepository全体のZed APIへ戻し、zec側で`git status`をparseした並行modelは
-作らない。terminal panelは`Entity<zed_terminal::Terminal>`を保持し、Zed terminalのcell、cursor、scroll state、
-process statusをdockへ描画する。task pickerは`TaskInventory`へactive worktree/bufferの`TaskContexts`を渡し、
-resolved `SpawnInTerminal`を`Project::create_terminal_task`で同じterminal collectionへ追加する。
+The Git panel converts Zed `GitStore`'s active repository snapshot into an
+immutable projection every frame. Stage/unstage/discard go back to the Zed
+APIs for selected paths or the whole repository; zec builds no parallel
+model that parses `git status`. The terminal panel holds
+`Entity<zed_terminal::Terminal>` values and draws the Zed terminal's cells,
+cursor, scroll state, and process status into the dock. The task picker
+passes the active worktree/buffer `TaskContexts` to `TaskInventory` and
+adds the resolved `SpawnInTerminal` to the same terminal collection through
+`Project::create_terminal_task`.
 
-debug configurationも同じTaskInventoryから取得し、登録済み`DapRegistry` adapterだけを表示する。relative path、
-Zed task variable、build task、debug locatorを解決した`DebugTaskDefinition`を`DapStore::new_session`と
-`boot_session`へ渡す。sessionのthread/frame/scope/variable/outputは`DebugSession`からその都度snapshot化し、
-breakpointはProjectの`BreakpointStore`をauthorityにする。DAP reverse `runInTerminal`はZed integrated terminalを
-作成してPIDをadapterへ返すため、debuggee processだけを別のshell pathで起動しない。
+Debug configurations come from the same TaskInventory and only registered
+`DapRegistry` adapters are shown. A `DebugTaskDefinition` with relative
+paths, Zed task variables, build tasks, and debug locators resolved goes to
+`DapStore::new_session` and `boot_session`. Session
+threads/frames/scopes/variables/output are snapshotted from `DebugSession`
+on demand, and breakpoints keep the Project's `BreakpointStore` as
+authority. DAP reverse `runInTerminal` creates a Zed integrated terminal
+and returns its PID to the adapter, so the debuggee is never started
+through a separate shell path.
 
-Zed DapStoreはshutdown eventでsession mapからEntityを除く。error outputが同時に消えるのを防ぐため、zecは最近の
-8 Entityだけをpresentation historyとして保持する。これはsession stateの複製ではなく参照寿命の延長であり、
-terminated Entityへのcontrol/REPLは拒否する。GDBのようにcontinue eventを抑制するadapterでは、古いglobal stop
-flagより具体的なthread statusを優先してpanel stateを投影する。
+Zed's DapStore removes the Entity from the session map on the shutdown
+event. To keep error output from vanishing at the same moment, zec retains
+only the 8 most recent Entities as presentation history. That is a
+reference-lifetime extension, not a copy of session state, and
+control/REPL against terminated Entities is refused. For adapters like GDB
+that suppress continue events, the panel state prefers concrete thread
+status over the stale global stop flag.
 
 ## Extension ecosystem and distribution
 
-interactive起動ではZed production `Client`、`NodeRuntime`、extension host、language/debug/theme extension bridgeを
-初期化し、1つの`ExtensionStore`をregistry、installed state、operation lifecycleのauthorityにする。zecのextension
-pickerはstore snapshotのbounded projectionであり、install/upgrade/uninstall/reloadとdevelopment extensionの
-install/rebuildを公開APIへ戻す。remote registry失敗時もinstalled recordsを消さず、failureをstatusへ出す。
+Interactive startup initializes the Zed production `Client`, `NodeRuntime`,
+extension host, and the language/debug/theme extension bridges, making one
+`ExtensionStore` the authority for the registry, installed state, and
+operation lifecycle. zec's extension picker is a bounded projection of the
+store snapshot; install/upgrade/uninstall/reload and development-extension
+install/rebuild go back through the public APIs. Remote registry failures
+never erase installed records and surface as status.
 
-theme/icon theme pickerは`ThemeRegistry`の現在値と全候補を投影し、選択結果をZed user settings APIで永続化する。
-settings/keymap actionはZedが解決した実fileを通常のBufferとして開く。watcherからのsettings/keymap reloadを共有event
-loopへ戻すため、編集直後に新しいtheme、editor projection、bindingが反映され、parse failureは旧valid stateを保つ。
+The theme/icon-theme pickers project the `ThemeRegistry`'s current values
+and full candidate sets, persisting selections through Zed's user settings
+API. The settings/keymap actions open the real files Zed resolves as
+ordinary Buffers. Settings/keymap reloads from the watcher feed the shared
+event loop, so a new theme, editor projection, or binding applies right
+after editing, and a parse failure keeps the previous valid state.
 
-standalone updateはstrictなversion 1 JSON manifestから現在OS/architectureのraw executableを選ぶ。remote inputは
-HTTPSに限定し、sizeとSHA-256を検証したcandidateだけを一時fileへ同期し、`--version`の完全一致を確認してから同じ
-directoryへatomic persistする。明示downloadは既存pathを上書きせず、Unixのself-updateはresolved current regular
-executableだけを置換する。Windowsはrunning executableを置換せず、verified download後の明示的な入替を要求する。
+Standalone update picks the raw executable for the current
+OS/architecture from a strict version-1 JSON manifest. Remote input is
+HTTPS-only; only candidates whose size and SHA-256 verify are synced to a
+temporary file, `--version` must match exactly, and only then is the file
+atomically persisted into the same directory. Explicit download never
+overwrites an existing path, and Unix self-update replaces only the
+resolved current regular executable. Windows never replaces a running
+executable and requires an explicit swap after a verified download.
 
-release workflowはLinux/Windows/macOSのx86-64/ARM64をnative runnerでbuildし、raw binaryと最小archiveを生成する。
-`script/release-manifest`がmetadata、archive member、raw/archive同一性、全checksum、target一意性を検証し、そのfile set
-だけをGitHub attestationとreleaseへ渡す。OS signing/notarizationは秘密鍵を必要とする別境界で、資格情報がない状態を
-署名済みとして扱わない。normativeな安全条件とgateは[`beta-2.md`](beta-2.md)に置く。
+The release workflow builds Linux/Windows/macOS on x86-64/ARM64 native
+runners, producing raw binaries and minimal archives.
+`script/release-manifest` verifies metadata, archive members, raw/archive
+identity, all checksums, and target uniqueness, and only that file set goes
+to GitHub attestation and the release. OS signing/notarization is a
+separate boundary requiring private keys, and the absence of credentials is
+never treated as signed. The normative safety conditions live in
+[`beta-2.md`](beta-2.md).
 
 ## Rich content and large files
 
-Markdown previewはpinned Zedと同じparse optionを使い、terminal cell向けのbounded snapshotへ変換する。
-source Bufferは引き続きZedがauthorityで、previewは毎frameの変更検出で更新する。local linkはactive
-worktreeの`ProjectPath`へ解決し、heading fragmentをBuffer位置へ変換して通常tabへ移動する。外部URLは
-scheme allowlist、再確認、platform opener capabilityの三段階を通す。
+Markdown preview uses the same parse options as pinned Zed and converts to
+a bounded snapshot for terminal cells. The source Buffer stays under Zed's
+authority, and the preview updates on per-frame change detection. Local
+links resolve to the active worktree's `ProjectPath`, heading fragments
+convert to Buffer positions, and navigation goes to a normal tab. External
+URLs pass three stages: a scheme allowlist, reconfirmation, and platform
+opener capability.
 
-画像はextension判定だけで直接読むのではなく`Project::open_image`へ渡し、Zedが返すImageItemのbytesと
-metadataだけをpresentationへ写す。入力byte数、decoded pixel数、protocol outputをそれぞれ制限する。
-Kittyはimage IDのdelete、iTerm2/Sixelはalternate-screen clear後の全frame redrawで残像を消す。protocolが
-なければ同じtabにformat・寸法・byte数を表示する。画像tabは`SessionItemKind::Image`としてpathだけを永続化し、
-実装用scratch Bufferをdirty recoveryとして保存しない。overlayがあるframeではEditor snapshotを描いてから
-Rich Contentを抑止し、trust/picker/confirmationを不可視のまま入力だけ奪う状態を作らない。
+Images are not read directly on extension checks; they go through
+`Project::open_image`, and only the bytes and metadata of the ImageItem Zed
+returns are projected into presentation. Input bytes, decoded pixels, and
+protocol output are each bounded. Kitty clears stale images by image-id
+delete; iTerm2/Sixel by full-frame redraw after an alternate-screen clear.
+Without a protocol, the same tab shows format, dimensions, and byte size.
+Image tabs persist only their path as `SessionItemKind::Image` and save no
+implementation scratch Buffer as dirty recovery. In frames with an overlay,
+the Editor snapshot is drawn and Rich Content is suppressed, so
+trust/picker/confirmation can never take input while invisible.
 
-large-file用の別text modelやtruncateされた保存経路は設けない。通常のZed Editor/Buffer、DisplaySnapshot、
-Go-to-line、BufferStore saveを使い、10万行・64 KiB行のactual-binary PTY gateでfirst frame、long-line render、
-末尾edit、disk内容、Linux VmHWM、terminal lifecycleを測る。Alpha 1の500-edit benchmarkとBeta 2の境界形状試験は
-別oracleとして維持する。
+There is no separate large-file text model and no truncated save path. The
+normal Zed Editor/Buffer, DisplaySnapshot, go-to-line, and BufferStore save
+are used, and the 100k-line / 64 KiB-line actual-binary PTY suite measures
+first frame, long-line render, tail edits, disk contents, Linux VmHWM, and
+terminal lifecycle. The repository 500-edit benchmark and the distribution
+boundary-shape tests remain separate oracles.
 
 ## AI, collaboration, media, and Notebook
 
-Agent panelは`AcpThread`を会話、tool call、permission、session statusのauthorityとして保持する。
-設定がなければ`NativeAgentServer`とglobal `ThreadStore`でprocess内Zed Agentを生成し、
-`ZEC_ACP_AGENT`が明示された場合だけ`AcpConnection::stdio`でexternal agentを起動する。terminal側は
-bounded prompt/history/local outputを持つだけで、stream entryやpermission outcomeを複製しない。
-model/mode/config/session/authはACP connectionの公開API、MCPはProject `ContextServerStore`、
-skill/instructionはtrusted worktreeのZed Agent discoveryへ戻す。
+The Agent panel holds `AcpThread` as the authority for conversation, tool
+calls, permissions, and session status. With no configuration it creates
+the in-process Zed Agent through `NativeAgentServer` and the global
+`ThreadStore`; only an explicit `ZEC_ACP_AGENT` starts an external agent
+via `AcpConnection::stdio`. The terminal side keeps only a bounded
+prompt/history/local output and duplicates no stream entries or permission
+outcomes. Model/mode/config/session/auth go through the ACP connection's
+public API, MCP through the Project `ContextServerStore`, and
+skills/instructions through Zed Agent discovery on trusted worktrees.
 
-edit predictionは全hidden Editorを観測し、Zed language settingsとorganization/user eventに応じて
-Zed/Copilot/Codestralまたはcustom FIM delegateを付け替える。表示とaccept-all/word/lineはEditorの
-native ghost-text actionである。inline assistantは対象Buffer generationとrangeをcaptureし、Zed
-`PromptBuilder`/`LanguageModelRegistry`でstreamした結果を1 transactionのpreviewとして適用する。
-source generationが変わった結果は適用せず、accept/reject/undoも同じBuffer transactionを使う。
+Edit prediction observes all hidden Editors and swaps between
+Zed/Copilot/Codestral or a custom FIM delegate according to Zed language
+settings and organization/user events. Display and accept-all/word/line are
+the Editor's native ghost-text actions. The inline assistant captures the
+target Buffer generation and range, streams through Zed's
+`PromptBuilder`/`LanguageModelRegistry`, and applies the result as a
+one-transaction preview. Results whose source generation changed are not
+applied, and accept/reject/undo use the same Buffer transaction.
 
-Collaboration panelはproduction `Client`、`UserStore`、`ChannelStore`のsnapshotだけを投影する。
-create/invite/sign-in/out/refreshは各store APIへ戻し、notes tabのtext/collaborators/replica stateは
-`ChannelBuffer`がauthorityである。splitは同じBuffer Entityを共有し、followingはcollaborator pointを
-通常のEditor selectionへ変換する。offline fixtureはPTYの決定性だけのために隔離し、production stateと
-混在させない。
+The Collaboration panel projects only snapshots of the production `Client`,
+`UserStore`, and `ChannelStore`. Create/invite/sign-in/out/refresh go back
+to the store APIs, and notes tabs keep text/collaborators/replica state
+under `ChannelBuffer` authority. Splits share the same Buffer Entity, and
+following converts collaborator points into ordinary Editor selections.
+Offline fixtures are isolated purely for PTY determinism and never mix with
+production state.
 
-voice/screen shareはterminal cellで代替できないためexternal bridgeとする。strict JSON config、
-terminal capability、selected channel URL、毎回の確認が揃った時だけowned childを起動し、kindとURLを
-末尾引数に渡す。start/stop/exit/errorをpanelへ投影し、stopとDropはkill後にwaitする。
+Voice/screen share cannot be faked in terminal cells, so they are an
+external bridge. Only when strict JSON config, terminal capability, a
+selected channel URL, and per-run confirmation all line up does zec start
+an owned child, passing kind and URL as trailing arguments.
+Start/stop/exit/error project into the panel, and stop and Drop wait after
+kill.
 
-`.ipynb`は通常のProject Bufferとは別にhidden GPUI windowの`NotebookEditor`を開く。cells、cell Editor、
-execution request、Jupyter messageはNotebookEditor、save/session dirty stateはProject Bufferがauthorityで、
-terminalは`to_notebook`のimmutable JSON snapshotだけを描画する。同じBuffer IDのsplitは1つの
-Notebook stateを共有する。cell actionはZed notebook actionをhidden dispatch treeへ送り、native snapshotが
-変わった時だけBufferを更新する。固定upstream serializerが落とす既存display-dataはcell IDで保全し、
-run/clear時に失効させる。
+`.ipynb` opens a `NotebookEditor` in a hidden GPUI window separate from the
+normal Project Buffer. Cells, cell Editors, execution requests, and Jupyter
+messages are the NotebookEditor's authority; save/session dirty state is
+the Project Buffer's; the terminal renders only the immutable JSON snapshot
+from `to_notebook`. Splits on the same Buffer id share one Notebook state.
+Cell actions dispatch Zed notebook actions into the hidden dispatch tree,
+and the Buffer updates only when the native snapshot changed. Existing
+display-data that the pinned upstream serializer drops is preserved by cell
+id and invalidated on run/clear.
 
-固定upstreamはStarting中のlocal kernelをrestart/closeした時にprocess groupを残す場合がある。
-zecはNotebook Entity IDから`kernel-zed-<id>.json`を導出し、現在processの子孫かつそのconnection fileを
-argvに持つprocessだけをsysinfoで選ぶ。restart後は事前snapshotのPIDだけ、最終Dropは全matching PIDを
-Unix process group（非Unixはprocess）単位で終了するため、別Notebook、terminal、taskを巻き込まない。
+The pinned upstream can leave a process group behind when a local kernel is
+restarted/closed while Starting. zec derives `kernel-zed-<id>.json` from
+the Notebook Entity id and selects, via sysinfo, only processes that are
+descendants of the current process and carry that connection file in their
+argv. After a restart only the pre-snapshot PIDs are terminated; the final
+Drop terminates all matching PIDs — by Unix process group (per process on
+non-Unix) — so other Notebooks, terminals, and tasks are never caught.
 
 ## Buffer search (`Ctrl-F`, active Buffer only)
 
-この節のBuffer内検索は`Alt-F`のrepository-wide Project Searchとは別機能である。
-`Ctrl-F`はactive tabのBufferだけを対象にし、repositoryの`Search::local`や
-`RepositoryIndex`を使わない。
+In-buffer search here is distinct from `Alt-F` repository-wide Project
+Search. `Ctrl-F` targets only the active tab's Buffer and uses neither the
+repository `Search::local` nor the `RepositoryIndex`.
 
-`Ctrl-F` の本文検索はWorkspaceのGUI search barを生成せず、`Editor` が実装する公開
-`SearchableItem` APIを直接使う。`SearchQuery` の実行、matchのstable anchor、active match、
-next/previousのwrap、selection、autoscroll、highlight色はZed側に任せる。zecが所有するのは
-status行に表示するsingle-line queryとそのcursor、match一覧をAPIへ戻すための短命なsession
-だけで、本文やundo stateは持たない。
+`Ctrl-F` does not spawn the Workspace GUI search bar; it uses the public
+`SearchableItem` API that `Editor` implements. Running the `SearchQuery`,
+stable match anchors, the active match, next/previous wrapping, selection,
+autoscroll, and highlight colors are Zed's. zec owns only the single-line
+query shown in the status row with its cursor, and a short-lived session
+for passing the match list back to the API — no text or undo state.
 
-Zedのbackground highlightを `DisplayPoint` で取得してterminal cell範囲へ変換し、syntaxの
-後、selectionの前に背景色だけを重ねる。現在は大文字小文字を区別しないliteral検索を
-query変更ごとに逐次awaitする。regex/word/case option、history、長時間検索のcancel/debounce、
-multiline queryは後続課題とする。
+Zed's background highlights are fetched as `DisplayPoint`s and converted to
+terminal cell ranges, overlaying only a background color after syntax and
+before selection. Currently a case-insensitive literal search is awaited
+sequentially per query change. Regex/word/case options, history,
+cancel/debounce for long searches, and multiline queries are follow-up
+work.
 
-`Ctrl-H`で同じsessionにsingle-line replacement promptを加える。query/replacementの入力と
-focusだけはterminal chromeが持つが、置換範囲、anchor、編集順、transaction、undoは公開
-`SearchableItem::replace` / `replace_all`へ戻す。Editor実装は単一置換を1 transaction、全件を
-まとめて1 transactionにするため、zecは本文editを組み立てない。単一置換では編集前のmatch
-anchorで次へ進んでから検索し直し、replacement自体がqueryを含んでも同じmatchに留まりにくくする。
-全置換後も明示的に再検索し、terminal側のmatch countとbackground highlightを同期する。
+`Ctrl-H` adds a single-line replacement prompt to the same session. The
+terminal chrome owns only query/replacement input and focus; replacement
+ranges, anchors, edit order, transactions, and undo go back through the
+public `SearchableItem::replace` / `replace_all`. The Editor implementation
+makes a single replacement one transaction and replace-all one transaction,
+so zec assembles no text edits. A single replacement advances from the
+pre-edit match anchor before re-searching, making it hard to stay stuck on
+the same match even when the replacement contains the query. After
+replace-all an explicit re-search syncs the terminal-side match count and
+background highlights.
 
-legacy terminalでは`Ctrl-Enter`と`Enter`を区別できない場合があるため、replace欄では
-`Enter`を単一置換、`Alt-Enter`を全置換のportableな操作とし、識別できる場合だけ
-`Ctrl-Enter`も全置換として受ける。replacementの改行入力はsingle-line promptの境界外として
-後続課題にする。prompt中の本文shortcut漏れを防ぐため、置換の`Ctrl-Z`は`Esc`で検索を
-閉じた後に実行する。
+Legacy terminals may not distinguish `Ctrl-Enter` from `Enter`, so in the
+replace field `Enter` is the portable single replacement and `Alt-Enter`
+the portable replace-all, with `Ctrl-Enter` also accepted as replace-all
+where it is distinguishable. Newlines in replacements are outside the
+single-line prompt boundary and remain follow-up work. To avoid body
+shortcuts leaking during the prompt, `Ctrl-Z` for a replacement runs after
+closing the search with `Esc`.
 
 ## Go to line
 
-`Ctrl-G`のZed actionはWorkspace modalを要求し、standalone Editorではhandlerが何も行わない。
-そのため入力欄だけはterminal-ownedな`LinePrompt`にし、確定後の位置解決とselection変更は
-Zedの公開APIへ戻す。入力形式はabsoluteな`line[:column]`で、lineとcolumnは1-basedとする。
+The Zed action behind `Ctrl-G` wants a Workspace modal, and on a standalone
+Editor the handler does nothing. The input field is therefore a
+terminal-owned `LinePrompt`, while position resolution and the selection
+change after submission go back to Zed's public APIs. Input is an absolute
+`line[:column]`, 1-based.
 
-対象はactive Bufferの`BufferSnapshot::point_from_external_input`で解決する。このAPIを使うことで
-Unicode columnをUTF-8 byte columnと取り違えず、範囲外のline/columnもZed本体と同様に文書境界・
-行末へclipできる。得たBuffer PointをMultiBuffer Anchorへ変換し、
-`Editor::change_selections`と`SelectionEffects::scroll(Autoscroll::center())`で全selectionを1つの
-caretへ畳む。本文やundo transactionは変更しない。fold/wrap/display rowをzec側では計算しない。
+The target resolves through the active Buffer's
+`BufferSnapshot::point_from_external_input`. That API avoids confusing
+Unicode columns with UTF-8 byte columns and clips out-of-range line/column
+to document and line boundaries exactly like Zed itself. The resulting
+Buffer Point converts to a MultiBuffer Anchor, and
+`Editor::change_selections` with
+`SelectionEffects::scroll(Autoscroll::center())` collapses all selections
+to one caret. Text and undo transactions are untouched. zec computes no
+fold/wrap/display rows.
 
-hidden GPUI Editorのscroll位置はterminal viewportのsource of truthではないため、端末側では既存の
-`keep_cursor_visible`が移動先を最小scrollで表示する。Zed GUIと同じ厳密な中央寄せ、相対指定、
-入力中のpreview highlightは後続課題とする。
+The hidden GPUI Editor's scroll position is not the terminal viewport's
+source of truth, so the existing `keep_cursor_visible` shows the target
+with minimal scrolling. Zed GUI's strict centering, relative input, and
+live preview highlighting during input are follow-up work.
 
 ## Terminal scrolling
 
-mouse wheelはactive tabのterminal viewportを3 display rowずつ動かす。
-`Alt-PageUp` / `Alt-PageDown`はstatusを除くterminal本文の高さから1行引いた量（最小1行）を使い、
-前後の画面を原則1行重ねる。どちらもZedへkeystrokeを送らず、selection、cursor、undo transactionは
-変更しない。
+The mouse wheel moves the active tab's terminal viewport by 3 display rows.
+`Alt-PageUp` / `Alt-PageDown` use the terminal body height minus one row
+(minimum 1), keeping one overlapping row between consecutive screens.
+Neither sends keystrokes to Zed nor changes selection, cursor, or undo
+transactions.
 
-manual scroll中はvertical cursor followだけを止める。Zed側のcursor位置が変わった時点で
-自動追従へ戻し、horizontal cursor followは常に維持する。単なるRedrawやResizeではmanual
-状態を解除せず、viewportが文書末尾を越えた場合だけ有効範囲へclipする。
+During a manual scroll only vertical cursor follow stops. The moment Zed's
+cursor position changes, auto-follow resumes; horizontal follow always
+stays on. A mere Redraw or Resize does not clear the manual state, and the
+viewport is clipped to the valid range only when it passes the document
+end.
 
-modifierなし、または`Shift`付きの`PageUp` / `PageDown`は引き続きZedのkeymapへ渡す。
-hidden GPUI windowのpage sizeはterminal本文の高さと一致しないため、この経路の移動量は既知の
-境界とする。またmouse capture中にterminal自身の文字選択を使う場合、多くのterminalでは
-`Shift`付きdragが必要になる。
+`PageUp` / `PageDown`, plain or with `Shift`, still go to Zed's keymap. The
+hidden GPUI window's page size does not match the terminal body height, so
+the movement amount on that route is a known boundary. Using the terminal's
+own text selection during mouse capture requires `Shift`-drag in most
+terminals.
 
 ## Terminal mouse positioning
 
-modifierなしの左button Downだけをcaret移動として扱う。Ratatuiで描画したのと同じ
-grapheme/cell幅、ガター、viewportを使ってscreen cellをdisplay行のUTF-8 byte位置へ
-逆変換する。wide graphemeはcellの中心に最も近い境界へ寄せ、viewport境界で
-切れて描画されないgraphemeの空白cellはclick不可とする。
+Only an unmodified left-button Down is treated as caret movement. The same
+grapheme/cell widths, gutter, and viewport used for Ratatui rendering
+invert the screen cell into a UTF-8 byte position on the display row. Wide
+graphemes snap to the boundary nearest the cell center, and blank cells of
+graphemes clipped at the viewport edge are unclickable.
 
-逆変換の結果はclick処理時点の最新`DisplaySnapshot`でclipし、
-`display_point_to_anchor -> Editor::change_selections`へ渡す。zecはcaretやselection状態を所有せず、
-mouse clickでBuffer本文やundo transactionも変更しない。ガター、status行、本文外、
-right/middle button、modifier付きclickはcaretやBufferに作用しない。promptや検索の入力中も
-本文のcaretは動かさない。
+The inverted result is clipped against the latest `DisplaySnapshot` at
+click time and passed to `display_point_to_anchor ->
+Editor::change_selections`. zec owns no caret or selection state, and a
+mouse click changes neither Buffer text nor undo transactions. The gutter,
+status row, out-of-body areas, right/middle buttons, and modified clicks
+act on nothing. During prompt or search input, the body caret does not
+move.
 
-Zed GUIのdrag、word/line selection、multi-cursorのmouse state machine入口は現在
-`pub(super)`である。そのロジックをzecへ複製せず、drag/double/triple/modifier selectionは
-Zed側に小さな公開hookを追加するか判断するまで後続課題とする。
+The entry points of Zed GUI's drag, word/line selection, and multi-cursor
+mouse state machine are currently `pub(super)`. Rather than duplicating
+that logic, drag/double/triple/modifier selection stays follow-up work
+until it is decided whether to add a small public hook on the Zed side.
 
 ## Tabs
 
-1 tabにつき `Editor::for_buffer` をrootにした非表示GPUI windowを1つ持つ。Zedのfocus、
-key context、action dispatch、selection、cursor、undo、DisplayMapはwindowごとそのまま使い、
-zecが持つ可変状態はactive indexとterminal viewport、そのfollow状態だけにする。公開 `replace_root` では既存の
-Editor Entityをrootへ付け替えられず、1 window内でchildを交換すると専用hostとfocus treeの
-同期が必要になるため採用しない。
+Each tab owns one hidden GPUI window rooted at `Editor::for_buffer`. Zed's
+focus, key context, action dispatch, selection, cursor, undo, and
+DisplayMap are used per window as-is; zec's only mutable state is the
+active index, the terminal viewport, and its follow state. The public
+`replace_root` cannot reattach an existing Editor Entity to the root, and
+swapping children within one window would require a dedicated host and
+focus-tree synchronization, so it is not used.
 
-`Ctrl-PageUp` / `Ctrl-PageDown` はWorkspace/Paneを作っていないのでzecが捕捉し、activeな
-WindowHandleだけを描画・入力対象にする。各windowのfocusはwindow-localなのでOS windowの
-activateは不要。切替時はBuffer固有Anchorを別Editorへ渡さないよう検索をcloseし、Save As
-とOpen promptもcancelする。statusはactive位置と全tabのdirty状態を表示し、`Ctrl-S` は
-activeだけ、`Ctrl-Q` は全Bufferを検査する。
+`Ctrl-PageUp` / `Ctrl-PageDown` are captured by zec since no Workspace/Pane
+exists, making only the active WindowHandle the render/input target. Each
+window's focus is window-local, so no OS window activation is needed.
+Switching closes the search so Buffer-specific Anchors never reach another
+Editor, and cancels Save As and Open prompts. The status shows the active
+position and every tab's dirty state; `Ctrl-S` checks only the active tab
+and `Ctrl-Q` inspects all Buffers.
 
-`Ctrl-O`はterminal-ownedなsingle-line promptからpathを絶対化し、起動時と同じ
-`open_document`へ渡す。共有BufferStoreが同じBuffer Entityを返した場合は既存tabへ移動し、
-新しいBufferの場合だけhidden windowとsyntax再描画subscriptionを追加する。open失敗時は
-promptへerrorを返し、既存tabsとactive indexは変更しない。
+`Ctrl-O` absolutizes a path from a terminal-owned single-line prompt and
+passes it to the same `open_document` as startup. When the shared
+BufferStore returns an existing Buffer Entity, the existing tab is
+activated; only a new Buffer adds a hidden window and a syntax-redraw
+subscription. On open failure the error returns to the prompt and existing
+tabs and the active index stay unchanged.
 
-`Ctrl-N`は同じBufferStoreの`create_local_buffer`を使う`open_document(None)`経路でscratchを
-作り、`Untitled N`というprocess内で単調増加する表示名を付ける。裸のBufferを作らないため、
-後のSave Asでfile path mappingと外部変更監視へ正常に移行する。新しいscratchも通常tabと同じ
-hidden window、dirty保護、Save As、close lifecycleを使う。active tabが変わる操作なので、
-検索を閉じ、入力途中のSave As/Open promptはtab切替と同様にcancelする。
+`Ctrl-N` creates scratch through the `open_document(None)` path using the
+same BufferStore's `create_local_buffer`, labeled `Untitled N` with a
+process-monotonic number. Because no bare Buffer is created, later Save As
+transitions correctly into file-path mapping and external-change watching.
+New scratch uses the same hidden window, dirty protection, Save As, and
+close lifecycle as normal tabs. As an active-tab-changing operation it
+closes the search and cancels in-progress Save As/Open prompts just like a
+tab switch.
 
-`Ctrl-W`はclean tabを即座に閉じ、dirty tabでは同じキーの再入力を要求する。他のkey pressや
-pasteで確認状態を解除する。GPUIのWindowHandleはwindowを所有しないため、handleをdropするだけ
-ではなく`Window::remove_window`を呼んだ後にDocumentTabを除去する。最後のwindowを閉じた場合は
-GPUIのheadless runtimeも終了する。BufferStoreはweak参照を保持するため、破棄したdirty tabを
-同じpathで開き直すとdiskから新しいBufferがloadされる。
+`Ctrl-W` closes a clean tab immediately and requires a second press for a
+dirty one; any other key press or paste clears the confirmation. GPUI's
+WindowHandle does not own the window, so `Window::remove_window` is called
+before removing the DocumentTab rather than just dropping the handle.
+Closing the last window also shuts down the GPUI headless runtime. The
+BufferStore holds weak references, so reopening a discarded dirty tab by
+the same path loads a fresh Buffer from disk.
 
 ## Why not `ratatui-textarea`
 
-`ratatui-textarea` は表示だけでなく、テキスト、カーソル、selection、入力処理、undo
-履歴を所有する。そのためメイン編集領域に使うと Zed と編集状態が二重化し、undo、
-keymap、複数 selection、fold/inlay の同期が必要になる。
+`ratatui-textarea` owns not only display but text, cursor, selection, input
+handling, and undo history. Using it for the main editing area would
+duplicate editing state alongside Zed and require synchronizing undo, the
+keymap, multiple selections, and folds/inlays.
 
-メイン編集領域には状態を持たない専用 Ratatui Widget を使い、
-`DisplaySnapshot -> terminal cells` の変換だけを実装する。
-検索・置換欄、Save As、Open、Go to lineはZed管理外の小さなsingle-line入力なので、
-共通の軽量prompt stateをzecが
-持つ。必要な操作が文字入力、cursor移動、削除、submit、cancelだけであるため、現時点では
-`ratatui-textarea`を追加せず、この境界を約1型に限定している。
+The main editing area uses a stateless dedicated Ratatui Widget
+implementing only the `DisplaySnapshot -> terminal cells` conversion. The
+search/replace fields, Save As, Open, and Go to line are small single-line
+inputs outside Zed's management, so zec keeps a common lightweight prompt
+state. Since the needed operations are only character input, cursor
+movement, deletion, submit, and cancel, `ratatui-textarea` is not added and
+this boundary is confined to roughly one type.
 
 ## Boundaries
 
-- Zed の表示 column は UTF-8 byte 基準、端末は grapheme/cell 幅基準なので、zec に
-  一箇所だけ座標変換層を置く。mouse hit testも同じcell metricsを使う逆変換にする。
-- Zedの全selectionを表示座標の半開区間として取得し、端末cell座標へ変換してから
-  Ratatuiの文字描画後に反転styleだけを重ねる。文字列やselection状態は複製しない。
-- 行番号はdisplay rowを数えず、`DisplaySnapshot::row_infos` の `buffer_row` を表示する。
-  block rowやsoft-wrap継続行は空欄にし、`widest_line_number` からガター幅を固定する。
-  本文、cursor、selection、横scrollはすべてガターを除いた同じRectで計算する。
-- 初期段階では soft wrap を無効にして横スクロールを使う。GPUI の pixel 幅と端末の
-  cell 幅を混ぜない。
-- terminal reader は別 thread で blocking input を読み、channel 経由で GPUI
-  foreground に渡す。Editor 自体は単一 thread で操作する。resize event が欠ける
-  PTY向けに、同じreader threadで低頻度のsize確認も行う。
-- headless clipboard は使えないため、bracketed pasteの文字列をZedの `do_paste` へ
-  直接渡す。これによりpaste時のselection置換、auto-indent、undo単位はZedに任せる。
-- GPUIのLinux headless clipboardはwriteがno-op、readが常に空で、ZedのCopy/Cutが作る
-  `ClipboardItem` を返す公開APIもない。そのためcopy payloadに限り、Zedの公開selectionと
-  buffer snapshotから本体と同じ行・multi-selection規則で組み立てる薄いadapterを置く。
-  Editor、selection、編集transaction、undo stateは所有しない。CutはpayloadをOSC 52へ
-  書けた後にZedのCut actionをdispatchし、削除とundoをZedへ任せる。
-- OSC 52はtextだけを運び成功応答を持たない。Zedのclipboard metadataをterminal越しに
-  保持できないため、bracketed pasteには推測したmetadataを付けず常に外部textとして渡す。
-  端末ごとのcontrol-string上限を踏みにくくするためraw textを256 KiBに制限し、超過時は
-  Copyを拒否し、Cutなら本文も変更しない。
+- Zed's display columns are UTF-8-byte-based and the terminal is
+  grapheme/cell-width-based, so zec keeps exactly one coordinate
+  conversion layer. The mouse hit test is the inverse conversion using the
+  same cell metrics.
+- All Zed selections are fetched as half-open display-coordinate ranges,
+  converted to terminal cell coordinates, and only an inverted style is
+  overlaid after Ratatui draws the characters. No strings or selection
+  state are duplicated.
+- Line numbers do not count display rows; `buffer_row` from
+  `DisplaySnapshot::row_infos` is shown. Block rows and soft-wrap
+  continuation rows are blank, and the gutter width is fixed from
+  `widest_line_number`. Text, cursor, selection, and horizontal scroll all
+  compute against the same Rect excluding the gutter.
+- Initially soft wrap is disabled in favor of horizontal scrolling; GPUI
+  pixel widths and terminal cell widths are never mixed.
+- The terminal reader reads blocking input on its own thread and hands it
+  to the GPUI foreground over a channel; the Editor itself is driven from
+  a single thread. For PTYs that miss resize events, the same reader
+  thread also polls the size at low frequency.
+- The headless clipboard is unavailable, so bracketed-paste strings go
+  directly into Zed's `do_paste`, leaving selection replacement,
+  auto-indent, and undo granularity on paste to Zed.
+- GPUI's Linux headless clipboard has a no-op write and an always-empty
+  read, and no public API returns the `ClipboardItem` created by Zed's
+  Copy/Cut. For the copy payload only, a thin adapter assembles the same
+  line/multi-selection rules as upstream from Zed's public selections and
+  buffer snapshot. It owns no Editor, selection, edit transaction, or undo
+  state. Cut dispatches Zed's Cut action after the payload is written to
+  OSC 52, leaving deletion and undo to Zed.
+- OSC 52 carries only text and has no success response. Zed's clipboard
+  metadata cannot be preserved across the terminal, so bracketed paste is
+  always treated as external text without invented metadata. Raw text is
+  capped at 256 KiB to stay under per-terminal control-string limits;
+  oversized Copy is refused, and an oversized Cut leaves the text
+  unchanged too.
 
 ## Deferred
 
-default-branch hosted evidence、live AI providerと2-client channel共同編集、desktop media bridge、
-real kernelが新規生成するimage/HTML/JSON output、remote/Windows Notebook lifecycle、OS signing/notarizationは
-verificationとして残る。presentation機能では検索history、Go to lineの相対指定/live preview、clipboard
-metadata/read、native set外のgrammarと完全なlanguage injection、terminal cell幅を使うsoft wrapが未完了である。
+Default-branch hosted evidence, a live AI provider and 2-client channel
+co-editing, the desktop media bridge, image/HTML/JSON outputs newly
+generated by a real kernel, remote/Windows Notebook lifecycle, and OS
+signing/notarization remain as verification. In presentation, search
+history, relative go-to-line and live preview, clipboard metadata/read,
+grammars outside the native set with full language injection, and soft
+wrap using terminal cell widths are incomplete.
 
-自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
-新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、
-tabごとの編集・undo・active save・全tab dirty終了保護、実行中のopen・dedupe・未作成path保存・
-scratch tab追加とSave As、cleanな外部変更の自動reload、dirtyな外部変更のreload/overwrite確認、
-dirty close後のdisk reload・最後のwindow終了、ASCII/wide文字上のmouse clickによるcaret移動、
-raw mode / alternate screenの復元まで確認する。
+Automated checks use `--smoke` and the unit tests. The terminal path is
+verified over a PTY: character input, undo, saving new and existing files,
+scratch save-as with overwrite confirmation, OSC 52 copy, undo of Zed Cut,
+per-tab editing/undo/active save and all-tab dirty exit protection, opening
+at runtime with dedupe, saving not-yet-created paths, adding scratch tabs
+with Save As, auto-reload of clean external changes, reload/overwrite
+confirmation for dirty external changes, disk reload after a dirty close,
+exit of the last window, caret movement by mouse click on ASCII and wide
+characters, and restoration of raw mode and the alternate screen.

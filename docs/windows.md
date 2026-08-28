@@ -1,45 +1,63 @@
-# Windows サポート
+# Windows support
 
-zecはWindowsをfirst-classのnative targetとして扱う。GPUIは非表示windowを作るnative platform、
-外側のTUIはWindows Terminal等のVT対応console、integrated terminalはConPTYで動く。
+zec treats Windows as a first-class native target. GPUI runs on the native
+platform with hidden windows, the outer TUI runs in any VT-capable console
+such as Windows Terminal, and the integrated terminal runs on ConPTY.
 
-## ビルド要件
+## Build requirements
 
-- MSVC toolchain(rust-toolchain.tomlのpinned Rust)
-- Visual Studioの「MSVC C++ x64/x86 Spectre緩和ライブラリ」component。
-  `languages`(Zed)→`pet`経由の`msvc_spectre_libs`が要求し、無いとbuild scriptがpanicする。
-  GitHub hosted runnerには既に入っている。
+- The MSVC toolchain (the pinned Rust from rust-toolchain.toml).
+- The Visual Studio "MSVC C++ x64/x86 Spectre-mitigated libs" component.
+  `msvc_spectre_libs`, pulled in through `languages` (Zed) → `pet`, requires
+  it and its build script panics without it. GitHub-hosted runners already
+  include it.
 
-## 分離とデータ配置
+## Isolation and data placement
 
-`ZEC_DATA_DIR`を設定すると、Zed側のuser directory一式(config/data/logs/DB)が
-`$ZEC_DATA_DIR`配下(configは`$ZEC_DATA_DIR/config`)へ全platform同一の仕組みでredirectされる。
-test harnessとactual-binary gateはこれで分離する。XDG_*はUnix専用の残余経路のみを覆う。
+Setting `ZEC_DATA_DIR` redirects the whole set of Zed-side user directories
+(config, data, logs, databases) under `$ZEC_DATA_DIR` (config lives at
+`$ZEC_DATA_DIR/config`) through one mechanism that behaves identically on
+every platform. The test harness and the e2e suites isolate themselves with
+it; the XDG variables only cover Unix-specific residual paths.
 
-workspace sessionの既定保存先は、`ZEC_SESSION_DIR` > `ZEC_DATA_DIR/state/workspaces` >
-(Unix: `XDG_STATE_HOME`または`~/.local/state`、Windows: `LOCALAPPDATA`)`/zec/workspaces`。
+Workspace sessions default to `ZEC_SESSION_DIR` >
+`ZEC_DATA_DIR/state/workspaces` > (Unix: `XDG_STATE_HOME` or
+`~/.local/state`; Windows: `LOCALAPPDATA`) + `/zec/workspaces`.
 
-## test harness
+## Test harness
 
-`PtySession`(src/bin/alpha_1_support)はportable-ptyのnative PTY(Unix: pty、Windows: ConPTY)で
-実binaryを駆動する。platform差は`TerminalBaseline`に集約している:
+`PtySession` (src/bin/e2e_support) drives the real binary through
+portable-pty's native PTY (a Unix pty, ConPTY on Windows). Platform
+differences are concentrated in `TerminalBaseline`:
 
-- Unix: termios snapshotでraw-mode遷移と復元をkernel状態として証明する
-- Windows: ConPTYに等価物が無いため、emitされたVT列(alternate screen進入とcleanup escapes)で判定する
+- Unix captures a termios snapshot, so raw-mode entry and restoration are
+  proven against kernel state.
+- ConPTY has no equivalent, so Windows judges those properties from the
+  emitted VT output (the synthesized full repaint and cursor restoration).
+  ConPTY also flattens the alternate-screen switch and absorbs the client's
+  cleanup escapes, and the host must answer the cursor-position report that
+  conhost sends at startup; `PtySession` does.
 
-signal(SIGTERM/SIGHUP/SIGTSTP)・process group・/proc metricsを使うAPIはUnix専用のまま
-`#[cfg(unix)]`で残る。Windowsにはprocess groupとjob controlのTUI慣行が存在しないため、
-これらのcaseはUnix evidenceとしてのみ意味を持つ。VmHWM相当はWindowsではPeakWorkingSetSize。
+APIs built on signals (SIGTERM/SIGHUP/SIGTSTP), process groups, and /proc
+metrics stay Unix-only behind `#[cfg(unix)]`. Windows has no process-group
+or job-control convention for TUIs, so those cases are meaningful only as
+Unix evidence. The Windows counterpart of VmHWM is PeakWorkingSetSize.
 
-## Windowsで走る検証
+## What runs on Windows
 
-- `cargo test --locked`の全integration test(alpha_2_lsp / alpha_2_settings / alpha_2_failures /
-  update_cli / parity_contract / repository / alpha_3_*)。feature gateは不要。
-- `alpha_2_acceptance` / `alpha_2_bench`はConPTY上でbuild・実行できる。
-- `pty_acceptance`は`#![cfg(target_os = "linux")]`のまま。termios/signal前提のcaseを分離した上での
-  case単位のWindows有効化が次の課題。
-- `alpha_1_*` / `alpha_3_acceptance` / `alpha_3_bench`は`alpha-1-linux` featureで据え置き。
-  Alpha 1はfixture manifestがUnixのmode/symlinkを契約に含むため、契約の再設計なしには移植できない。
+- Every integration test in `cargo test --locked` (language_service,
+  settings_reload, lsp_failures, update_cli, parity_contract, repository,
+  workspace_layout, workspace_sessions, workspace_search, project_panel).
+  No cargo feature is required.
+- `e2e_language` and `e2e_language_bench` build and run on ConPTY.
+- `e2e_tui` remains `#![cfg(target_os = "linux")]`. Enabling it per case on
+  Windows, after separating the termios/signal-dependent cases, is the next
+  step.
+- The `e2e_repository` and `e2e_workspace` binaries stay behind the
+  `e2e-linux` feature: the repository fixture manifest encodes Unix modes
+  and symlinks as contract, so they cannot be ported without redesigning
+  that contract.
 
-`zec update apply`はWindowsでは実行中executableを置換せず、documented errorで拒否する
-(tests/update_cli.rsが両platformの挙動を検証する)。
+`zec update apply` refuses to replace the running executable on Windows with
+a documented error; tests/update_cli.rs verifies the behavior of both
+platforms.

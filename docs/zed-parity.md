@@ -7,114 +7,155 @@ No capability is `verified` until the completion rule below is satisfied.
 
 ## Goal
 
-zecの長期目標は、Zedが持つ編集、language intelligence、workspace、Git、実行・debug、
-extension、remote、AI、collaborationのworkflowをconsoleから完結できるようにすることである。
-pixel単位でGPUIを再現することは目標にせず、同じZed modelへ同じ操作を適用し、同じ永続状態と
-外部作用を得られることをparityとする。
+zec's long-term goal is to complete Zed's editing, language intelligence,
+workspace, Git, run/debug, extension, remote, AI, and collaboration
+workflows from the console. Reproducing GPUI pixel-for-pixel is not a
+goal; parity means applying the same operations to the same Zed models and
+obtaining the same persistent state and external effects.
 
-対象機能と到達状況のnormativeな台帳は
-[`zed-parity-v1.json`](zed-parity-v1.json)で管理する。文書中の完了表現、issue、手動dogfoodだけで
-台帳を`verified`へ変更してはならない。
+The normative ledger of target capabilities and their status is
+[`zed-parity-v1.json`](zed-parity-v1.json). Completion phrasing in
+documents, issues, or manual dogfooding must never move the ledger to
+`verified`.
 
 ## Delivery modes
 
-各capabilityは次のいずれかで提供する。consoleで表現しにくいことを理由にcapability自体を
-削除する`excluded` modeは設けない。
+Each capability ships in one of the following modes. There is no
+`excluded` mode that drops a capability just because the console makes it
+awkward.
 
-- `faithful`: Zedのdomain modelとactionをauthorityとして使い、terminalは入出力だけを変換する。
-- `terminal-adapted`: 同じstate/actionを、cell、text、terminal image protocolなどへ投影する。
-- `external-bridge`: audio、screen share、browserなどterminalが所有できない媒体を、明示的な
-  processまたはOS serviceへ接続し、zec内では状態、権限、開始・停止、errorを操作できるようにする。
+- `faithful`: Zed's domain model and actions are the authority; the
+  terminal converts only input and output.
+- `terminal-adapted`: the same state/actions project onto cells, text,
+  terminal image protocols, and the like.
+- `external-bridge`: media a terminal cannot own — audio, screen share, a
+  browser — connect to an explicit process or OS service, while state,
+  permissions, start/stop, and errors stay operable inside zec.
 
-端末能力が足りない場合は、利用可能なmodeへfallbackするか、必要な能力と代替操作を表示する。
-入力を無視したり、成功していない操作を成功表示したりしてはならない。
+Where terminal capability falls short, fall back to an available mode or
+display the required capability and an alternative operation. Input must
+never be ignored, and an operation that did not succeed must never be
+shown as successful.
 
 ## Architectural invariants
 
-1. text、cursor、selection、transaction、undo、display mapはZed Editor/Bufferをauthorityにする。
-2. worktree、LSP、Git、tasks、DAP、settings、toolchain、remote projectはZed Projectのstoreを
-   authorityにする。zec独自の並行modelへ同期しない。
-3. pane、item、focus、modal、navigation historyは1つのTerminal Workspace modelから操作する。
-   featureごとに独立したevent loopやfocus flagを増やさない。
-4. rendererはimmutable snapshotだけを読み、frame描画中にdomain stateを変更しない。
-5. Zedの公開APIが不足する場合は、logicをzecへcopyする前に小さなpresentation-neutral hookを
-   upstreamへ追加できる形にする。patchは固定Zed revisionごとにtestする。
-6. network、process execution、extension、agent、collaboration、remote接続は権限境界を持ち、
-   silent elevationを行わない。
-7. 各milestoneはそれ以前のcanonical gateを完全に再実行する。後段機能による回帰を既知制約として
-   bypassしない。
+1. Text, cursor, selection, transactions, undo, and the display map take
+   Zed Editor/Buffer as authority.
+2. Worktrees, LSP, Git, tasks, DAP, settings, toolchains, and remote
+   projects take Zed Project stores as authority. Nothing syncs into a
+   parallel zec model.
+3. Panes, items, focus, modals, and navigation history operate through
+   one Terminal Workspace model. No per-feature event loops or focus
+   flags are added.
+4. The renderer reads only immutable snapshots and never mutates domain
+   state during a frame.
+5. Where Zed's public APIs fall short, a small presentation-neutral hook
+   is shaped for upstreaming before copying logic into zec. Patches are
+   tested per pinned Zed revision.
+6. Network, process execution, extensions, agents, collaboration, and
+   remote connections have permission boundaries with no silent
+   elevation.
+7. Each milestone fully re-runs every earlier canonical suite.
+   Regressions caused by later features are never bypassed as known
+   constraints.
 
 ## Terminal Workspace primitives
 
-後続featureが共有するpresentation型を次に固定する。
+The presentation types shared by later features are fixed as:
 
-- `Item`: Editor、MultiBuffer、Terminal、Diff、Markdown、Image、Notebook、Settings
-- `Layout`: tab strip、split tree、dock、panel、overlay stack
-- `Overlay`: prompt、completion、hover、menu、picker、confirmation、notification
-- `Collection`: list、tree、table、virtualized result set
-- `Action`: Zed action ID、key context、availability、dispatch result
-- `Capability`: keyboard protocol、color、mouse、clipboard、image、hyperlink、focus event
+- `Item`: Editor, MultiBuffer, Terminal, Diff, Markdown, Image, Notebook,
+  Settings
+- `Layout`: tab strip, split tree, dock, panel, overlay stack
+- `Overlay`: prompt, completion, hover, menu, picker, confirmation,
+  notification
+- `Collection`: list, tree, table, virtualized result set
+- `Action`: Zed action id, key context, availability, dispatch result
+- `Capability`: keyboard protocol, color, mouse, clipboard, image,
+  hyperlink, focus events
 
-Quick Open、検索、Save Asなど既存のsingle-purpose UIは、対応する共通primitiveが導入された
-milestoneで同じreducerへ移す。移行中も本文やZed stateをprimitive側へ複製しない。
+Existing single-purpose UIs — Quick Open, search, Save As — move onto the
+same reducer at the milestone that introduces the corresponding shared
+primitive. During migration, text and Zed state are still never
+duplicated into the primitives.
 
 ## Milestones
 
 ### Alpha 1: repository editing loop
 
-file discovery、basic project search、複数file編集、保存、terminal lifecycleを保証する。
-既存の[`alpha-1.md`](alpha-1.md)をnormative contractとする。
+Guarantees file discovery, basic project search, multi-file editing,
+saving, and terminal lifecycle. The existing [`alpha-1.md`](alpha-1.md)
+is the normative contract.
 
 ### Alpha 2: Project-backed language editing loop
 
-Zed Project、settings、command palette、LSP、completion、diagnostics、navigation、code action、rename、
-format、language系MultiBufferをconsoleから完結させる。normative contractは
-[`alpha-2.md`](alpha-2.md)とする。
+Completes the Zed Project, settings, command palette, LSP, completion,
+diagnostics, navigation, code actions, rename, formatting, and
+language-oriented MultiBuffers from the console. The normative contract
+is [`alpha-2.md`](alpha-2.md).
 
 ### Alpha 3: terminal workspace
 
-pane/dock、project panel、outline、breadcrumbs、完全なproject search/replace、navigation history、
-advanced editingとsession restoreを共通Terminal Workspace上へ統合する。
-normative contractは[`alpha-3.md`](alpha-3.md)とする。実装とlocal shortened actual-binary gateは完了し、
-固定scaleのhosted evidence待ちである。
+Integrates panes/docks, the project panel, outline, breadcrumbs, complete
+project search/replace, navigation history, advanced editing, and session
+restore onto the shared Terminal Workspace. The normative contract is
+[`alpha-3.md`](alpha-3.md). Implementation and the local shortened
+actual-binary suite are complete; fixed-scale hosted evidence is pending.
 
 ### Beta 1: local development loop
 
-Git、integrated terminal、tasks/test、DAP debugger、REPL/notebookとcrash recoveryを保証する。
-Git、terminal、tasks、DAP debugger、debug console、native Zed Notebook、Alpha 3由来の
-session/crash recoveryはimplemented candidateであり、[`beta-1.md`](beta-1.md)がcontractと
-local machine evidenceを定める。Notebookは独立したactual-binary kernel証跡を持ち、debug consoleの
-完成から推論していない。
+Guarantees Git, the integrated terminal, tasks/tests, the DAP debugger,
+REPL/notebook, and crash recovery. Git, terminal, tasks, the DAP
+debugger, the debug console, the native Zed Notebook, and the
+session/crash recovery inherited from Alpha 3 are implemented candidates;
+[`beta-1.md`](beta-1.md) defines the contract and local machine evidence.
+Notebook has independent actual-binary kernel evidence and is not
+inferred from the completion of the debug console.
 
 ### Beta 2: ecosystem and remote
 
-extension、theme、全keymap、package/update、large-file path、rich content、SSH/WSL/dev-container、
-Linux/Windows/macOSの配布と互換性を保証する。
-ExtensionStore/host、development extension、theme/icon theme、settings/keymap、manifest検証付きupdate、
-6-target release assembly、Zed remote protocolを使うSSH remote workspaceはimplemented candidateであり、
-Markdown preview、画像protocol/fallback、画像tab/session、10万行・64 KiB行のlarge-file pathも
-implemented candidateである。[`beta-2.md`](beta-2.md)がcontractとlocal machine evidenceを定める。
-public registryのhosted実証、OS署名、WSL/containerのnative-platform実証は未完了であり、配布workflowや
-SSH実証の存在だけからそれらを推論してはならない。
+Guarantees extensions, themes, the full keymap, package/update, the
+large-file path, rich content, SSH/WSL/dev-container, and
+distribution/compatibility across Linux/Windows/macOS. The
+ExtensionStore/host, development extensions, theme/icon themes,
+settings/keymap, manifest-verified updates, 6-target release assembly,
+and the SSH remote workspace over Zed's remote protocol are implemented
+candidates; Markdown preview, image protocols/fallbacks,
+image tabs/sessions, and the 100k-line / 64 KiB-line large-file path are
+implemented candidates as well. [`beta-2.md`](beta-2.md) defines the
+contract and local machine evidence. Hosted proof against the public
+registry, OS signing, and native-platform proof for WSL/containers remain
+incomplete and must not be inferred from the mere existence of the
+distribution workflow or the SSH proof.
 
 ### Parity 1: AI and collaboration
 
-Zed Agent、external ACP agent、MCP、skills/instructions、edit prediction、inline assistant、
-channels、following、channel notesを統合済みである。voiceとscreen shareは`external-bridge`として
-明示確認、能力検出、開始・停止・error・process回収をzecから操作する。実装、authority、安全条件、
-actual-binary evidenceは[`parity-1.md`](parity-1.md)をnormative contractとする。
+Zed Agent, external ACP agents, MCP, skills/instructions, edit
+prediction, the inline assistant, channels, following, and channel notes
+are integrated. Voice and screen share are `external-bridge`: explicit
+confirmation, capability detection, start/stop/error, and process
+collection are operated from zec. Implementation, authority, safety
+conditions, and actual-binary evidence take
+[`parity-1.md`](parity-1.md) as the normative contract.
 
-AI、共同編集、mediaはimplemented candidateである。live Zed channelの2-client同時編集、各provider、
-parallel-agent、desktop capture/playback、macOS/Windowsのhosted evidenceは未完了であり、それらを
-fixture/local PTYの成功から`verified`と推論してはならない。
+AI, co-editing, and media are implemented candidates. Two-client
+simultaneous editing on a live Zed channel, each provider,
+parallel-agent, desktop capture/playback, and macOS/Windows hosted
+evidence remain incomplete and must not be inferred as `verified` from
+fixture/local PTY success.
 
 ## Completion rule
 
-長期目標の完了は次をすべて満たした時だけ宣言する。
+The long-term goal is declared complete only when all of the following
+hold.
 
-1. `zed-parity-v1.json`の全capabilityが`verified`である。
-2. 各capabilityのevidenceがdefault branch上のretryなしのcanonical CI runを指す。
-3. pinned Zed revisionとの差分監査で新しいuser-facing domainが未登録ではない。
-4. fresh installから各platformの総合actual-binary scenarioが成功する。
-5. terminal capability不足時のfallbackとerrorがPTY/ConPTY試験で検証される。
-6. source of truth、process cleanup、data safety、権限境界の全invariantが回帰gateを通る。
+1. Every capability in `zed-parity-v1.json` is `verified`.
+2. Every capability's evidence points at a retry-free canonical CI run on
+   the default branch.
+3. A diff audit against the pinned Zed revision shows no unregistered new
+   user-facing domain.
+4. The comprehensive actual-binary scenario succeeds from a fresh install
+   on every platform.
+5. Fallbacks and errors under missing terminal capabilities are verified
+   by PTY/ConPTY tests.
+6. Every invariant — source of truth, process cleanup, data safety,
+   permission boundaries — passes the regression suites.

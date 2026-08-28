@@ -157,17 +157,17 @@ The local deterministic gate is:
 cargo fmt --all -- --check
 cargo test --locked --bin zec -- --test-threads=1
 cargo test --locked --test update_cli -- --test-threads=1
-cargo test --locked --test pty_acceptance \
-  beta_2_extensions_themes_settings_and_keymap_run_through_the_actual_binary \
+cargo test --locked --test e2e_tui \
+  extensions_themes_settings_and_keymap_run_through_the_actual_binary \
   -- --test-threads=1
-cargo test --locked --test pty_acceptance \
-  beta_2_markdown_and_images_run_through_zed_project_in_the_actual_binary \
+cargo test --locked --test e2e_tui \
+  markdown_and_images_run_through_zed_project_in_the_actual_binary \
   -- --exact --test-threads=1
-cargo test --locked --test pty_acceptance \
-  beta_2_large_file_opens_navigates_edits_and_saves_in_the_actual_binary \
+cargo test --locked --test e2e_tui \
+  large_file_opens_navigates_edits_and_saves_in_the_actual_binary \
   -- --exact --test-threads=1
-ZEC_REQUIRE_REMOTE_SSH=1 cargo test --locked --test pty_acceptance \
-  beta_2_remote_ssh_uses_zed_project_authorities_in_the_actual_binary \
+ZEC_REQUIRE_REMOTE_SSH=1 cargo test --locked --test e2e_tui \
+  remote_ssh_uses_zed_project_authorities_in_the_actual_binary \
   -- --exact --test-threads=1
 python3 script/release-manifest self-test
 ```

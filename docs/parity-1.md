@@ -105,17 +105,17 @@ cargo fmt --all -- --check
 cargo check --locked --offline --bin zec
 cargo test --locked --offline --bin zec -- --test-threads=1
 cargo test --locked --offline --test parity_contract -- --test-threads=1
-cargo test --locked --offline --test pty_acceptance -- --test-threads=1
+cargo test --locked --offline --test e2e_tui -- --test-threads=1
 ```
 
-`pty_acceptance` exercises the real `zec` binary for:
+`e2e_tui` exercises the real `zec` binary for:
 
 - `zed_edit_prediction_renders_and_accepts_through_the_actual_binary`;
 - `zed_inline_assistant_streams_previews_rejects_accepts_and_undoes_through_the_actual_binary`;
-- `beta_3_agent_acp_permissions_and_mcp_run_through_the_actual_binary`;
-- `beta_3_native_zed_agent_and_local_commands_run_through_the_actual_binary`;
-- `parity_1_collaboration_notes_follow_invites_and_media_run_through_the_actual_binary`;
-- `parity_1_notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary`.
+- `agent_acp_permissions_and_mcp_run_through_the_actual_binary`;
+- `native_zed_agent_and_local_commands_run_through_the_actual_binary`;
+- `collaboration_notes_follow_invites_and_media_run_through_the_actual_binary`;
+- `notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary`.
 
 The Notebook scenario additionally proves trust gating, native kernelspec launch, Markdown/code/stream
 and image fallback projection, split authority sharing, nbformat persistence, failed-kernel output,

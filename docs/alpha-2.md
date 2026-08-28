@@ -2,229 +2,307 @@
 
 Contract status: Accepted (2026-08-26)
 
-Gate statusは保存しない。candidate commitとretryなしのhosted gate artifact、および
-evidence-only direct childの検証結果から導出する。Alpha 1のcanonical evidence規則を継承し、
-Alpha 2 promotionはAlpha 1を再検証する。
+Gate status is never stored. It derives from the candidate commit, the
+retry-free hosted gate artifacts, and the verification results of the
+evidence-only direct child. The canonical evidence rules of Alpha 1 are
+inherited, and an Alpha 2 promotion re-verifies Alpha 1.
 
 ## Implementation checkpoint (not gate status)
 
-2026-08-26時点のworking candidateは、単一Zed Project、native LanguageRegistry/LspStore、
-command palette、completion、hover、project diagnostics、definition/type-definition/references、
-project symbols、back/forward history、editable MultiBuffer、prepareRename/rename、code actions、
-document/range formattingをproduction経路へ接続している。settings/keymapのprecedenceとlive reload、
-format-on-save、WorkspaceEditのfile operation、worktree trust、path/symlink/special-file境界、
-LSP failure/restart/process cleanup、大容量payloadの上限もactual `zec` binaryで検査する。
+The working candidate as of 2026-08-26 wires a single Zed Project, the
+native LanguageRegistry/LspStore, the command palette, completion, hover,
+project diagnostics, definition/type-definition/references, project
+symbols, back/forward history, editable MultiBuffers,
+prepareRename/rename, code actions, and document/range formatting into the
+production paths. Settings/keymap precedence and live reload,
+format-on-save, WorkspaceEdit file operations, worktree trust,
+path/symlink/special-file boundaries, LSP failure/restart/process cleanup,
+and large-payload limits are also checked against the actual `zec` binary.
 
-決定的fixture LSPは通常の`rust-analyzer` PATH discoveryで起動する。integration testに加え、
-20 fresh processのlanguage/PTY workflow、15 failure scenarioを各20 fresh processで実行する341 caseの
-acceptance harnessと、raw sample・correlation ID・VmHWMを保存するbenchmark harnessが存在する。
-短縮sampleでの開発用runは完走しているが、これはB0〜B9のcanonical Pass宣言ではない。
-retryなしのhosted candidate artifactとevidence-only promotionが成功するまで台帳は`candidate`に留め、
-下記single decision ruleを短縮しない。
+The deterministic fixture LSP starts through normal `rust-analyzer` PATH
+discovery. Alongside the integration tests there is a 341-case acceptance
+harness — the language/PTY workflow across 20 fresh processes plus 15
+failure scenarios at 20 fresh processes each — and a benchmark harness
+that stores raw samples, correlation ids, and VmHWM. A development run
+with shortened samples has completed, but that is not a canonical Pass
+declaration for B0–B9. Until the retry-free hosted candidate artifacts and
+the evidence-only promotion succeed, the ledger stays at `candidate` and
+the single decision rule below is not shortened.
 
 ## Outcome
 
-Linux上のfreshなRust repositoryを`zec DIRECTORY`で開き、Zedのlocal `Project`、settings、
-LanguageRegistry、LspStoreを通して、command discovery、completion、diagnostics、hover、
-definition/reference navigation、code action、rename、format、複数file保存をconsoleだけで完了できる
-状態をAlpha 2とする。
+Alpha 2 is the state where a fresh Rust repository on Linux, opened with
+`zec DIRECTORY`, can complete command discovery, completion, diagnostics,
+hover, definition/reference navigation, code actions, rename, formatting,
+and multi-file saves entirely from the console, through Zed's local
+`Project`, settings, LanguageRegistry, and LspStore.
 
-外部language serverはnetworkから取得せず、gateがbuildした決定的なfixture serverをproductionの
-PATH discoveryで選ぶ。test-only providerをzecへinjectせず、実行中binaryは通常のProject/LSP経路を使う。
+No external language server is fetched from the network; the gate-built
+deterministic fixture server is selected by production PATH discovery. No
+test-only provider is injected into zec; the running binary uses the
+normal Project/LSP paths.
 
 ## Single decision rule
 
-candidateは次のcommandをclean checkoutで順に実行し、すべてが1回でexit 0にならなければならない。
-具体的なbinary名と引数はfixture/harness実装と同じcommitで固定し、この節へ追加するまでは
-Alpha 2をpromotionしてはならない。
+A candidate must run the following commands in order on a clean checkout,
+all exiting 0 on the first attempt. The concrete binary names and
+arguments are pinned to the same commit as the fixture/harness
+implementation, and Alpha 2 must not be promoted until they are appended
+to this section.
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
-rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
 /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
-cargo test --locked --release --features alpha-1-linux \
+cargo test --locked --release --features e2e-linux \
   --bin zec -- --test-threads=1
-cargo test --locked --release --features alpha-1-linux \
-  --test parity_contract --test pty_acceptance \
-  --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures \
+cargo test --locked --release --features e2e-linux \
+  --test parity_contract --test e2e_tui \
+  --test language_service --test settings_reload --test lsp_failures \
   -- --test-threads=1
-cargo build --locked --release --features alpha-1-linux \
-  --bin zec --bin alpha_1_acceptance --bin alpha_1_bench \
-  --bin alpha_2_fixture_lsp --bin alpha_2_acceptance --bin alpha_2_bench
+cargo build --locked --release --features e2e-linux \
+  --bin zec --bin e2e_repository --bin e2e_repository_bench \
+  --bin fixture_lsp --bin e2e_language --bin e2e_language_bench
 mkdir -p target/alpha-2/alpha-1
 timeout --signal=TERM --kill-after=5s 45m \
-  ./target/release/alpha_1_acceptance --zec ./target/release/zec \
+  ./target/release/e2e_repository --zec ./target/release/zec \
   --repo . --assert --report target/alpha-2/alpha-1/acceptance.json
-./target/release/alpha_1_acceptance \
+./target/release/e2e_repository \
   --verify-report target/alpha-2/alpha-1/acceptance.json
 timeout --signal=TERM --kill-after=5s 20m \
-  ./target/release/alpha_1_bench --zec ./target/release/zec \
+  ./target/release/e2e_repository_bench --zec ./target/release/zec \
   --assert --report target/alpha-2/alpha-1/benchmark.json
-./target/release/alpha_1_bench \
+./target/release/e2e_repository_bench \
   --verify-report target/alpha-2/alpha-1/benchmark.json
 timeout --signal=TERM --kill-after=5s 45m \
-  ./target/release/alpha_2_acceptance --zec ./target/release/zec \
-  --lsp ./target/release/alpha_2_fixture_lsp --assert \
+  ./target/release/e2e_language --zec ./target/release/zec \
+  --lsp ./target/release/fixture_lsp --assert \
   --report target/alpha-2/acceptance.json
-./target/release/alpha_2_acceptance \
+./target/release/e2e_language \
   --verify-report target/alpha-2/acceptance.json
 timeout --signal=TERM --kill-after=5s 20m \
-  ./target/release/alpha_2_bench --zec ./target/release/zec \
-  --lsp ./target/release/alpha_2_fixture_lsp --assert \
+  ./target/release/e2e_language_bench --zec ./target/release/zec \
+  --lsp ./target/release/fixture_lsp --assert \
   --report target/alpha-2/benchmark.json
-./target/release/alpha_2_bench \
+./target/release/e2e_language_bench \
   --verify-report target/alpha-2/benchmark.json
 (cd target/alpha-2 && find . -type f ! -name SHA256SUMS -print0 \
   | sort -z | xargs -0 sha256sum > SHA256SUMS)
 ./script/verify-alpha-2-artifact target/alpha-2
 ```
 
-未実装binaryまたはreportが存在しない状態はFailであり、上記blockをskipする暫定Passは認めない。
+A state with unimplemented binaries or missing reports is Fail; no
+provisional Pass that skips the block above is recognized.
 
 ## Fixed environment and fixture LSP
 
-- Linux runnerはGitHub-hosted Ubuntu 24.04 x86_64、localeは`C.UTF-8`、terminalは
-  `xterm-256color` 120x40とする。
-- fixture repositoryはRust file 8件、設定file、definition/reference/rename/code-action/format対象、
-  Unicode identifier、CRLF、同名symbol、ignored fileを含む。
-- harnessはtemporary `bin` directoryへfixture serverを`rust-analyzer`としてlinkまたはcopyし、
-  childだけの`PATH`先頭へ置く。userのglobal Zed/Cargo configはfresh temporary directoryへ分離する。
-- fixture serverは`--help`を成功させ、stdio上のLSP 3.17 framingを使う。initialize capability、
-  completion、hover、publishDiagnostics、definition、references、prepareRename/rename、codeAction、
-  formatting、shutdown/exitを決定的に実装する。
-- request/notification logはserver自身がappend-only JSONLへ記録する。oracleは画面、disk manifest、
-  server logの三者であり、zec内部stateをtest-only APIから読まない。
-- serverのresponse順序、delay、crash、invalid responseはscenario fileで制御する。production zecへ
-  scheduler/provider hookを置かない。
+- The Linux runner is GitHub-hosted Ubuntu 24.04 x86_64, locale
+  `C.UTF-8`, terminal `xterm-256color` at 120x40.
+- The fixture repository contains 8 Rust files, config files,
+  definition/reference/rename/code-action/format targets, Unicode
+  identifiers, CRLF, same-named symbols, and ignored files.
+- The harness links or copies the fixture server as `rust-analyzer` into a
+  temporary `bin` directory placed at the head of the child-only `PATH`.
+  The user's global Zed/Cargo config is isolated into fresh temporary
+  directories.
+- The fixture server succeeds at `--help` and speaks LSP 3.17 framing over
+  stdio. It deterministically implements initialize capabilities,
+  completion, hover, publishDiagnostics, definition, references,
+  prepareRename/rename, codeAction, formatting, and shutdown/exit.
+- The request/notification log is written by the server itself to
+  append-only JSONL. The oracles are the screen, the disk manifest, and
+  the server log; zec-internal state is never read through test-only
+  APIs.
+- Server response order, delays, crashes, and invalid responses are
+  controlled by scenario files. No scheduler/provider hook is placed in
+  production zec.
 
 ## Gates
 
 ### B0. Alpha 1 and parity-ledger regression
 
-- Alpha 1のcanonical command setを同じcandidateで再実行し、既存caseを削除、ignore、filterしない。
-- `tests/parity_contract.rs`を実行し、全capability ID、delivery mode、milestone、evidence path、
-  pinned Zed revisionの整合を確認する。
-- `PROJECT_SERVICE_GRAPH`、`COMMAND_PALETTE`、`LANGUAGE_INTELLIGENCE`、
-  `LANGUAGE_MULTIBUFFER`、`SETTINGS_KEYMAP`はAlpha 2 promotionでのみ`verified`へ変更する。
+- Re-run Alpha 1's canonical command set on the same candidate without
+  deleting, ignoring, or filtering existing cases.
+- Run `tests/parity_contract.rs`, checking consistency of every
+  capability id, delivery mode, milestone, evidence path, and the pinned
+  Zed revision.
+- `PROJECT_SERVICE_GRAPH`, `COMMAND_PALETTE`, `LANGUAGE_INTELLIGENCE`,
+  `LANGUAGE_MULTIBUFFER`, and `SETTINGS_KEYMAP` change to `verified` only
+  at the Alpha 2 promotion.
 
 ### B1. Project is the sole project-service authority
 
-controlled headless caseとactual binaryのtraceで次をassertする。
+Controlled headless cases and actual-binary traces assert:
 
-- repository sessionにつきZed `Project` Entityは1個である。
-- WorktreeStore、BufferStore、LspStore、GitStore、TaskStore、DapStore、SettingsObserver、
-  ToolchainStoreはそのProjectから取得し、zecが同じrepository用のstoreを並行生成しない。
-- Quick Open、project search、open/save/reloadはProject所有の同じWorktree/Buffer identityを使い、
-  Alpha 1のalias dedupeとoutside-file境界を維持する。
-- scratch Save As後も同じBuffer Entity、Editor、selection、undo historyを維持する。
-- Project drop後5秒以内にfixture LSP、watcher、background taskを回収し、descendant processと
-  harness fd countがbaselineへ戻る。
+- Exactly one Zed `Project` Entity per repository session.
+- WorktreeStore, BufferStore, LspStore, GitStore, TaskStore, DapStore,
+  SettingsObserver, and ToolchainStore are obtained from that Project;
+  zec never creates parallel stores for the same repository.
+- Quick Open, project search, and open/save/reload use the same
+  Project-owned Worktree/Buffer identity, preserving Alpha 1's alias
+  dedupe and outside-file boundary.
+- After a scratch Save As, the same Buffer Entity, Editor, selection, and
+  undo history are preserved.
+- Within 5 seconds of the Project drop, the fixture LSP, watchers, and
+  background tasks are collected; descendant processes and the harness fd
+  count return to baseline.
 
-実装確認のためのstatic型名だけをoracleにしない。identity、request trace、external effectを検証する。
+Static type names alone are not the oracle; identity, request traces, and
+external effects are verified.
 
 ### B2. Settings, language registration, and command discovery
 
-- global settings、repositoryの`.zed/settings.json`、language overrideをZed SettingsObserver経路で読み、
-  precedenceをfixture JSONと完全一致させる。
-- settings変更を実行中に検出し、completion有効/無効、format-on-save、tab sizeを再起動なしで反映する。
-- built-in native languageに加え、first-line/shebang、file association、injectionをZed registryで解決する。
-- `Ctrl-Shift-P`でcommand paletteを開き、現在focusで利用可能なactionだけを決定的に絞り込む。
-  action ID、表示名、key binding、enabled stateを持ち、未接続actionを成功表示しない。
-- user keymapでcommand palette、LSP action、既存編集actionをrebindでき、default keymapとのprecedenceを
-  Zedと同じkey contextで解決する。
+- Global settings, the repository's `.zed/settings.json`, and language
+  overrides are read through the Zed SettingsObserver path, with
+  precedence matching the fixture JSON exactly.
+- Settings changes are detected at runtime; completion enable/disable,
+  format-on-save, and tab size apply without a restart.
+- Beyond the built-in native languages, first-line/shebang, file
+  associations, and injections resolve through the Zed registry.
+- `Ctrl-Shift-P` opens the command palette, deterministically filtering to
+  actions available in the current focus. It carries action ids, display
+  names, key bindings, and enabled state, and never shows an unwired
+  action as successful.
+- The user keymap can rebind the command palette, LSP actions, and
+  existing editing actions, resolving precedence against the default
+  keymap in the same key contexts as Zed.
 
 ### B3. Completion, hover, and diagnostics
 
-actual-binary PTY caseは次を20 fresh processで実行する。
+The actual-binary PTY case runs the following in 20 fresh processes.
 
-1. marker位置でcompletionを明示起動し、fixture serverの全itemをlabel/detail/kind順のpickerに表示する。
-2. filter、上下移動、documentation表示、cancel、commitを操作し、text editとadditional text editを
-   Zed Editor transactionとして適用する。`Ctrl-Z` 1回でcommit前へ戻す。
-3. request Aを遅延させたまま位置/queryを変更してrequest Bを完了し、その後Aを返してもBのpopupと
-   Bufferだけが残ることを確認する。
-4. hoverを開き、plain textとMarkdownをterminal-adapted viewに表示し、linkはOSC 8対応時だけ
-   hyperlinkとして出し、非対応時もURL textを残す。
-5. warning/error/hint diagnosticsをunderlineまたは明示markerで描き、status summary、next/previous、
-   detail overlay、project diagnostics一覧を操作する。修正後のstale diagnosticを除去する。
+1. Explicitly trigger completion at a marker position and show every
+   fixture-server item in a picker ordered by label/detail/kind.
+2. Operate filtering, up/down movement, documentation display, cancel,
+   and commit, applying text edits and additional text edits as Zed
+   Editor transactions. One `Ctrl-Z` returns to the pre-commit state.
+3. With request A delayed, change position/query and complete request B;
+   returning A afterwards leaves only B's popup and Buffer.
+4. Open hover, showing plain text and Markdown in the terminal-adapted
+   view; links appear as hyperlinks only where OSC 8 is available, with
+   the URL text still present otherwise.
+5. Draw warning/error/hint diagnostics with underlines or explicit
+   markers, and operate the status summary, next/previous, detail
+   overlay, and project diagnostics list. Stale diagnostics disappear
+   after fixes.
 
-LSP UTF-16位置とZed Buffer/Display、terminal grapheme/cellの変換をUnicode fixtureで検証し、
-byte column、Unicode scalar、UTF-16 unitを混同しない。
+LSP UTF-16 positions versus Zed Buffer/Display versus terminal
+grapheme/cell conversions are verified with Unicode fixtures; byte
+columns, Unicode scalars, and UTF-16 units are never confused.
 
 ### B4. Semantic navigation and editable MultiBuffer
 
-- definition、type definition、references、project symbolsをcommand paletteとdefault key bindingから
-  実行できる。
-- single targetは同じまたは別fileへ移動し、back/forward navigation historyで元のselectionとviewportへ戻る。
-- multiple targets、references、project diagnosticsはZed MultiBufferのexcerptとして1 itemへ表示する。
-  excerpt header、path、context、cursor、selectionを描画し、source Bufferと内容を複製しない。
-- MultiBuffer内の編集、undo、saveは全source Bufferへ反映し、dirty/conflict protectionはAlpha 1と同じにする。
-- resultが遅れて届いた時に、閉じたitem、別pane、別projectへ適用しない。
+- Definition, type definition, references, and project symbols run from
+  both the command palette and the default key bindings.
+- A single target navigates within the same or another file, and
+  back/forward history returns to the original selection and viewport.
+- Multiple targets, references, and project diagnostics display as Zed
+  MultiBuffer excerpts in one item, rendering excerpt headers, paths,
+  context, cursor, and selection without duplicating source Buffer
+  contents.
+- Edits, undo, and save inside a MultiBuffer propagate to all source
+  Buffers, with the same dirty/conflict protection as Alpha 1.
+- Late-arriving results are never applied to a closed item, another pane,
+  or another project.
 
 ### B5. Rename, code actions, and formatting
 
-- prepareRenameのplaceholderをpromptへ出し、invalid name/error/cancelで本文を変更しない。
-- rename WorkspaceEditが既存file 3件へ及ぼすtext editsをpreview MultiBufferに表示し、acceptで適用、
-  rejectで無変更、適用後のundoで全Bufferを一貫して戻す。
-- create/rename/delete file operationを含むWorkspaceEditは対象pathと作用を事前表示し、明示accept後だけ
-  Project APIへ渡す。repository外、symlink escape、special fileは拒否する。
-- code action pickerはkind/preferred/disabled reasonを表示し、editとcommandの成功・失敗を区別する。
-- document formattingとrange formattingを実行し、format-on-saveは1回のsave requestにつき高々1回、
-  formatter failure時はdirty本文を保持してsave失敗を表示する。
-- rename、code action、format後のexact manifest、LSP request log、undo/redo結果をoracleと一致させる。
+- The prepareRename placeholder appears in the prompt; invalid names,
+  errors, and cancel leave the text unchanged.
+- The text edits a rename WorkspaceEdit makes across 3 existing files are
+  shown in a preview MultiBuffer; accept applies, reject changes nothing,
+  and undo after application restores every Buffer consistently.
+- WorkspaceEdits containing create/rename/delete file operations show
+  their target paths and effects up front and reach the Project API only
+  after explicit accept. Outside-repository targets, symlink escapes, and
+  special files are refused.
+- The code action picker shows kind/preferred/disabled reasons and
+  distinguishes edit and command success/failure.
+- Document formatting and range formatting run; format-on-save executes
+  at most once per save request, and on formatter failure the dirty text
+  is kept and the save failure is shown.
+- After rename, code actions, and formatting, the exact manifest, the LSP
+  request log, and undo/redo results match the oracles.
 
 ### B6. Overlay, focus, and input routing
 
-command palette、completion、hover、diagnostic detail、code action、rename promptは共通overlay stackを使う。
+The command palette, completion, hover, diagnostic detail, code action,
+and rename prompts use a common overlay stack.
 
-- 最上位overlayだけがkey/paste/mouse入力を受け、本文shortcutへ漏らさない。
-- `Esc`は最上位だけを閉じ、nested overlayを順に戻る。tab/pane切替、resize、LSP redrawでfocusを失わない。
-- terminalが区別できないkey chordにはportable bindingを必ず1つ用意する。
-- Kitty keyboard protocolまたはmodifyOtherKeysが利用可能なら拡張keyを使い、未対応terminalでは
-  capability negotiation後にfallbackをstatusへ表示する。
-- overlay result、error、cancelはsession IDとgenerationを持ち、閉じたsessionへのstale completionを捨てる。
+- Only the topmost overlay receives key/paste/mouse input; nothing leaks
+  into body shortcuts.
+- `Esc` closes only the topmost overlay, unwinding nested overlays in
+  order. Tab/pane switches, resize, and LSP redraws never steal focus.
+- Every key chord a terminal cannot distinguish has exactly one portable
+  binding.
+- Where the Kitty keyboard protocol or modifyOtherKeys is available,
+  extended keys are used; on unsupported terminals the fallback is shown
+  in the status after capability negotiation.
+- Overlay results, errors, and cancels carry a session id and generation,
+  and stale completions into a closed session are dropped.
 
 ### B7. Failure, security, and process lifecycle
 
-各scenarioを20 fresh processで実行する。
+Each scenario runs in 20 fresh processes.
 
-- server not found、spawn failure、initialize error、malformed frame、request error、unexpected EOF、crash、
-  hang、restartを発生させる。
-- error後も既存Buffer、selection、undo、dirty stateを維持し、LSPなしの編集・保存・終了を続行できる。
-- hang中のrequest cancel、tab close、project close、quitは250 ms以内にUIへ反映し、quit時は5秒以内に
-  childをterminate後killして回収する。
-- workspace edit、command、document linkはworktree trustとpath boundaryを検査し、未承認のrepository外
-  mutation/process起動を行わない。
-- server stderrの巨大出力、10,000 diagnostics/items、64 KiB documentationでqueueと描画memoryをboundedにする。
+- Server not found, spawn failure, initialize error, malformed frames,
+  request errors, unexpected EOF, crash, hang, and restart are induced.
+- After an error, the existing Buffers, selection, undo, and dirty state
+  are preserved, and LSP-less editing, saving, and exiting continue.
+- Request cancel during a hang, tab close, project close, and quit reach
+  the UI within 250 ms; on quit the child is terminated then killed and
+  collected within 5 seconds.
+- Workspace edits, commands, and document links are checked against
+  worktree trust and path boundaries; no unapproved outside-repository
+  mutation or process start occurs.
+- Giant server stderr output, 10,000 diagnostics/items, and 64 KiB
+  documentation keep queues and render memory bounded.
 
 ### B8. Responsiveness and resource envelope
 
-fixture serverのresponse delayを0にして次を測定する。
+Measured with the fixture server's response delay at 0:
 
-- Project追加後のdirectory Ready: Alpha 1 startup p95 3,000 ms以下を維持する。
-- LSP initializeからlanguage-ready表示: 20 samplesのp95 1,500 ms以下、max 3,000 ms以下。
-- completion request flushからpopup complete: 10 warm-up後100 samplesのp95 100 ms以下、max 250 ms以下。
-- diagnostics publishからvisible marker: 100 samplesのp95 100 ms以下、max 250 ms以下。
-- definition/reference responseからtarget/MultiBuffer visible: 各100 samplesのp95 150 ms以下、max 500 ms以下。
-- 3 file rename previewからapply/save完了: 20 samplesのp95 500 ms以下、max 1,500 ms以下。
-- 10,000 completion itemsとdiagnosticsを受けてもzec main processのVmHWMは1,610,612,736 bytes以下、
-  描画snapshotはviewportとvisible popup rowsにboundedである。
+- Directory Ready with the Project added: Alpha 1's startup p95 ≤
+  3,000 ms is maintained.
+- LSP initialize to the language-ready indicator: p95 ≤ 1,500 ms, max ≤
+  3,000 ms over 20 samples.
+- Completion request flush to popup complete: p95 ≤ 100 ms, max ≤ 250 ms
+  over 100 samples after 10 warm-ups.
+- Diagnostics publish to visible marker: p95 ≤ 100 ms, max ≤ 250 ms over
+  100 samples.
+- Definition/reference response to target/MultiBuffer visible: p95 ≤
+  150 ms, max ≤ 500 ms over 100 samples each.
+- 3-file rename preview to apply/save completion: p95 ≤ 500 ms, max ≤
+  1,500 ms over 20 samples.
+- Even receiving 10,000 completion items and diagnostics, the zec main
+  process VmHWM is ≤ 1,610,612,736 bytes, and the render snapshot stays
+  bounded to the viewport and visible popup rows.
 
-reportはraw sample、nearest-rank統計、VmHWM、request/response ID列、input/apply ID列を保持し、
-verify modeが再計算する。retry、warm cacheへのsample差し替え、outlier除外は行わない。
+The report retains raw samples, nearest-rank statistics, VmHWM,
+request/response id sequences, and input/apply id sequences, and verify
+mode recomputes them. No retries, no warm-cache sample substitution, no
+outlier exclusion.
 
 ### B9. CI evidence
 
-Alpha 1と同じcandidate `C` / evidence-only promotion `P`方式を使う。
+The same candidate `C` / evidence-only promotion `P` scheme as Alpha 1.
 
-1. `C`のpush eventで`Alpha 2 gate`をrun attempt 1、retry 0で成功させる。
-2. acceptance、benchmark、fixture server log、before/after manifest、environmentをartifactへ保存する。
-3. `P`は`docs/alpha-2-evidence.json`だけを追加する`C`のdirect childとする。
-4. evidence jobはSHA、event、attempt、唯一のrun ID、job conclusion、artifact ID/digest、report digest、
-   required case ID、全assert、`P^ == C`、変更pathをGitHub APIとlocal checkoutの双方から検証する。
-5. default branch上の`Alpha 2 evidence` job successだけをcanonical Passとする。
+1. On `C`'s push event, the `Alpha 2 gate` succeeds at run attempt 1 with
+   0 retries.
+2. Acceptance, benchmark, the fixture server log, before/after manifests,
+   and the environment are saved as artifacts.
+3. `P` is a direct child of `C` adding only `docs/alpha-2-evidence.json`.
+4. The evidence job verifies the SHA, event, attempt, unique run id, job
+   conclusion, artifact id/digest, report digests, required case ids,
+   every assertion, `P^ == C`, and the changed paths — from both the
+   GitHub API and the local checkout.
+5. Only a `success` `Alpha 2 evidence` job on the default branch is the
+   canonical Pass.
 
-promotion commitが追加する`docs/alpha-2-evidence.json`は次の形に固定する。4 reportのdigestは
-candidate artifactから計算し、`gate`と`artifact`の座標は同じretryなしrunから取得する。
+The `docs/alpha-2-evidence.json` added by the promotion commit is fixed to
+the following shape. The 4 report digests are computed from the candidate
+artifacts, and the `gate` and `artifact` coordinates come from the same
+retry-free run.
 
 ```json
 {
@@ -244,8 +322,8 @@ candidate artifactから計算し、`gate`と`artifact`の座標は同じretry�
   "reports": {
     "acceptance_sha256": "64 hexadecimal digits",
     "benchmark_sha256": "64 hexadecimal digits",
-    "alpha_1_acceptance_sha256": "64 hexadecimal digits",
-    "alpha_1_benchmark_sha256": "64 hexadecimal digits"
+    "e2e_repository_sha256": "64 hexadecimal digits",
+    "e2e_repository_benchmark_sha256": "64 hexadecimal digits"
   },
   "counts": {
     "acceptance_case_count": 341,
@@ -255,31 +333,38 @@ candidate artifactから計算し、`gate`と`artifact`の座標は同じretry�
 }
 ```
 
-`script/verify-alpha-2-evidence`はdirect-parent関係、変更path、run/job/artifactの一意性とdigest、
-全case ID、raw benchmark統計、correlation列、全embedded evidence file、Alpha 1再実行reportを独立に
-再検証する。
+`script/verify-alpha-2-evidence` independently re-verifies the
+direct-parent relation, the changed paths, run/job/artifact uniqueness and
+digests, every case id, the raw benchmark statistics, correlation
+sequences, every embedded evidence file, and the Alpha 1 re-run reports.
 
 ## Explicit exclusions from Alpha 2 gate
 
-次は長期parity scopeから除外せず、後続milestoneで測定する。
+The following are not excluded from long-term parity scope; they are
+measured by later milestones.
 
-- full project panel、pane split/dock、tab preview/pin/reorder、session restore
-- regex/path-filter project replaceと汎用search MultiBuffer
-- Git UI、integrated terminal、tasks、debugger、REPL/notebook
-- extension gallery、theme/icon、package/update、remote development
-- AI、ACP/MCP、edit prediction、collaboration、media bridge
-- terminal image、terminal-aware soft wrap、完全なmouse multi-selection
-- macOSのactual-binary gateとplatform別package
+- full project panel, pane split/dock, tab preview/pin/reorder, session
+  restore
+- regex/path-filter project replace and the general search MultiBuffer
+- Git UI, integrated terminal, tasks, debugger, REPL/notebook
+- extension gallery, theme/icon, package/update, remote development
+- AI, ACP/MCP, edit prediction, collaboration, media bridge
+- terminal images, terminal-aware soft wrap, full mouse multi-selection
+- macOS actual-binary suites and per-platform packages
 
-Alpha 2実装中にこれらを追加してもよいが、B0〜B9のPass条件を代替しない。
+These may be built during Alpha 2, but they do not substitute for the
+B0–B9 Pass conditions.
 
 ## Implementation order
 
-1. parity ledgerとfailing contract testsを追加する。
-2. current `FileServices`をZed `Project`所有storeへ移し、Alpha 1をgreenへ戻す。
-3. full language/settings initializationとfixture LSPを接続する。
-4. action registry、command palette、共通overlay stackを作る。
-5. completion/hover/diagnosticsを接続する。
-6. navigation、MultiBuffer、rename/code action/formatを接続する。
-7. failure/process/security/performance gateを閉じる。
-8. hosted candidateとevidence-only promotionをretryなしで通す。
+1. Add the parity ledger and failing contract tests.
+2. Move the current `FileServices` onto Zed `Project`-owned stores and
+   turn Alpha 1 green again.
+3. Wire full language/settings initialization and the fixture LSP.
+4. Build the action registry, the command palette, and the common overlay
+   stack.
+5. Wire completion/hover/diagnostics.
+6. Wire navigation, MultiBuffers, and rename/code actions/formatting.
+7. Close the failure/process/security/performance suites.
+8. Pass the hosted candidate and the evidence-only promotion without
+   retries.

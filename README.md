@@ -1,172 +1,223 @@
 # zec
 
-Zed の編集コアを使う CUI エディタです。repository/language editingとTerminal Workspace、
-Git/terminal/tasks/DAPのlocal development loopに加え、Zed extension host、theme、settings/keymap、
-manifest検証付きupdate、6-target release pipeline、Zed remote protocolによるSSH workspace、
-Markdown/画像、10万行large-file path、Zed Agent/ACP/MCP、edit prediction/inline assistant、
-channels/channel notes/following、voice/screen bridge、native Zed Notebookまでimplemented candidateです。
-機械可読台帳の27 capabilityすべてに実装証跡があります。Alpha 3の361-case actual-binary acceptanceと
-860-ID benchmarkはlocalで完走していますが、default-branch hosted evidence、live service、
-全platformの証跡待ちなので、まだverifiedでもproduction-readyでもありません。
+zec is a terminal editor built on Zed's editing core. It is an implemented
+candidate for repository/language editing, the terminal workspace, the local
+development loop (Git, terminal, tasks, DAP), the Zed extension host, themes,
+settings/keymap, manifest-verified updates, a 6-target release pipeline, SSH
+workspaces over Zed's remote protocol, Markdown and images, the 100k-line
+large-file path, Zed Agent/ACP/MCP, edit prediction and the inline assistant,
+channels/channel notes/following, the voice/screen bridge, and native Zed
+Notebooks. All 27 capabilities in the machine-readable ledger carry
+implementation evidence. The 361-case actual-binary acceptance suite and the
+860-id benchmark have completed locally, but default-branch hosted evidence,
+live services, and evidence on every platform are still pending, so zec is
+neither verified nor production-ready yet.
 
-現在は、GPUI runtime 上で `editor::Editor` を動かし、Crossterm から Zed の
-keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを描画します。
-Linuxではheadless platformを、Windowsでは非表示windowを作るnative platformを使います。
+Today zec runs `editor::Editor` on the GPUI runtime, feeds input from
+Crossterm into Zed's keymap, and renders text, cursor, selection, and syntax
+styles with Ratatui. Linux uses the headless platform; Windows uses the
+native platform with hidden windows.
 
-設計判断と今後の構成は [docs/architecture.md](docs/architecture.md) に、
-PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](docs/poc-graduation.md) に記録します。
-長期のZed体験parityは [docs/zed-parity.md](docs/zed-parity.md) と
-[docs/zed-parity-v1.json](docs/zed-parity-v1.json)で追跡します。repository editing loopは
-[docs/alpha-1.md](docs/alpha-1.md)、次のProject-backed language editing loopは
-[docs/alpha-2.md](docs/alpha-2.md)、Terminal Workspaceは[docs/alpha-3.md](docs/alpha-3.md)、
-local development loopは[docs/beta-1.md](docs/beta-1.md)、ecosystemと配布は
-[docs/beta-2.md](docs/beta-2.md)、AI/collaboration/mediaは
-[docs/parity-1.md](docs/parity-1.md)の機械判定contractで管理します。
-Windowsのビルド要件と検証範囲は[docs/windows.md](docs/windows.md)に記録します。
+Design decisions and the road ahead live in
+[docs/architecture.md](docs/architecture.md); PoC graduation criteria,
+verification records, and known constraints in
+[docs/poc-graduation.md](docs/poc-graduation.md). Long-term Zed-experience
+parity is tracked in [docs/zed-parity.md](docs/zed-parity.md) and
+[docs/zed-parity-v1.json](docs/zed-parity-v1.json). The repository editing
+loop is governed by the machine-checked contract in
+[docs/alpha-1.md](docs/alpha-1.md), the project-backed language editing loop
+by [docs/alpha-2.md](docs/alpha-2.md), the terminal workspace by
+[docs/alpha-3.md](docs/alpha-3.md), the local development loop by
+[docs/beta-1.md](docs/beta-1.md), ecosystem and distribution by
+[docs/beta-2.md](docs/beta-2.md), and AI/collaboration/media by
+[docs/parity-1.md](docs/parity-1.md). Windows build requirements and
+verification coverage are recorded in [docs/windows.md](docs/windows.md).
 
-Alpha 2の通常回帰は、unit/PTYに加えて次のactual-binary integration testで確認できます。
-canonicalな20-process acceptanceとbenchmark、Alpha 1再検証、evidence-only promotionを含む完全な
-判定手順は[docs/alpha-2.md](docs/alpha-2.md)を参照してください。
+The everyday regression run, on top of unit and PTY tests, is this
+actual-binary integration set; see [docs/alpha-2.md](docs/alpha-2.md) for
+the full judgment procedure including the canonical 20-process acceptance
+run, the benchmark, re-verification of the repository loop, and
+evidence-only promotion.
 
 ```sh
-cargo test --locked --test parity_contract --test pty_acceptance \
-  --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures \
+cargo test --locked --test parity_contract --test e2e_tui \
+  --test language_service --test settings_reload --test lsp_failures \
   -- --test-threads=1
 ```
 
-引数なしなら現在のdirectory、directoryを1つ渡した場合はそのdirectoryをrepository rootとして
-起動します。開発checkoutから実行する場合は、それぞれ`cargo run --`、
-`cargo run -- path/to/repository`と同じです。
+With no arguments zec opens the current directory; with one directory
+argument it opens that directory as the repository root. From a development
+checkout these are `cargo run --` and `cargo run -- path/to/repository`.
 
 ```sh
 zec
 zec DIRECTORY
 ```
 
-repository modeでは`Ctrl-P`でQuick Openを開き、root配下のfileを絞り込んで`Enter`で開けます。
-`Alt-F`はrepository全体の大文字小文字を区別するliteral検索です。結果はpath、1-basedのlineと
-Unicode column、previewとして表示し、先頭100件までを上下矢印で選んで`Enter`でそのmatchへ
-移動できます。Unicode normalization、regex、project-wide replaceは行いません。
+In repository mode `Ctrl-P` opens Quick Open to filter files under the root
+and `Enter` opens the selection. `Alt-F` is a case-sensitive literal search
+across the repository. Results show path, 1-based line, Unicode column, and
+a preview; the first 100 hits can be walked with the arrow keys and `Enter`
+jumps to the match. Unicode normalization, regex, and project-wide replace
+are not performed.
 
-Quick OpenまたはProject Searchは`Esc`でcancelできます。Project Search中にqueryを変更した場合は
-最新queryの結果だけを表示し、順序が前後して完了した古いqueryの結果は描画も適用もしません。
-`Esc`で閉じた後や別操作へ移った後に完了した結果も無視します。
+Quick Open and Project Search cancel with `Esc`. When the query changes
+mid-search, only the newest query's results are shown; results of older
+queries that complete out of order are neither drawn nor applied, and
+results that arrive after `Esc` or after moving to another operation are
+ignored.
 
-従来のdirect file modeも残しています。先頭引数がfileなら、既存ファイルと未作成ファイルの
-どちらも複数指定でき、実行中も`Ctrl-O`から追加できます。このmodeではrepositoryを持たないため、
-`Ctrl-P`と`Alt-F`は利用できません。
+The traditional direct file mode remains. If the first argument is a file,
+any number of existing or not-yet-created files can be given, and more can
+be added at runtime with `Ctrl-O`. This mode has no repository, so `Ctrl-P`
+and `Alt-F` are unavailable.
 
 ```sh
 zec path/to/file another/file
 ```
 
-`Ctrl-N`では、`Untitled N`という保存先未定のscratch tabを追加できます。
-同じBufferがすでに開かれていればtabを重複させず、既存tabへ移動します。
-`Ctrl-PageUp` / `Ctrl-PageDown` でtabを切り替え、`Ctrl-W`でactive tabを閉じます。
-未保存tabまたはdisk上で削除されたtabは、同じ`Ctrl-W`をもう一度押した場合だけ破棄し、
-最後のtabを閉じると終了します。
-各tabの本文、cursor、selection、undoは独立したZed Editorが保持し、viewportだけを端末側で
-保持します。`Ctrl-S` はactive tabだけをZedの `BufferStore` 経由で保存します。
-終了は `Ctrl-Q` です。未保存または削除されたtabが1つでもあれば、破棄確認として
-もう一度`Ctrl-Q`を押します。statusには全tabのdirtyを`+`、外部変更との競合または
-disk上の削除を`!`で表示します。
+`Ctrl-N` adds a scratch tab named `Untitled N` with no destination yet.
+Opening a Buffer that is already open moves to the existing tab instead of
+duplicating it. `Ctrl-PageUp` / `Ctrl-PageDown` switch tabs and `Ctrl-W`
+closes the active one. An unsaved tab, or one deleted on disk, is discarded
+only when `Ctrl-W` is pressed a second time; closing the last tab exits.
+Each tab's text, cursor, selection, and undo live in an independent Zed
+Editor, with only the viewport kept on the terminal side. `Ctrl-S` saves
+just the active tab through Zed's `BufferStore`. `Ctrl-Q` quits; if any tab
+is unsaved or deleted, a second `Ctrl-Q` confirms discarding. The status
+line marks dirty tabs with `+` and external-change conflicts or on-disk
+deletion with `!`.
 
-cleanなfileがdisk上で変更されると自動でreloadします。local edit中は本文を上書きせず`!`を
-表示し、`Ctrl-S`は再押下した場合だけdiskを上書きします。`Ctrl-R`はactive fileをdiskから
-reloadし、dirtyなら同じキーの再押下を要求します。reloadもZedのtransactionとして扱うため、
-直後の`Ctrl-Z`でreload前の本文へ戻せます。
-外部renameは同じZed Bufferのfile identityへ追従し、tab labelと以後の保存先も新pathになります。
-外部delete後も本文を保持して`!`を表示し、`Ctrl-S`の再押下で同じpathへ再作成できます。
-catch可能な`SIGTERM` / `SIGHUP`は通常の終了経路へ渡し、端末modeを復元してから終了します。
+A clean file changed on disk reloads automatically. During local edits the
+text is not overwritten: `!` is shown and `Ctrl-S` overwrites the disk only
+when pressed again. `Ctrl-R` reloads the active file from disk, requiring a
+second press when dirty. Reload is a Zed transaction, so `Ctrl-Z`
+immediately afterwards returns to the pre-reload text. An external rename
+follows the same Zed Buffer's file identity, updating the tab label and
+future save destination. After an external delete the text is kept, `!` is
+shown, and pressing `Ctrl-S` again recreates the same path. Catchable
+`SIGTERM` / `SIGHUP` go through the normal exit path, restoring the
+terminal mode before exiting.
 
-`Ctrl-N`では空のscratch bufferを開きます。`Ctrl-S`で1行のSave As promptに入り、
-相対パスはzecを起動したworking directory基準で保存します。親directoryは必要なら作成し、
-既存の通常ファイルはもう一度 `Enter` を押した場合だけ上書きします。`Esc` でcancelできます。
-Save Asと`Ctrl-O`のpath promptはshellを通らないため、`~` はhome directoryへ展開しません。
+`Ctrl-N` opens an empty scratch buffer. `Ctrl-S` enters a one-line Save As
+prompt; relative paths resolve against the working directory zec started
+in. Parent directories are created when needed, and an existing regular
+file is overwritten only after a second `Enter`. `Esc` cancels. The Save As
+and `Ctrl-O` path prompts do not go through a shell, so `~` does not expand
+to the home directory.
 
-`Shift` + 矢印や `Ctrl-A` のselectionもZedのkeymapで動き、選択範囲を端末上に
-反転表示します。左ガターの行番号もZedのdisplay snapshotから取得するため、foldなどを
-追加した後も表示行を単純に数え直しません。
+Selections via `Shift` + arrows and `Ctrl-A` also run through Zed's keymap,
+with the selected range shown inverted in the terminal. Gutter line numbers
+come from Zed's display snapshot, so display lines are not naively
+recounted after folds.
 
-mouse wheelは3 display rowずつ、`Alt-PageUp` / `Alt-PageDown`は原則terminal本文の高さから
-1行引いた量（本文が1行だけなら1行）ずつ、active tabの表示だけをscrollします。Zedのcursor、selection、undoは
-変更せず、cursorが移動すれば自動追従へ戻ります。mouse capture中にterminal自身の文字選択を
-使う場合、多くのterminalでは`Shift`を押しながらdragします。
+The mouse wheel scrolls the active tab's view by 3 display rows;
+`Alt-PageUp` / `Alt-PageDown` scroll by the terminal body height minus one
+line (one line when the body is a single line). Zed's cursor, selection,
+and undo are untouched, and the view returns to auto-follow once the cursor
+moves. To use the terminal's own text selection while mouse capture is
+active, most terminals require dragging with `Shift`.
 
-modifierなしの左clickで、表示中の本文位置へZedのcaretを移動できます。ガター、
-status行、viewport境界で半分に切れたwide文字はclick対象にしません。dragによる
-Zed selection、double/triple click、modifier付きmouse操作はまだ対象外です。
+An unmodified left click moves Zed's caret to the clicked text position.
+The gutter, the status row, and wide characters cut in half at the viewport
+edge are not click targets. Drag selection, double/triple click, and
+modified mouse operations are not covered yet.
 
-`Ctrl-C` はselection（空なら現在行）をterminal clipboardへcopyし、`Ctrl-X` はcopyに
-成功してからZedのCut actionで削除します。端末との受け渡しはOSC 52なので、対応端末の
-設定やtmuxのclipboard設定が必要な場合があります。端末から成功応答は返らないため、
-未対応端末では操作が無視されます。巨大なcontrol sequenceを避けるため1回256 KiBまでです。
-pasteは従来どおりterminalのbracketed pasteをZedへ渡します。
+`Ctrl-C` copies the selection (or the current line when empty) to the
+terminal clipboard; `Ctrl-X` deletes through Zed's Cut action only after
+the copy succeeds. Transfer uses OSC 52, so terminal support or tmux
+clipboard configuration may be required; terminals return no success
+response, so unsupported terminals silently ignore the operation. To avoid
+giant control sequences the limit is 256 KiB per operation. Paste still
+passes the terminal's bracketed paste into Zed.
 
-`Ctrl-F` で大文字小文字を区別しないliteral検索を開始します。入力中にmatchを更新し、
-`Enter` または下矢印で次、上矢印（対応端末では `Shift-Enter` も可）で前へ移動し、
-`Esc` で検索を閉じます。match、移動、selection、autoscrollはZedの検索実装を使います。
-`Ctrl-H`ではreplace欄も表示します。`Tab` / `BackTab`でqueryとreplace欄を移動し、replace欄の
-`Enter`で現在のmatchを1件、`Alt-Enter`（識別できる端末では`Ctrl-Enter`も可）で全件を
-置換します。`Esc`で検索を閉じた後、単一置換と全置換はどちらも`Ctrl-Z`で戻せます。
+`Ctrl-F` starts a case-insensitive literal search that updates matches as
+you type. `Enter` or the down arrow moves to the next match, the up arrow
+(`Shift-Enter` where the terminal can distinguish it) to the previous, and
+`Esc` closes the search. Matching, movement, selection, and autoscroll use
+Zed's search implementation. `Ctrl-H` also shows a replace field. `Tab` /
+`BackTab` move between the query and replace fields; in the replace field
+`Enter` replaces the current match and `Alt-Enter` (`Ctrl-Enter` where
+detectable) replaces all. After closing with `Esc`, both single and
+replace-all undo with `Ctrl-Z`.
 
-`Ctrl-G`では`line[:column]`形式の1-based位置へ移動します。行やcolumnが範囲外ならZedの
-BufferSnapshotで文書境界・行末へclipし、Unicode columnはbyte数ではなく文字位置として解決します。
-空入力や数値でない入力はprompt内にerrorを表示し、修正して再実行できます。
+`Ctrl-G` jumps to a 1-based `line[:column]` position. Out-of-range lines or
+columns clip to document and line boundaries through Zed's BufferSnapshot,
+and Unicode columns resolve as character positions rather than bytes. Empty
+or non-numeric input shows an error inside the prompt for correction.
 
-Zed同梱のnative tree-sitter parser/config/queryを使い、Shell、C/C++、CSS、Diff、
-Go、JSON、JavaScript/TypeScript、Markdown、Python、Rust、YAMLなどをsyntax highlight
-します。起動時にはconfigとmatcherだけを登録し、対象ファイルとinjectionに必要な
-parser/queryを遅延loadします。repository modeでは同じZed `Project`がLanguageRegistryと
-LspStoreも所有し、各language adapterの通常のPATH discoveryでlanguage serverを起動します。
-Node runtimeはZedの設定に従ってconfigured/system pathを探索し、必要ならdownloadできる状態で初期化します。
-`NO_COLOR` が設定された環境ではCrosstermの規約どおり色を出しません。
+Zed's bundled native tree-sitter parsers, configs, and queries highlight
+Shell, C/C++, CSS, Diff, Go, JSON, JavaScript/TypeScript, Markdown, Python,
+Rust, YAML, and more. At startup only configs and matchers are registered;
+parsers and queries needed by open files and injections load lazily. In
+repository mode the same Zed `Project` owns the LanguageRegistry and
+LspStore, and each language adapter starts its language server through
+normal PATH discovery. The Node runtime follows Zed's settings, probing
+configured/system paths and initializing ready to download when necessary.
+With `NO_COLOR` set, colors are suppressed per the Crossterm convention.
 
-`F1`または`Ctrl-Shift-P`はaction ID、表示名、binding、現在のenabled stateを持つcommand
-paletteです。`Ctrl-Space`（または`Alt-/`）で補完、`F2`でhover、`F8`でproject diagnostics、
-`F12` / `Alt-F12` / `Shift-F12`でdefinition / type definition / references、`Ctrl-T`でproject
-symbolsを開きます。移動後は`Alt-Left` / `Alt-Right`でselectionとviewportを含む履歴を往復できます。
-`F6`はprepareRename後にrename promptを開き、`Ctrl-.`はcode action picker、`Shift-Alt-F`は文書、
-`Ctrl-Alt-F`はselectionをformatします。複数fileに及ぶrename/code actionはZedの
-`ProjectTransaction`として保持し、`Ctrl-Z` / `Ctrl-Y`で全対象Bufferを一括undo/redoします。
+`F1` or `Ctrl-Shift-P` opens the command palette with action ids, display
+names, bindings, and current enabled state. `Ctrl-Space` (or `Alt-/`)
+completes, `F2` shows hover, `F8` project diagnostics, `F12` / `Alt-F12` /
+`Shift-F12` definition / type definition / references, and `Ctrl-T` project
+symbols. After a jump, `Alt-Left` / `Alt-Right` walk history including
+selection and viewport. `F6` opens the rename prompt after prepareRename,
+`Ctrl-.` the code action picker, `Shift-Alt-F` formats the document and
+`Ctrl-Alt-F` the selection. Multi-file renames and code actions are held as
+Zed `ProjectTransaction`s, and `Ctrl-Z` / `Ctrl-Y` undo/redo across every
+affected Buffer at once.
 
-`Ctrl-Shift-G`はZedのactive repository snapshotをGit panelへ投影します。panel内では個別または
-全changeのstage/unstage、discardをZed GitStoreへ適用できます。`Ctrl-\``はbottom dockの
-integrated terminal、`Ctrl-Shift-\``は新しいZed terminalを開きます。terminal focus中のkey、paste、
-resize、scrollbackはZed terminalへ渡し、`Esc`でeditorへ戻ります。
+`Ctrl-Shift-G` projects Zed's active repository snapshot into the Git
+panel, where individual or all changes can be staged, unstaged, and
+discarded through the Zed GitStore. `` Ctrl-` `` opens the bottom-dock
+integrated terminal and `` Ctrl-Shift-` `` opens another Zed terminal. With
+the terminal focused, keys, paste, resize, and scrollback go to the Zed
+terminal, and `Esc` returns to the editor.
 
-`Ctrl-Shift-B`はZed TaskInventoryが解決したtask picker、`Ctrl-Alt-B`は完了済みの最後のtaskの
-rerunです。taskはintegrated terminalで実行され、同時実行禁止、reveal、save、cwd、environmentなど
-Zed taskの設定を保持します。untrusted worktreeではprocessを開始しません。
+`Ctrl-Shift-B` opens the task picker resolved by Zed's TaskInventory;
+`Ctrl-Alt-B` reruns the last completed task. Tasks run in the integrated
+terminal and honor Zed task settings such as concurrency restriction,
+reveal, save, cwd, and environment. Untrusted worktrees start no processes.
 
-`F5`は`.zed/debug.json`とtask由来のdebug scenarioを選び、登録済みZed DAP adapterを起動します。
-`Ctrl-Shift-D`でDebugger panel、`Ctrl-F9`でsource breakpoint、`Ctrl-F5` / `Ctrl-F6` /
-`Shift-F5`でcontinue / pause / stop、`Alt-F10` / `Alt-F11` / `Alt-Shift-F11`でstep over / in / outを
-操作します。`Ctrl-Shift-R`（panel focus中は`:`）のdebug consoleはadapter-nativeなREPL commandを
-評価します。終了済みsessionは操作対象から外れますが、最後のadapter outputはpost-mortem用に残ります。
-詳細と実GDB受け入れ試験は[docs/beta-1.md](docs/beta-1.md)を参照してください。
+`F5` picks a debug scenario from `.zed/debug.json` and task-derived
+scenarios, starting a registered Zed DAP adapter. `Ctrl-Shift-D` opens the
+Debugger panel, `Ctrl-F9` toggles a source breakpoint, `Ctrl-F5` /
+`Ctrl-F6` / `Shift-F5` continue / pause / stop, and `Alt-F10` / `Alt-F11` /
+`Alt-Shift-F11` step over / in / out. The debug console on `Ctrl-Shift-R`
+(`:` while the panel is focused) evaluates adapter-native REPL commands.
+Ended sessions leave the operable set, but the last adapter output remains
+for post-mortems. See [docs/beta-1.md](docs/beta-1.md) for details and the
+real-GDB acceptance run.
 
-`Ctrl-Shift-X`はZed ExtensionStoreのall/installed/updates viewです。`Enter`でinstall/update、
-`Delete`を2回でuninstall、`Ctrl-D`で`extension.toml`を持つdevelopment extensionを追加し、
-追加後の`Enter`でsourceからrebuildします。`Ctrl-Alt-T` / `Ctrl-Alt-I`はextension由来を含む
-theme/icon theme、`Ctrl-,` / `Ctrl-Alt-,`は実際のZed settings/keymap fileを開きます。
-`Ctrl-Alt-U`はupdate manifestを確認します。CLIによる検証・download・適用とrelease形式の詳細は
-[docs/beta-2.md](docs/beta-2.md)を参照してください。
+`Ctrl-Shift-X` is the Zed ExtensionStore's all/installed/updates view.
+`Enter` installs or updates, `Delete` twice uninstalls, `Ctrl-D` adds a
+development extension with an `extension.toml`, and `Enter` afterwards
+rebuilds it from source. `Ctrl-Alt-T` / `Ctrl-Alt-I` pick theme and icon
+theme including extension-provided ones; `Ctrl-,` / `Ctrl-Alt-,` open the
+real Zed settings and keymap files. `Ctrl-Alt-U` checks the update
+manifest. See [docs/beta-2.md](docs/beta-2.md) for CLI verification,
+download, apply, and the release format.
 
-Markdown tabでは`Ctrl-Shift-V`でZed互換のfeature flagを使うpreviewを開き、`Tab`でlink/imageを
-選び`Enter`で開きます。local linkはZed ProjectPath内だけに制限し、外部URLは確認後にOSへ渡します。
-PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/PNM系画像はQuick Open、Project Panel、`Ctrl-O`、または
-`zec image.png`でread-only tabとして開けます。Kitty/iTerm2/Sixelを能力検出し、未対応端末では
-format・寸法・sizeを表示します。Markdown/画像tabよりtrustやcommand overlayが常に前面です。
+In a Markdown tab `Ctrl-Shift-V` opens the preview using Zed-compatible
+feature flags; `Tab` selects links/images and `Enter` opens them. Local
+links are restricted to the Zed ProjectPath, and external URLs go to the OS
+after confirmation. PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/PNM images open as
+read-only tabs from Quick Open, the Project Panel, `Ctrl-O`, or
+`zec image.png`. Kitty/iTerm2/Sixel support is capability-detected; on
+unsupported terminals the format, dimensions, and size are shown. Trust and
+command overlays always sit above Markdown/image tabs.
 
-10万行と64 KiB単一行を含むactual-binary gateで、open、`Ctrl-G`移動、描画、編集、保存、Linux
-`VmHWM ≤ 1 GiB`、terminal復元を検証しています。これは専用の簡略text modelではなく通常のZed
-Editor/Buffer経路です。
+The actual-binary suite covering a 100k-line file and a 64 KiB single line
+verifies open, `Ctrl-G` navigation, rendering, editing, saving, Linux
+`VmHWM ≤ 1 GiB`, and terminal restoration — through the normal Zed
+Editor/Buffer path, not a simplified text model.
 
-`zec remote ssh`はZedと同じremote protocol/serverを使ってremote Projectを開きます。editor、
-BufferStore、WorktreeStore、LSP、Git、terminal、tasks、DAP、project search、project panelのauthorityは
-接続先のZed Projectに残ります。passwordは引数に受け付けず、必要な認証は端末内のmasked askpassで
-行います。WSLとDocker/Podman transportも同じ入口から選べます。
+`zec remote ssh` opens a remote Project over the same remote protocol and
+server as Zed. Authority for the editor, BufferStore, WorktreeStore, LSP,
+Git, terminal, tasks, DAP, project search, and the project panel stays with
+the remote Zed Project. Passwords are not accepted as arguments; required
+authentication happens through a masked in-terminal askpass. WSL and
+Docker/Podman transports share the same entry point.
 
 ```sh
 zec --version
@@ -180,57 +231,66 @@ zec update apply
 
 ## Agent, collaboration, and Notebook
 
-`Ctrl-Shift-A`（またはcommand paletteの`Toggle Agent Panel`）でAgent panelを開きます。
-既定はprocess内のnative Zed Agentで、`ZEC_ACP_AGENT`にstrict JSONのcommand/args/env/idを設定した
-場合だけexternal stdio ACP agentへ接続します。prompt、stream、tool call、permissionのallow/reject、
-cancel、新規sessionに加え、`/models`、`/modes`、`/config`、`/sessions`、`/skills`、
-`/instructions`、`/mcp`、`/auth`を操作できます。外部agentを含むprocess開始はworktree trust後です。
+`Ctrl-Shift-A` (or `Toggle Agent Panel` in the command palette) opens the
+Agent panel. The default is the in-process native Zed Agent; an external
+stdio ACP agent is used only when `ZEC_ACP_AGENT` is set to strict JSON
+with command/args/env/id. Prompting, streaming, tool calls,
+permission allow/reject, cancel, and new sessions work, along with
+`/models`, `/modes`, `/config`, `/sessions`, `/skills`, `/instructions`,
+`/mcp`, and `/auth`. Process starts, including external agents, happen only
+after worktree trust.
 
-`Alt-\`でZed edit predictionを表示し、`Alt-L` / `Alt-K` / `Alt-J`で全体／次word／次lineを
-Zed transactionとして受け入れます。providerはZed language settingsの
-Zed/Copilot/Codestral/Ollama/OpenAI-compatible設定に追従します。`Ctrl-Enter`のinline assistantは
-stream結果をdiff previewにし、`Enter`でaccept、`Esc`でrejectします。
+`Alt-\` shows a Zed edit prediction, and `Alt-L` / `Alt-K` / `Alt-J` accept
+all / next word / next line as Zed transactions. The provider follows the
+Zed/Copilot/Codestral/Ollama/OpenAI-compatible configuration in Zed
+language settings. The `Ctrl-Enter` inline assistant turns streamed results
+into a diff preview; `Enter` accepts and `Esc` rejects.
 
-`Ctrl-Alt-C`でZed Client/UserStore/ChannelStoreを使うCollaboration panelを開きます。
-矢印と`Enter`でchannel notes、`Tab`と`f`でcollaborator follow、`c`でchannel作成、
-`a` / `d`でinvite応答、`i`でsign-in/outを操作します。notesはZed `ChannelBuffer`なのでsplit間で
-同じ共同編集authorityを共有します。voice/screenは端末内に偽装せずexternal bridgeです。
-`ZEC_MEDIA_BRIDGE`と`ZEC_EXTERNAL_MEDIA=1`の両方がある場合のみ、`v` / `s`の後に毎回`y`で
-許可して開始し、stop/終了時にowned processを回収します。
+`Ctrl-Alt-C` opens the Collaboration panel over Zed's
+Client/UserStore/ChannelStore. Arrows and `Enter` open channel notes, `Tab`
+and `f` follow collaborators, `c` creates a channel, `a` / `d` answer
+invites, and `i` signs in/out. Notes are Zed `ChannelBuffer`s, so splits
+share the same collaborative authority. Voice/screen are an external
+bridge, never faked inside the terminal: only with both `ZEC_MEDIA_BRIDGE`
+and `ZEC_EXTERNAL_MEDIA=1` set does `v` / `s` followed by `y` each time
+start them, and owned processes are reclaimed on stop and exit.
 
-`.ipynb`はZed `NotebookItem` / `NotebookEditor`で開きます。矢印でcell選択、`Enter`で編集、
-`Ctrl-Enter` / `Shift-Enter`でrun/run-and-advance、`b` / `m`でcode/Markdown追加、`dd`で削除、
-`Alt-Up/Down`で移動、`R`でrun all、`c`でoutput消去、`i` / `r`でkernel interrupt/restartです。
-stream/error/Markdownと既存rich outputのmetadata fallbackを投影し、nbformat JSONを通常の
-Project Bufferへ保存します。splitは1つのNotebook authorityを共有し、再起動中や最終closeでも
-local Jupyter process groupを残しません。詳細・制約・実バイナリ証跡は
-[docs/parity-1.md](docs/parity-1.md)を参照してください。
+`.ipynb` opens in Zed's `NotebookItem` / `NotebookEditor`. Arrows select
+cells, `Enter` edits, `Ctrl-Enter` / `Shift-Enter` run / run-and-advance,
+`b` / `m` add code/Markdown cells, `dd` deletes, `Alt-Up/Down` move, `R`
+runs all, `c` clears outputs, and `i` / `r` interrupt/restart the kernel.
+Stream/error/Markdown outputs and metadata fallbacks of existing rich
+outputs are projected, and nbformat JSON saves through a normal Project
+Buffer. Splits share one Notebook authority, and no local Jupyter process
+group is left behind during restarts or at the final close. See
+[docs/parity-1.md](docs/parity-1.md) for details, constraints, and
+actual-binary evidence.
 
-端末を使わず、Zed Editorへの挿入とundoを確認するheadless smoke:
+A headless smoke that checks insertion and undo against the Zed Editor
+without a terminal:
 
 ```sh
 cargo run -- --smoke
 ```
 
-初回はZedの依存一式をビルドするため、時間とディスク容量を使います。
+The first build compiles the whole Zed dependency set, which takes time and
+disk space.
 
 ## Windows
 
-WindowsではMSVCのC++ build toolsとWindows SDKが必要です。Windows Terminalなどの
-ConPTY対応端末からPowerShellを開き、次のようにbuild、smoke、起動を行います。
-Zed依存の初回buildは大きいため、空き容量が限られる環境ではdebug infoとincremental buildを
-無効にしてください。
+Windows needs the MSVC C++ build tools, the Windows SDK, and the Visual
+Studio Spectre-mitigated libs component (see
+[docs/windows.md](docs/windows.md)). From a ConPTY-capable terminal such as
+Windows Terminal, open PowerShell and build, smoke, and start zec:
 
 ```powershell
-$env:CARGO_INCREMENTAL = "0"
-$env:CARGO_PROFILE_DEV_DEBUG = "0"
-$env:CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG = "0"
-
 cargo build --locked --bin zec
 .\target\debug\zec.exe --smoke
 .\target\debug\zec.exe .
 ```
 
-通常の編集、repository mode、保存、検索などはWindowsでも利用できます。
-POSIX signal/job controlとLinux PTY acceptance、Alpha 1の機械判定gateは引き続きLinux専用です。
-Linux専用のAlpha 1補助binaryをbuildする場合は`--features alpha-1-linux`が必要です。
+Normal editing, repository mode, saving, and search all work on Windows,
+including the ConPTY integrated terminal and the e2e_language suite. POSIX
+signal/job control, the Linux PTY e2e suite, and the repository e2e
+binaries remain Linux-only; building those requires
+`--features e2e-linux`.

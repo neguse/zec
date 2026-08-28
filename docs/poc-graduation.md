@@ -4,16 +4,21 @@ Status: Graduated (2026-08-23)
 
 ## Meaning of graduation
 
-PoC卒業は、エディタの機能数が増えたことではなく、Zedの編集コアを使うCUIの
-基盤が「データを壊さず、文書サイズに対して設計上スケールし、自動検証と再現ができる」
-状態になったことを指す。そこから先は機能PoCではなく、alpha editorの開発として扱う。
+PoC graduation does not mean the editor gained features. It means the
+foundation of a TUI built on Zed's editing core reached the state of "does
+not destroy data, scales by design with document size, and can be verified
+and reproduced automatically". From that point on, the work is treated as
+alpha editor development rather than a feature PoC.
 
-当面の対象はLinuxの対応terminal上でのsingle-process実行とする。LSP、プラグイン、
-mouseの高度なselection、検索optionなどの機能完備は卒業条件に含めない。
-性能gateの対象は、個々のdisplay lineが通常のsource code程度の長さで、行数が大きい文書とする。
-数MBが1行に入るpathologicalな文書は、現在のZed公開APIではvisible columnだけを取得できず、
-1行全体のmaterializeとgrapheme走査が残るため別の既知制約とする。この制約は黙ってPass扱いせず、
-下記G3に残す。
+The initial target is single-process execution on supported Linux
+terminals. Feature completeness — LSP, plugins, advanced mouse selection,
+search options — is not a graduation condition. The performance suites
+target documents whose individual display lines are ordinary source-code
+length while the line count is large. Pathological documents with
+megabytes in one line remain a separate known constraint: Zed's current
+public APIs cannot fetch only visible columns, so materializing the whole
+line and walking its graphemes remains. That constraint is not silently
+treated as Pass; it stays in G3 below.
 
 ## Gates
 
@@ -21,120 +26,167 @@ mouseの高度なselection、検索optionなどの機能完備は卒業条件に
 
 Pass (2026-08-23).
 
-- text、cursor、selection、transaction、undo、dirty stateはZedの`Editor` / `Buffer`が所有する。
-- file open/save/save-as/reloadはZedの`RealFs -> WorktreeStore -> BufferStore`を通す。
-- zecはterminal event、viewport、status/promptと、UTF-8 byte座標からterminal cell座標への
-  変換だけを所有する。
-- この境界を越えてEditorの振る舞いを複製する機能は、Zed側の公開APIを作るまで入れない。
+- Text, cursor, selection, transactions, undo, and dirty state are owned
+  by Zed's `Editor` / `Buffer`.
+- File open/save/save-as/reload goes through Zed's
+  `RealFs -> WorktreeStore -> BufferStore`.
+- zec owns only terminal events, the viewport, status/prompts, and the
+  conversion from UTF-8 byte coordinates to terminal cell coordinates.
+- No feature that duplicates Editor behavior across this boundary is
+  added until a public Zed API exists for it.
 
-`OpenDocument`はBufferとscratch用labelだけを保持し、path、disk state、dirty、conflictは
-毎回Zedの`Buffer::file()`から導出する。既存の最寄りnon-root directoryをinvisible worktreeにし、
-外部rename後も同じBuffer Entityと新pathを追跡する。cleanな外部deleteはZed上`is_dirty=false`
-だが、`DiskState::Deleted`を明示的にclose/quit保護と`!`表示へ含める。
+`OpenDocument` holds only the Buffer and a scratch label; path, disk
+state, dirty, and conflict derive from Zed's `Buffer::file()` every time.
+The nearest existing non-root directory becomes an invisible worktree, so
+the same Buffer Entity and its new path are tracked after an external
+rename. A clean external delete is `is_dirty=false` in Zed, but
+`DiskState::Deleted` is explicitly included in close/quit protection and
+the `!` indicator.
 
-headless回帰試験はrename後のpath/dedupe、編集・新pathへのsave、旧path非再作成、delete後の
-本文保持と破棄保護を実filesystem watcher込みで確認する。
+Headless regression tests confirm the path/dedupe behavior after renames,
+editing and saving to the new path, non-recreation of the old path, and
+text retention plus discard protection after deletes — with the real
+filesystem watcher involved.
 
 ### G2. Data and terminal lifecycle are safe
 
 Pass (2026-08-23).
 
-- existing/new/scratch fileのopen/save/save-as、dirty tabのclose/quit保護、disk外部変更の
-  auto reloadとconflict保護を持つ。
-- reloadやreplaceもZedのtransactionであり、undo可能である。
-- normal exitとerror pathでraw mode、alternate screen、mouse capture、bracketed pasteを復元する。
-- 保護確認は別のinputが入った時点で解除し、古い確認状態を非表示で保持しない。
+- Open/save/save-as of existing/new/scratch files, close/quit protection
+  for dirty tabs, and auto reload plus conflict protection for external
+  disk changes are in place.
+- Reload and replace are Zed transactions and can be undone.
+- Raw mode, the alternate screen, mouse capture, and bracketed paste are
+  restored on normal exit and error paths.
+- Protection confirmations clear the moment any other input arrives; no
+  stale confirmation state is kept invisibly.
 
-catch可能な`SIGTERM` / `SIGHUP`はsignal handlerからatomic flagだけを更新し、terminal readerが
-通常のevent loop終了へ渡す。reader停止後、raw mode等を復元してからhandlerを解除する。両signalで
-起動前後のtermios完全一致をG4のactual-binary PTY試験で固定した。normal exit、dirty discard、
-`SIGTERM`、`SIGHUP`の全経路でalternate screen、mouse capture、bracketed paste、cursor stateも
-復元する。`SIGKILL`やmachine crashはprocess側でcleanup不可能なので対象外とする。
+Catchable `SIGTERM` / `SIGHUP` update only an atomic flag from the signal
+handler, and the terminal reader routes them into the normal event-loop
+shutdown. After the reader stops, raw mode and the rest are restored
+before the handlers are removed. Exact termios equality before and after
+startup was pinned for both signals in the G4 actual-binary PTY tests. On
+all paths — normal exit, dirty discard, `SIGTERM`, `SIGHUP` — the
+alternate screen, mouse capture, bracketed paste, and cursor state are
+restored too. `SIGKILL` and machine crashes cannot be cleaned up by the
+process and are out of scope.
 
-actual-binary試験はZed `BufferStore`によるexact file bytesの保存、dirty quit保護、途中componentを
-通常fileにした`ENOTDIR` save failure後の本文・dirty・disk原本保持もblack-boxで確認する。
+The actual-binary tests also confirm, black-box: exact file bytes saved
+through Zed `BufferStore`, dirty-quit protection, and retention of text,
+dirty state, and the original disk bytes after an `ENOTDIR` save failure
+induced by making a path component a regular file.
 
-また、固定中のZed revisionの`RealFs::save`はexisting fileをtruncateしてからRopeをstreamし、
-atomic renameや`fsync`は行わない。zecが作った回帰ではないが、power lossやwrite途中errorで
-disk原本がpartialになるproduction riskとして残る。Zedの保存先をdirectoryへ置換した
-headless failure試験で、error後もBuffer本文とdirty、退避したdisk原本が保持されることは固定した。
-G4のactual-binary試験でも同じ保護を固定した。PoC卒業ではZedの保存経路を迂回しない。
-atomic/durable saveは
-production-readyの別blockerとし、Zed upstream修正または明示的なforkなしにzec側へ保存を
-再実装しない。
+Additionally, the pinned Zed revision's `RealFs::save` truncates the
+existing file and then streams the Rope, with no atomic rename or
+`fsync`. Not a regression zec introduced, but it remains a production risk
+of partial disk contents on power loss or a mid-write error. A headless
+failure test that replaces Zed's save destination with a directory pinned
+that the Buffer text, dirty state, and the preserved disk original
+survive the error; the G4 actual-binary test pins the same protection.
+PoC graduation does not bypass Zed's save path. Atomic/durable saving is
+a separate production-readiness blocker; saving is not reimplemented on
+the zec side without an upstream Zed fix or an explicit fork.
 
 ### G3. Per-frame work is bounded by the viewport
 
 Pass (2026-08-23).
 
-Ratatuiの`try_draw` callback内で実際のframe areaを取得し、cursor followとviewport clampを
-先に確定してから、そのframeで必要なdisplay rowだけをZedから取得する。text、row info、
-syntax chunkは`[top_row, top_row + body_height)`に限定し、background highlightも同じ範囲の
-Anchorだけを問い合わせる。resize直後も古い高さでcaptureしたsnapshotを新しいframeへ描かない。
+Inside Ratatui's `try_draw` callback the real frame area is obtained,
+cursor follow and viewport clamping are settled first, and only the
+display rows needed for that frame are then fetched from Zed. Text, row
+info, and syntax chunks are limited to `[top_row, top_row + body_height)`,
+and background highlights are queried only for Anchors in the same range.
+Immediately after a resize, a snapshot captured at the old height is
+never drawn into the new frame.
 
-`RenderSnapshot`はglobalな`first_row` / `total_rows` / cursor位置と、可視行だけの
-`lines` / `line_numbers` / `line_styles`を持つ。renderer、mouse hit test、selection、
-backgroundはglobal rowからrow-local vectorへ変換する。cursorが画面外でもstatus用のrow infoは保持する。
+`RenderSnapshot` holds the global `first_row` / `total_rows` / cursor
+position and visible-row-only `lines` / `line_numbers` / `line_styles`.
+The renderer, mouse hit test, selection, and background convert global
+rows into row-local vectors. Row info for the status is kept even when
+the cursor is off-screen.
 
-80x24 terminalと100,000行fixtureのheadless testで、先頭・中央・末尾のいずれも本文23行だけを
-保持し、`total_rows`は全文を表すことを固定した。terminal event channelはcapacity 1とし、
-重複Redrawは`try_send`でcoalesceし、入力はreader thread側でbackpressureする。
+A headless test with an 80x24 terminal and the 100,000-line fixture pins
+that only 23 body rows are held at the top, middle, and end, while
+`total_rows` represents the whole document. The terminal event channel
+has capacity 1; duplicate Redraws coalesce via `try_send`, and input
+applies backpressure on the reader thread.
 
-既知制約は、巨大な単一display lineと、query変更時の全文検索、match数に比例するZed検索navigation
-である。必要ならvisible-column APIまたは検索用hookをZed側へ提案する。
+Known constraints: a giant single display line, the full-text search on
+each query change, and Zed search navigation proportional to the match
+count. If needed, a visible-column API or a search hook will be proposed
+upstream.
 
 ### G4. The real binary has automated PTY acceptance tests
 
 Pass (2026-08-23).
 
-`tests/pty_acceptance.rs`は`CARGO_BIN_EXE_zec`をcontrolling PTY内で直接起動し、raw ANSI outputを
-`vt100`でsemantic screenへ復元して次の4 subprocessを逐次検証する。
+`tests/e2e_tui.rs` starts `CARGO_BIN_EXE_zec` directly inside a
+controlling PTY, reconstructs the raw ANSI output into a semantic screen
+with `vt100`, and verifies these four subprocesses in order:
 
-- Unicode insert、`Ctrl-A` selection replacement、Zed undo、PTY resize後の継続編集、Zed
-  `BufferStore` save、exact file bytes、dirty quit保護、normal exit。
-- 通常fileをpath途中へ置くことで決定的に発生させた`ENOTDIR` save failure、本文・dirty・disk原本保持、
-  dirty discard保護。
-- direct child PIDへの`SIGTERM`と`SIGHUP`がsignalによる即死ではなくzecの通常error exitを通ること。
-- 全経路で起動前後のtermios完全一致と、alternate screen、mouse、bracketed paste、cursor、application
-  modeの解除。
+- Unicode insert, `Ctrl-A` selection replacement, Zed undo, continued
+  editing after a PTY resize, Zed `BufferStore` save, exact file bytes,
+  dirty-quit protection, and normal exit.
+- An `ENOTDIR` save failure raised deterministically by placing a regular
+  file mid-path; retention of text, dirty state, and the disk original;
+  dirty-discard protection.
+- `SIGTERM` and `SIGHUP` to the direct child PID going through zec's
+  normal error exit rather than dying to the signal.
+- On every path, exact termios equality before and after startup, and
+  release of the alternate screen, mouse, bracketed paste, cursor, and
+  application modes.
 
-各waitは画面またはraw outputのpredicateとdeadlineで進み、固定sleepを使わない。親側slave FDはspawn後
-すぐ閉じ、EOFはcleanup bytesと競合しない状態として扱う。timeoutやpanic時はRAIIでchildをkill/reapし、
-writer、master、receiverを閉じてからreader threadをjoinする。
+Every wait advances on a screen or raw-output predicate with a deadline;
+no fixed sleeps. The parent-side slave FD closes right after spawn, and
+EOF is treated as a state that does not race the cleanup bytes. On
+timeout or panic, RAII kills/reaps the child and closes the writer,
+master, and receiver before joining the reader thread.
 
 ### G5. A clean checkout is reproducible
 
 Pass (2026-08-23).
 
-`.github/workflows/ci.yml`は`ubuntu-24.04`、Rust 1.97.1、固定済み`Cargo.lock`で、
-`cargo fmt --check`、`cargo build --locked --bin zec`、unit/headless test、actual-binary
-PTY acceptance、`--smoke`のoutput確認を行う。build/test/smokeは同じ`target`を共有し、
-incrementalとdebug infoを無効化する。job timeoutは90分、CI生成物のdisk budgetは14 GiBとして
-workflow内で検査する。
+`.github/workflows/ci.yml` runs on `ubuntu-24.04` with Rust 1.97.1 and
+the pinned `Cargo.lock`: `cargo fmt --check`,
+`cargo build --locked --bin zec`, the unit/headless tests, the
+actual-binary PTY acceptance, and the `--smoke` output check. Build,
+tests, and smoke share the same `target` with incremental and debug info
+disabled. The job timeout is 90 minutes, and the CI-generated disk budget
+of 14 GiB is checked inside the workflow.
 
-卒業時の実測:
+Measurements at graduation:
 
-- localのfresh targetではbuildが3分56秒、全test後のtargetが4,827,824 KiB、binaryが
-  446,036,048 bytesだった。unit/headless 93件とPTY acceptance 1件、計94件、および
-  `--smoke`のoutput確認がすべてPassした。
-- commit `d32ddfbe2475c2d1eb2abb42a661cc91e7cacd4d`のindependent clean checkoutを、official
-  `ubuntu:24.04` containerのcold dependency cacheから同じcommand setに通した。buildは
-  8分14秒、target 4,829,120 KiB、Cargo git cache 1,134,968 KiB、Cargo registry cache
-  751,928 KiB、合計6,716,016 KiB（約6.41 GiB）だった。94件のtestとsmokeを含めて
-  すべてPassし、14 GiB budget内だった。検証後もcheckoutのsource差分とcontainer残留はない。
-
-- private repositoryへの最初のpushで、GitHub-hosted `ubuntu-24.04`上の
-  [run 32623267464](https://github.com/neguse/zec/actions/runs/32623267464)を実行した。
-  Linux graduation gateは12分11秒で、build、94件のtest、smoke、disk budgetをすべてPassした。
-  CI生成diskは7,275 MiBで、14 GiB budget内だった。
+- On a fresh local target, the build took 3 min 56 s, the post-test
+  target was 4,827,824 KiB, and the binary 446,036,048 bytes. All 94
+  tests — 93 unit/headless plus 1 PTY acceptance — and the `--smoke`
+  output check passed.
+- An independent clean checkout of commit
+  `d32ddfbe2475c2d1eb2abb42a661cc91e7cacd4d` ran the same command set
+  from a cold dependency cache in an official `ubuntu:24.04` container.
+  The build took 8 min 14 s; target 4,829,120 KiB, Cargo git cache
+  1,134,968 KiB, Cargo registry cache 751,928 KiB, 6,716,016 KiB
+  (~6.41 GiB) total. All 94 tests and smoke passed within the 14 GiB
+  budget. No source diff or container residue remained afterwards.
+- The first push to the private repository ran
+  [run 32623267464](https://github.com/neguse/zec/actions/runs/32623267464)
+  on GitHub-hosted `ubuntu-24.04`. The Linux graduation gate took
+  12 min 11 s, passing the build, the 94 tests, smoke, and the disk
+  budget. CI-generated disk was 7,275 MiB, within the 14 GiB budget.
 
 ## Execution order
 
-1. G3 (done 2026-08-23): viewport-bounded capture、bounded redraw、100,000行の構造test。
-2. G1 (done 2026-08-23): file identityをZed Bufferからderiveし、外部rename/delete時の保護を固定。
-   G2 (done 2026-08-23): data guardとcatch可能signalをactual-binary PTYで自動検証する。
-3. G4 (done 2026-08-23): actual binaryのPTY integration harnessとcore acceptance matrixを追加。
-4. G5 (done 2026-08-23): pinned clean Linux CI、shared target、disk budgetで同じmatrixを再現。
-5. 全gateを1回の検証で通し、statusを`Graduated`へ変更する (done 2026-08-23)。
+1. G3 (done 2026-08-23): viewport-bounded capture, bounded redraw, the
+   100,000-line structural test.
+2. G1 (done 2026-08-23): derive file identity from the Zed Buffer and pin
+   protection across external rename/delete.
+   G2 (done 2026-08-23): auto-verify the data guards and catchable
+   signals over an actual-binary PTY.
+3. G4 (done 2026-08-23): add the actual-binary PTY integration harness
+   and the core acceptance matrix.
+4. G5 (done 2026-08-23): reproduce the same matrix on pinned clean Linux
+   CI with a shared target and disk budget.
+5. Pass every gate in one verification and change the status to
+   `Graduated` (done 2026-08-23).
 
-卒業後は、graduation gateを維持しながらalpha editorとして機能開発を進める。
+After graduation, feature development proceeds as the alpha editor while
+the graduation gates are maintained.

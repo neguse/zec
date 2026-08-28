@@ -89,17 +89,17 @@ The normal deterministic gate is:
 ```sh
 cargo fmt --all -- --check
 cargo test --locked --bin zec -- --test-threads=1
-cargo test --locked --test pty_acceptance -- --test-threads=1
+cargo test --locked --test e2e_tui -- --test-threads=1
 ```
 
-`pty_acceptance` contains three Beta 1 actual-binary scenarios:
+`e2e_tui` contains three Beta 1 actual-binary scenarios:
 
-- `beta_1_terminal_git_and_tasks_run_through_the_actual_binary` exercises a real repository, Zed Git
+- `terminal_git_and_tasks_run_through_the_actual_binary` exercises a real repository, Zed Git
   staging, an interactive integrated shell, task discovery/execution, task completion, and rerun.
-- `beta_1_debugger_and_repl_run_through_zed_dap_in_the_actual_binary` compiles a C debuggee, loads a
+- `debugger_and_repl_run_through_zed_dap_in_the_actual_binary` compiles a C debuggee, loads a
   real `.zed/debug.json`, starts Zed's GDB adapter, resolves a source breakpoint, evaluates
   `print 1+1`, continues, pauses, steps, shuts down, and verifies PTY restoration.
-- `parity_1_notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary` opens
+- `notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary` opens
   native Zed Notebook state after trust, edits/saves/splits cells, projects stream/image/error output,
   interrupts/restarts/clears kernels, validates nbformat JSON, reaps old/final process groups, and
   restores the PTY.

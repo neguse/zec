@@ -2,272 +2,355 @@
 
 Contract status: Accepted (2026-08-23)
 
-Gate statusは保存せず、A6のcandidate/promotion規則とevidence checkから導出する。
-promotion `P`がevidence-onlyのdirect childである場合に限り、親candidate `C`に対する
-Single decision ruleの結果を`P`が継承する。
+Gate status is never stored; it derives from A6's candidate/promotion rules
+and the evidence checks. Only when a promotion `P` is an evidence-only
+direct child does `P` inherit the Single decision rule result of its parent
+candidate `C`.
 
 ## Outcome
 
-Linux上で`zec DIRECTORY`を起点に、対象fileを事前にCLI引数へ列挙せず、
-repository内のfile discovery、project-wide search、複数fileの編集、新規file作成、
-保存、終了、再起動、再openまでを完了できる状態をAlpha 1とする。
+Alpha 1 is the state where, on Linux, starting from `zec DIRECTORY` and
+without enumerating target files as CLI arguments in advance, one can
+complete file discovery inside the repository, project-wide search, editing
+multiple files, creating a new file, saving, exiting, restarting, and
+reopening.
 
-機能数や人間のdogfood時間は判定に使わない。固定fixtureに対するactual-binary PTY試験、
-exact filesystem manifest、latency/RSS assertion、GitHub-hosted CIのexit statusだけで判定する。
+Feature counts and human dogfooding hours play no part in the judgment.
+Only actual-binary PTY tests against a fixed fixture, an exact filesystem
+manifest, latency/RSS assertions, and GitHub-hosted CI exit status decide.
 
 ## Single decision rule
 
-clean checkoutで次を順に実行し、すべてが1回でexit 0になったcandidate commitだけが
-promotion対象になる。
+Only a candidate commit where the following, run in order on a clean
+checkout, all exit 0 on the first attempt is eligible for promotion.
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
-rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
 /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 cargo build --locked --release \
-  --features alpha-1-linux \
-  --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
+  --features e2e-linux \
+  --bin zec --bin e2e_repository --bin e2e_repository_bench
 cargo test --locked --release --bin zec -- --test-threads=1
-cargo test --locked --release --test pty_acceptance -- --test-threads=1
+cargo test --locked --release --test e2e_tui -- --test-threads=1
 timeout --signal=TERM --kill-after=5s 45m \
-  ./target/release/alpha_1_acceptance --zec ./target/release/zec \
+  ./target/release/e2e_repository --zec ./target/release/zec \
   --repo . --assert --report target/alpha-1/acceptance.json
-./target/release/alpha_1_acceptance \
+./target/release/e2e_repository \
   --verify-report target/alpha-1/acceptance.json
 timeout --signal=TERM --kill-after=5s 20m \
-  ./target/release/alpha_1_bench --zec ./target/release/zec \
+  ./target/release/e2e_repository_bench --zec ./target/release/zec \
   --assert --report target/alpha-1/benchmark.json
-./target/release/alpha_1_bench \
+./target/release/e2e_repository_bench \
   --verify-report target/alpha-1/benchmark.json
 ```
 
-同じcommandを`ubuntu-24.04`のGitHub-hosted runnerで実行する`Alpha 1 gate` jobも
-`success`でなければならない。job timeoutは90分、retryは0回とする。command timeout、
-test retry、手動確認、既知flakeの再実行はPassに数えない。卒業記録へlinkするrunは
-cancelされていない単一attemptでなければならず、結果が`success`以外ならFailとする。
-修正commitには新しいrunを使う。
+The `Alpha 1 gate` job running the same commands on a GitHub-hosted
+`ubuntu-24.04` runner must also be `success`. The job timeout is 90 minutes
+with 0 retries. Command timeouts, test retries, manual checks, and reruns
+of known flakes do not count as Pass. The run linked from the graduation
+record must be a single uncancelled attempt, and any result other than
+`success` is Fail. A fix commit uses a new run.
 
 ## Fixed test environment
 
-- runner class: GitHub-hosted Ubuntu 24.04 x86_64。CPU型番、core数、RAM、kernel、
-  runner image versionをreportへ記録する。hardware差や負荷はretry理由にしない
-- locale / terminal: `C.UTF-8`、`TERM=xterm-256color`、120x40 cells
-- binary: `--release`でbuildした同じcommitの`zec`
-- clock: `CLOCK_MONOTONIC`相当。時間は整数microsecondsで保持し、sample数とwarm-up数は
-  A4の各metricで固定する
-- PTY parser: `vt100 0.16.2`を`Cargo.lock`で固定する
-- repository fixture: seed `0x5a45435f414c5048`から生成する。rootと`.git`内部を除き
-  10,000 entries（9,900 regular files、96 directories、4 symlinks）、UTF-8 text payload
-  合計104,857,600 bytes、100,000 logical linesかつ99,999 LFのfileを含める
-- fixtureにはspace/Unicode path、`.gitignore`対象、NULを含むbinary、root外control file、
-  symlink alias、UTF-8 BOM、CRLF、final newlineなしの編集対象を含める
-- Alpha 1で編集対象にするregular fileは10 MiB以下、1 display lineは64 KiB以下とする
+- runner class: GitHub-hosted Ubuntu 24.04 x86_64. The CPU model, core
+  count, RAM, kernel, and runner image version are recorded in the report.
+  Hardware differences and load are not retry justifications.
+- locale / terminal: `C.UTF-8`, `TERM=xterm-256color`, 120x40 cells.
+- binary: the same commit's `zec` built with `--release`.
+- clock: `CLOCK_MONOTONIC` equivalent. Times are kept as integer
+  microseconds, and sample and warm-up counts are fixed per A4 metric.
+- PTY parser: `vt100 0.16.2`, pinned by `Cargo.lock`.
+- repository fixture: generated from seed `0x5a45435f414c5048`. Excluding
+  the root and `.git` internals: 10,000 entries (9,900 regular files, 96
+  directories, 4 symlinks), 104,857,600 bytes of UTF-8 text payload in
+  total, including a file with 100,000 logical lines and 99,999 LFs.
+- The fixture includes space/Unicode paths, `.gitignore`d entries, binaries
+  containing NUL, a control file outside the root, symlink aliases, and
+  edit targets with UTF-8 BOM, CRLF, and no final newline.
+- Regular files edited in Alpha 1 are at most 10 MiB, and one display line
+  at most 64 KiB.
 
-fixtureのnormative input、query、expected resultは`tests/alpha_1/spec-v1.json`へ置く。
-manifestはrelative pathのUTF-8 byte順JSONLとし、各recordを`path`、`kind`、4桁octal
-`mode`、`size`、lowercase `content_sha256`、`symlink_target`へ固定する。
-mtimeとinodeは含めず、各recordと末尾をLFで終える。generator source SHA-256、
-spec SHA-256、操作前とexpected操作後のmanifest SHA-256をreportへ残す。
+The fixture's normative inputs, queries, and expected results live in
+`tests/alpha_1/spec-v1.json`. The manifest is JSONL ordered by relative
+path in UTF-8 bytes, each record fixed to `path`, `kind`, 4-digit octal
+`mode`, `size`, lowercase `content_sha256`, and `symlink_target`. mtime and
+inode are excluded, and each record and the file end with LF. The generator
+source SHA-256, spec SHA-256, and the before and expected-after manifest
+SHA-256 values are recorded in the report.
 
 ## Normative oracles and timing
 
-- contractのoracleはversion管理された`spec-v1.json`、expected manifest、VT predicateである。
-  Zed API名への言及とImplementation orderはnon-normativeな実装方針とする
-- harnessは各read完了時にVT parserを更新してgenerationを1増やす。frame到達時刻は、
-  指定predicateへ初めて一致したgenerationのread完了時刻とする
-- startupの開始はchild spawn call直前、それ以外の開始はPTY writerが操作の最終byteを
-  flushした直後とする
-- Ready predicateはalternate screen、120x40、fixture root label、期待本文sentinel、
-  body内のvisible cursorが同じVT generationに存在することとする
-- p95は昇順raw samples `x`に対するnearest-rank
-  `x[ceil(0.95 * N) - 1]`、maxは`x[N - 1]`とする
-- 1つのscreen predicate待ちは15秒、child cleanupは5秒、1 PTY scenarioは120秒で
-  timeoutとし、timeoutは必ずFailとする
-- acceptance reportは`contract_version=1`、必須case IDの重複・欠落なし、
-  `failed=0`、runner/locale/terminal/binary/parser条件の完全一致を満たさなければ
-  verify commandがnon-zeroで終了する
-- required binary/report/specが欠けるinitial stateはFailである
+- The contract's oracles are the versioned `spec-v1.json`, the expected
+  manifests, and the VT predicates. References to Zed API names and the
+  implementation order are non-normative implementation policy.
+- The harness updates the VT parser on each completed read, incrementing a
+  generation by 1. A frame's arrival time is the read-completion time of
+  the first generation matching the given predicate.
+- Startup measurement begins immediately before the child spawn call; all
+  other measurements begin right after the PTY writer flushes the last
+  byte of the operation.
+- The Ready predicate requires the alternate screen, 120x40, the fixture
+  root label, the expected body sentinel, and a visible cursor in the body
+  to coexist in one VT generation.
+- p95 is nearest-rank `x[ceil(0.95 * N) - 1]` over ascending raw samples
+  `x`; max is `x[N - 1]`.
+- One screen-predicate wait times out at 15 seconds, child cleanup at 5
+  seconds, and one PTY scenario at 120 seconds; a timeout is always Fail.
+- The acceptance report must have `contract_version=1`, no duplicated or
+  missing required case ids, `failed=0`, and exact matches of the
+  runner/locale/terminal/binary/parser conditions, or the verify command
+  exits non-zero.
+- An initial state missing a required binary/report/spec is Fail.
 
 ## Gates
 
 ### A0. PoC regression
 
-2つのrelease-profile test commandで既存PoC graduationのunit/headless 93件とactual-binary PTY 1件を
-すべて通す。`tests/alpha_1/poc-test-ids-v1.txt`へbaseline 94 test IDを固定し、
-acceptance verifierが現在の`cargo test --release -- --list`に全IDが含まれることを確認する。
-追加testは許可するが、既存caseの削除・ignore・filterによる欠落はFailとする。
+The two release-profile test commands pass all 93 unit/headless tests and
+the 1 actual-binary PTY test of the existing PoC graduation.
+`tests/alpha_1/poc-test-ids-v1.txt` pins the 94 baseline test ids, and the
+acceptance verifier confirms the current
+`cargo test --release -- --list` contains every id. Additional tests are
+allowed; losing an existing case to deletion, ignore, or filtering is
+Fail.
+
 ### A1. Directory root and file identity
 
-`alpha_1_acceptance`のheadless caseで次をassertする。
+Headless cases of `e2e_repository` assert:
 
-- cwdと`DIRECTORY`、`.`、`..`、absolute path、symlink aliasの入力値を
-  `spec-v1.json`へliteralで列挙する
-- directoryはfileとしてopenされず、repository root IDは1個、root配下のworktree root IDも
-  1個であり、fileごとの重複worktreeを作らない
-- specに列挙した全aliasの`buffer_id`と`tab_id`がそれぞれ完全一致する
-- `.git`、`target`、ignore対象には専用sentinelを置き、quick-open/project searchの
-  expected result JSONがいずれも0件である
-- root外fileのtracing FSをresetしてopenし、そのfile自身へのopen/statと、固定Zedが
-  ignore判定で行う`file/.git`および各ancestorのexactな`.git` markerへのbounded metadata
-  (`stat-ancestor-git`)だけを許可する。`stat-ancestor-git`には`file/.git`を含む。
-  `read_dir`、watch/watcher add/remove、mutation、repository operationは禁止し、
-  outside parentとsiblingsへの`read_dir` call countは0である
-- startupには正常fileとself-referential symlinkを同時に渡す。`ELOOP`を表示した後もReadyへ到達し、
-  正常tabの固定tokenを編集・保存してexit code 0になる
+- cwd, `DIRECTORY`, `.`, `..`, absolute path, and symlink alias inputs are
+  enumerated literally in `spec-v1.json`.
+- A directory is never opened as a file; there is exactly 1 repository
+  root id and exactly 1 worktree root id under it, with no duplicated
+  per-file worktrees.
+- The `buffer_id` and `tab_id` of every alias listed in the spec match
+  exactly.
+- Dedicated sentinels sit in `.git`, `target`, and ignored entries, and
+  the expected quick-open/project-search result JSON for each is empty.
+- An outside-root file is opened after resetting the tracing FS, allowing
+  only open/stat of the file itself and the bounded metadata
+  (`stat-ancestor-git`) that pinned Zed performs for ignore judgment
+  against `file/.git` and each ancestor's exact `.git` marker.
+  `stat-ancestor-git` includes `file/.git`. `read_dir`, watch/watcher
+  add/remove, mutation, and repository operations are forbidden, and the
+  `read_dir` call count against the outside parent and siblings is 0.
+- Startup receives a normal file and a self-referential symlink together.
+  After displaying `ELOOP` it still reaches Ready, edits and saves the
+  normal tab's fixed token, and exits with code 0.
 
 ### A2. Quick open and project search
 
-actual-binary PTY caseは`Ctrl-P = 0x10`をquick open、`Alt-F = ESC f`を
-project-wide literal searchとして固定する。
+The actual-binary PTY cases fix `Ctrl-P = 0x10` as quick open and
+`Alt-F = ESC f` as project-wide literal search.
 
-- quick-open query `日本 語.rs`のselected resultとEnter後のpathを
-  `spec-v1.json`のexpected JSONと完全一致させる。同じaliasを再度openしてもtab countは増えない
-- searchはcase-sensitive、Unicode normalizationなし、result limit 100とする。lineはLF/CRLFで
-  区切る1-based logical line、columnはBOMを除いた1-based Unicode scalar indexとする
-- resultのpath、line、column、preview、順序をqueryごとのexpected JSONと完全一致させ、
-  Enter後のcaretをexpected match startへ置く。restart前cursorの復元は要求しない
-- ignored、binary、outside対象の各fileに`ALPHA1_EXCLUDED_SENTINEL`を置き、同じsentinelを持つ
-  in-scope control file 1件だけが返ることをassertする
-- search中のEscではprompt消滅、別queryでは新queryとそのexpected results、`Ctrl-Q`では
-  child exitをそれぞれ15秒以内に観測し、その後に古いresultを描画・適用しない
+- The selected result for quick-open query `日本 語.rs` and the path after
+  Enter match the expected JSON in `spec-v1.json` exactly. Reopening the
+  same alias does not increase the tab count.
+- Search is case-sensitive, without Unicode normalization, with a result
+  limit of 100. Lines are 1-based logical lines split on LF/CRLF; columns
+  are 1-based Unicode scalar indices excluding the BOM.
+- Result paths, lines, columns, previews, and order match the per-query
+  expected JSON exactly, and the caret after Enter lands on the expected
+  match start. Restoring the pre-restart cursor is not required.
+- `PROBE_EXCLUDED_SENTINEL` is placed in ignored, binary, and outside
+  files, and exactly one in-scope control file carrying the same sentinel
+  is asserted to return.
+- Esc during a search removes the prompt, a different query produces the
+  new query and its expected results, and `Ctrl-Q` collects the child —
+  each observed within 15 seconds, with no stale results drawn or applied
+  afterwards.
 
-controlled headless caseはproductionと同じcommand/reducerへcompletion順だけを差し替える
-deterministic schedulerを使う。query Aを保留、query Bを完了、最後にAを完了させ、
-publish logがBのexpected result 1回だけで、最終stateもBのままであることをassertする。
-actual-binary PTY caseはshortcut byte、prompt、result選択、cancel、openの配線をassertする。
+The controlled headless case uses a deterministic scheduler that swaps
+only completion order into the production commands/reducer. Query A is
+held, query B completes, then A completes; the publish log must contain
+exactly one entry — B's expected result — and the final state must remain
+B's. The actual-binary PTY case asserts the wiring of shortcut bytes,
+prompt, result selection, cancel, and open.
 
-file list、search range、open結果をZedのworktree/project/buffer APIから取得し、zecが本文、
-selection、undo、dirty stateを複製しない方針はnon-normative implementation noteである。
-Pass/Failのnormative oracleは上記expected JSONとstate traceだけとする。
+Fetching file lists, search ranges, and open results from Zed's
+worktree/project/buffer APIs — with zec duplicating no text, selection,
+undo, or dirty state — is a non-normative implementation note. The
+normative Pass/Fail oracles are only the expected JSON and state traces
+above.
 
 ### A3. Exact multi-file workflow
 
-`alpha_1_acceptance`は実バイナリをcontrolling PTYへ起動し、キー入力だけで次を実行する。
+`e2e_repository` starts the real binary on a controlling PTY and performs
+the following through key input alone.
 
-1. directoryから起動し、quick-openでUTF-8 BOM file Aを開いてselection置換する。
-2. project searchからCRLF file Bを開いて別tokenを編集する。
-3. quick-openでfinal newlineなしのfile Cを開いて行末を編集する。
-4. scratch tabを作り、Unicode path/textのfile Dとしてroot配下へSave Asする。
-5. A/B/C/Dを保存し、tab statusのdirty/conflict/deleted markerが0であることを確認する。
-6. 終了後の全manifestをexpected manifestと完全一致させ、編集対象外のpath、mode、bytesが
-   1つも変わっていないことを確認する。
-7. freshな第2processで同じdirectoryを起動し、PTY操作でA/B/C/Dを再度openする。
-   quick-open/searchから開いたcaretが各expected match startで、textがexpected bytesであることを
-   確認する。restart前のcursor/session復元は要求しない。
-8. exit code 0、終了後の`tcgetattr`と起動前baselineの完全一致、alternate screen、mouse tracking、
-   bracketed paste、cursor visibility、application cursor/keypad modeのbaseline復帰を確認する。
+1. Start from the directory, open UTF-8-BOM file A via quick-open, and
+   replace a selection.
+2. Open CRLF file B from project search and edit another token.
+3. Open no-final-newline file C via quick-open and edit the end of a line.
+4. Create a scratch tab and Save As under the root as file D with a
+   Unicode path/text.
+5. Save A/B/C/D and confirm the tab status shows 0 dirty/conflict/deleted
+   markers.
+6. After exit, the full manifest matches the expected manifest exactly,
+   with not a single path, mode, or byte changed outside the edit
+   targets.
+7. Start a fresh second process on the same directory and reopen A/B/C/D
+   through PTY input. Carets opened from quick-open/search sit at each
+   expected match start and the text equals the expected bytes. Restoring
+   the pre-restart cursor/session is not required.
+8. Exit code 0; post-exit `tcgetattr` equals the pre-start baseline
+   exactly; and the alternate screen, mouse tracking, bracketed paste,
+   cursor visibility, and application cursor/keypad modes return to
+   baseline.
 
-`A3_WORKFLOW_01`から`A3_WORKFLOW_20`まで、fresh fixture、fresh config directory、
-fresh processで逐次実行し、retryは0回とする。編集/paste payloadには連番付きunique tokenを使い、
-送信token列、画面適用token列、expected file token列を完全一致させる。
+`A3_WORKFLOW_01` through `A3_WORKFLOW_20` run sequentially with a fresh
+fixture, fresh config directory, and fresh process, with 0 retries.
+Edit/paste payloads use serially numbered unique tokens, and the sent
+token sequence, the on-screen applied sequence, and the expected file
+token sequence must match exactly.
 
 ### A4. Responsiveness and resource envelope
 
-`alpha_1_bench --assert`はspecに固定したinputとVT predicateで次をassertする。
+`e2e_repository_bench --assert` asserts the following with spec-pinned
+inputs and VT predicates.
 
-- directory起動: spawn直前からReady generationまで。2 warm-up後20 fresh launchesの
-  p95が3,000 ms以下
-- quick-open: index-ready状態で、PTY flushからexpected selected result generationまで。
-  10 warm-up後100 spec queriesのp95 150 ms以下、max 500 ms以下
-- project search: 各sampleをfresh processのindex-ready状態にし、過去に実行していない
-  `ALPHA1_BENCH_SEARCH`を送る。expected hit数1,000のcomplete generationまでを
-  2 warm-up後10 samples測定し、p95 5,000 ms以下。total hit countは1,000、画面へ出すlistは
-  specに固定した先頭100件とする
-- in-flight search: query replacementは新queryとexpected results、cancelはprompt消滅、
-  quitはchild回収を終了eventとする。各20 attemptsのmax 250 ms以下
-- editing: 100,000行fileへ連番tokenとspecで固定した`payload_suffix = LF`を1回のpasteでinsertし、
-  そのtokenが直前のexpected rowへ現れ、caretが次rowへ移ったgenerationまで。10 warm-up後500 editsの
-  p95 100 ms以下、max 500 ms以下
-- save: 5 MiB fileの固定offsetを各sample直前に1 byte変更してdirtyにし、`Ctrl-S` flushから
-  dirty marker消滅とexpected disk bytesの両方まで。2 warm-up後10 samplesのmax 2,000 ms以下
-- zec main processの`/proc/PID/status` `VmHWM`を1,024倍してbytesへ変換した値が
-  1,073,741,824以下で、benchmark中のdescendant process countが0。descendantはchild spawn前に
-  CN_PROC LISTENのmatching ACKを確認し、fork/clone eventと全TIDの`/proc` childrenを併用して
-  追跡する。event lossはFail、終了時はfinal drain後に明示的にIGNOREを送る
-- reportの`sent_input_ids`、`applied_input_ids`、expected ID列が完全一致し、
-  `dropped_count=0`かつreorderなし
+- Directory startup: from just before spawn to the Ready generation. p95
+  of 20 fresh launches after 2 warm-ups ≤ 3,000 ms.
+- Quick-open: in the index-ready state, from PTY flush to the expected
+  selected-result generation. Over 100 spec queries after 10 warm-ups:
+  p95 ≤ 150 ms, max ≤ 500 ms.
+- Project search: each sample uses a fresh process in the index-ready
+  state and sends a never-before-run `ALPHA1_BENCH_SEARCH`. Measured to
+  the complete generation with the expected 1,000 hits, 10 samples after
+  2 warm-ups, p95 ≤ 5,000 ms. The total hit count is 1,000 and the list
+  shown on screen is the spec-pinned first 100.
+- In-flight search: query replacement ends at the new query and its
+  expected results, cancel at prompt removal, quit at child collection.
+  Max ≤ 250 ms over 20 attempts each.
+- Editing: insert a serial token plus the spec-pinned
+  `payload_suffix = LF` into the 100,000-line file with one paste,
+  measured to the generation where the token appears on the expected row
+  and the caret has moved to the next row. Over 500 edits after 10
+  warm-ups: p95 ≤ 100 ms, max ≤ 500 ms.
+- Save: flip 1 byte at a fixed offset of a 5 MiB file just before each
+  sample to dirty it; from the `Ctrl-S` flush until both the dirty marker
+  disappears and the expected disk bytes are read. Max ≤ 2,000 ms over 10
+  samples after 2 warm-ups.
+- The zec main process's `/proc/PID/status` `VmHWM` × 1,024 as bytes is ≤
+  1,073,741,824, and the descendant process count during the benchmark is
+  0. Descendants are tracked by confirming the matching CN_PROC LISTEN
+  ACK before child spawn and combining fork/clone events with `/proc`
+  children of every TID. Event loss is Fail, and an explicit IGNORE is
+  sent after the final drain at shutdown.
+- The report's `sent_input_ids`, `applied_input_ids`, and the expected id
+  sequence match exactly, with `dropped_count=0` and no reordering.
 
-benchmark reportはschema version、environment、各raw sample、warm-up/sample count、
-p50/p95/max、VmHWM、input ID列をJSONへ保存する。verify modeはraw samplesから統計値を
-再計算する。単一の巨大lineと極端なmatch数はfixtureへ含めず、既知制約として維持する。
+The benchmark report saves schema version, environment, each raw sample,
+warm-up/sample counts, p50/p95/max, VmHWM, and the input id sequences as
+JSON. Verify mode recomputes the statistics from raw samples. A single
+giant line and extreme full-match counts are excluded from the fixture and
+maintained as known constraints.
 
 ### A5. Failure and terminal lifecycle
 
-各caseはfresh fixture、fresh config、fresh controlling PTY、fresh foreground process groupで行う。
+Each case runs with a fresh fixture, fresh config, fresh controlling PTY,
+and fresh foreground process group.
 
-- open failureはself-referential symlinkによる`ELOOP`、save failureはregular fileを親にした
-  child pathへのSave Asによる`ENOTDIR`をactual binaryへ発生させる
-- search failureはproduction reducerへcontrolled providerから`EIO`を返す。error表示後も
-  既存tab count、本文、dirty stateが直前traceと一致し、control tabの編集・保存を続行できる
-- `SIGINT`、`SIGQUIT`、`SIGTERM`、`SIGHUP`はReady後にforeground process groupへ
-  `killpg`で送る。5秒以内にnormal exit code 0で回収し、`tcgetattr`完全一致とalternate screen、
-  mouse tracking、bracketed paste、cursor visibility、application cursor/keypad modeの
-  baseline復帰をassertする
-- `SIGTSTP`は`killpg`後5秒以内に`waitpid(WUNTRACED)`でstoppedを確認し、その時点で
-  terminal baselineへ復帰していることをassertする。`SIGCONT`後15秒以内にReadyへ戻り、
-  固定tokenの編集・保存と`Ctrl-Q`によるexit code 0まで完走する
-- 各childは5秒以内に`try_wait`で回収し、reader threadも5秒以内にjoinする。終了後の
-  process groupにdescendant PIDがなく、harnessの`/proc/self/fd` countが開始前と一致する
+- Open failure is `ELOOP` via a self-referential symlink; save failure is
+  `ENOTDIR` via Save As to a child path whose parent is a regular file —
+  both raised in the actual binary.
+- Search failure returns `EIO` from a controlled provider into the
+  production reducer. After the error is shown, the existing tab count,
+  text, and dirty state match the preceding trace, and editing and saving
+  the control tab continues.
+- `SIGINT`, `SIGQUIT`, `SIGTERM`, and `SIGHUP` are sent with `killpg` to
+  the foreground process group after Ready. Collection within 5 seconds
+  with normal exit code 0, exact `tcgetattr` match, and baseline
+  restoration of the alternate screen, mouse tracking, bracketed paste,
+  cursor visibility, and application cursor/keypad modes are asserted.
+- `SIGTSTP`: stopped state is confirmed via `waitpid(WUNTRACED)` within 5
+  seconds of `killpg`, with the terminal restored to baseline at that
+  point. After `SIGCONT`, Ready returns within 15 seconds, and the run
+  completes through editing and saving the fixed token and exiting with
+  code 0 via `Ctrl-Q`.
+- Each child is collected via `try_wait` within 5 seconds and the reader
+  thread joins within 5 seconds. After exit the process group has no
+  descendant PIDs and the harness's `/proc/self/fd` count equals the
+  pre-start count.
 
-open、search、save failureとINT、QUIT、TERM、HUP、TSTP/CONTの各scenarioを20回ずつ実行する。
-reportの必須IDは`A1_ROOT_IDENTITY`、`A1_OUTSIDE_TRACE`、`A1_PARTIAL_STARTUP`、
-`A2_QUICK_OPEN`、`A2_PROJECT_SEARCH`、`A2_STALE_RESULT`、
-`A3_WORKFLOW_01..20`、`A5_{OPEN,SEARCH,SAVE}_01..20`、
-`A5_{INT,QUIT,TERM,HUP,TSTP_CONT}_01..20`の展開後186件とする。
-全IDをちょうど1回実行し、1件でも欠落、重複、失敗したらreport verificationをFailにする。
+The open, search, and save failures and the INT, QUIT, TERM, HUP, and
+TSTP/CONT scenarios run 20 times each. The report's required ids are the
+186 expansions of `A1_ROOT_IDENTITY`, `A1_OUTSIDE_TRACE`,
+`A1_PARTIAL_STARTUP`, `A2_QUICK_OPEN`, `A2_PROJECT_SEARCH`,
+`A2_STALE_RESULT`, `A3_WORKFLOW_01..20`, `A5_{OPEN,SEARCH,SAVE}_01..20`,
+and `A5_{INT,QUIT,TERM,HUP,TSTP_CONT}_01..20`. Every id runs exactly once;
+a single missing, duplicated, or failed id fails report verification.
 
 ### A6. CI evidence
 
-Pass判定はcandidateとpromotionの2 commitで行い、self-referenceを作らない。
+Pass judgment uses two commits — candidate and promotion — and creates no
+self-reference.
 
-1. candidate commit `C`でpush eventの`Alpha 1 gate` run `R`をretry 0で完了させる。
-   `R`はacceptance/benchmark reportをartifactとしてuploadし、job conclusionを
-   `success`にする。
-2. `C`のdirect childとなるpromotion commit `P`は
-   `docs/alpha-1-evidence.json`だけを追加する。そこへ`C`のfull SHA、`R`のrun/job URLとID、
-   run attempt、generator/spec/before/after manifest SHA-256、report SHA-256、既存test count、
-   acceptance case count 186を記録する。
-3. `P`の`Alpha 1 evidence` jobはGitHub APIから、`R.head_sha == C`、
-   `R.event == push`、`R.run_attempt == 1`、gate job conclusionが`success`、artifact digest一致を
-   確認する。同じ`workflow_id`、`event == push`、`head_sha == C`を満たすrun IDの集合が
-   `[R.id]`だけであることも確認し、別run IDによるやり直しを拒否する。
-4. 同じevidence jobは`P^ == C`、`C..P`の変更pathがevidence JSONだけ、
-   acceptanceが186/186、benchmarkの全assertがtrueであることを確認する。さらに自身の
-   `GITHUB_RUN_ATTEMPT == 1`と、同じ`workflow_id`、`event == push`、`head_sha == P`の
-   run ID集合が自身のIDだけであることを確認する。
+1. On candidate commit `C`, complete the push-event `Alpha 1 gate` run `R`
+   with 0 retries. `R` uploads the acceptance/benchmark reports as
+   artifacts and its job conclusion is `success`.
+2. Promotion commit `P`, a direct child of `C`, adds only
+   `docs/alpha-1-evidence.json`, recording `C`'s full SHA, `R`'s run/job
+   URLs and ids, the run attempt, generator/spec/before/after manifest
+   SHA-256 values, report SHA-256 values, the existing test count, and
+   the acceptance case count 186.
+3. `P`'s `Alpha 1 evidence` job confirms via the GitHub API that
+   `R.head_sha == C`, `R.event == push`, `R.run_attempt == 1`, the gate
+   job conclusion is `success`, and artifact digests match. It also
+   confirms that the set of run ids with the same `workflow_id`,
+   `event == push`, and `head_sha == C` is exactly `[R.id]`, rejecting
+   redo runs under different ids.
+4. The same evidence job confirms `P^ == C`, that the changed paths in
+   `C..P` are only the evidence JSON, that acceptance is 186/186, and
+   that every benchmark assertion is true. It further confirms its own
+   `GITHUB_RUN_ATTEMPT == 1` and that the set of run ids with the same
+   `workflow_id`, `event == push`, and `head_sha == P` is only its own
+   id.
 
-default branch上の`Alpha 1 evidence` jobが`success`であることだけをcanonicalなPassとする。
-文書status、issue checklist、実地dogfood報告、workflow全体の実行中URLは判定に使わない。
+Only a `success` `Alpha 1 evidence` job on the default branch is the
+canonical Pass. Document status, issue checklists, field dogfood reports,
+and in-progress workflow URLs play no part.
 
 ## Explicit exclusions from the gate
 
-- LSP、completion、diagnostics、go-to-definition、rename
-- file tree sidebar、Git UI、integrated terminal/task runner
-- plugin、Zed settings/keymap互換、session restore、crash recovery
-- project-wide replace、regex/case/word search option
-- mouse drag/double/triple selection、terminal-aware soft wrap
-- macOS、Windows、remote filesystem、複数root workspace
-- package配布、外部ユーザー向けrelease
-- power lossに耐えるatomic/durable save
-- 10 MiB超のfile、64 KiB超の単一display line、極端な全件match
+- LSP, completion, diagnostics, go-to-definition, rename
+- file tree sidebar, Git UI, integrated terminal/task runner
+- plugins, Zed settings/keymap compatibility, session restore, crash
+  recovery
+- project-wide replace; regex/case/word search options
+- mouse drag/double/triple selection, terminal-aware soft wrap
+- macOS, Windows, remote filesystems, multi-root workspaces
+- package distribution, releases for external users
+- atomic/durable saves that survive power loss
+- files over 10 MiB, single display lines over 64 KiB, extreme
+  all-matching queries
 
-この一覧はAlpha 1で測定しないscopeを定めるもので、追加の主観判定ではない。
+This list defines the scope Alpha 1 does not measure; it is not an
+additional subjective judgment.
 
-固定Zed revisionの非atomicな保存経路は既知制約として残る。Alpha 1におけるsave成功は
-Zedのsave taskがwrite/closeを成功させ、dirty=falseとなり、期待disk bytesを読める地点までとする。
-`fsync`、atomic rename、power-loss durabilityは要求しない。fixtureとdogfood対象はcleanな
-Git管理下のsource treeに限定する。
+The non-atomic save path of the pinned Zed revision remains a known
+constraint. Save success in Alpha 1 extends to the point where Zed's save
+task completes write/close, dirty becomes false, and the expected disk
+bytes can be read. `fsync`, atomic rename, and power-loss durability are
+not required. Fixtures and dogfood targets are limited to clean
+Git-managed source trees.
 
 ## Non-normative implementation notes
 
-zec独自のtext modelや`std::fs`保存でZedを迂回しない。A0のPoC regression gateは既存の
-編集権限境界を維持するが、この実装note自体は人手のPass条件にしない。
+zec does not bypass Zed with its own text model or `std::fs` saves. The A0
+PoC regression gate maintains the existing editing authority boundary, but
+this implementation note itself is not a human Pass condition.
 
-1. feature実装前にfixture generator、expected manifest、failing `alpha_1_acceptance`を追加する。
-2. directory root/file identityを1つにする。
-3. quick-openを通し、その同じroot modelでproject searchを通す。
-4. exact multi-file/reopen scenarioをgreenにする。
-5. async cancellation、performance、signal/job-controlを閉じる。
-6. hosted `Alpha 1 gate`を1回でgreenにし、promotion evidence jobをgreenにする。
+1. Before implementing features, add the fixture generator, expected
+   manifests, and a failing `e2e_repository`.
+2. Unify directory root/file identity.
+3. Land quick-open, then project search on the same root model.
+4. Turn the exact multi-file/reopen scenario green.
+5. Close async cancellation, performance, and signal/job control.
+6. Turn the hosted `Alpha 1 gate` green in one attempt, then the
+   promotion evidence job green.
 
-実装順や「それ以外の機能を先に作らない」という運用方針はPass/Failには影響しない。
+The implementation order and the policy of not building other features
+first do not affect Pass/Fail.
