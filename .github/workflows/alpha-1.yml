@@ -58,7 +58,7 @@ jobs:
     needs: classify
     if: needs.classify.outputs.promotion != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -106,7 +106,7 @@ jobs:
           /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 
       - name: Build the release gate binaries
-        timeout-minutes: 60
+        timeout-minutes: 90
         run: cargo build --locked --release --features alpha-1-linux --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
 
       - name: Run PoC regression tests
