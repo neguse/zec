@@ -16,7 +16,6 @@ use std::{
 use anyhow::{Context as _, Result, ensure};
 use e2e_support::{CTRL_N, CTRL_Q, CTRL_W, DELETE, END, ENTER, ESC, PtySession, TerminalBaseline};
 use language_support::{CaseResult, CorrelationTrace, EvidenceFile};
-use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use workspace_support::{
@@ -344,9 +343,12 @@ fn run_crash_recovery(zec: &Path, case_id: &str) -> Result<String> {
     let mark = crashed.paste_marked(&marker)?;
     crashed.wait_contains("dirty crash buffer", mark, &marker)?;
     thread::sleep(Duration::from_millis(1_250));
-    crashed.send_signal(Signal::SIGKILL)?;
+    crashed.kill_child()?;
     let status = crashed.wait_exit()?;
-    ensure!(!status.success(), "SIGKILL unexpectedly reported success");
+    ensure!(
+        !status.success(),
+        "forced kill unexpectedly reported success"
+    );
     ensure!(
         !fixture.session_files()?.is_empty(),
         "periodic writer committed no session files"
@@ -360,7 +362,7 @@ fn run_crash_recovery(zec: &Path, case_id: &str) -> Result<String> {
         "crash journal recovery is not visible"
     );
     finish(restored, &baseline, true)?;
-    Ok(format!("SIGKILL recovery restored {marker}"))
+    Ok(format!("forced-kill recovery restored {marker}"))
 }
 
 fn run_failure_scenario(zec: &Path, scenario: &str, case_id: &str) -> Result<String> {

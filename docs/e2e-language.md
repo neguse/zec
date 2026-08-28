@@ -21,13 +21,13 @@ all exit 0.
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
 rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-fixture-repository-verifier
 /tmp/zec-fixture-repository-verifier verify-oracles --repo .
-cargo test --locked --release --features e2e-linux \
+cargo test --locked --release \
   --bin zec -- --test-threads=1
-cargo test --locked --release --features e2e-linux \
+cargo test --locked --release \
   --test parity_contract --test e2e_tui \
   --test language_service --test settings_reload --test lsp_failures \
   -- --test-threads=1
-cargo build --locked --release --features e2e-linux \
+cargo build --locked --release \
   --bin zec --bin fixture_lsp --bin e2e_language --bin e2e_language_bench
 timeout --signal=TERM --kill-after=5s 45m \
   ./target/release/e2e_language --zec ./target/release/zec \

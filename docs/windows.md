@@ -80,10 +80,12 @@ cooking before the client reads them, which changes what a test can send:
 - `e2e_tui` runs all nine scenarios on ConPTY. Signal, job-control,
   symlink, sshd, gdb, jupyter, and media-bridge steps stay Unix-only
   behind `#[cfg(unix)]`, as do the ConPTY-incapable steps listed above.
-- The `e2e_repository` and `e2e_workspace` binaries stay behind the
-  `e2e-linux` feature: the repository fixture manifest encodes Unix modes
-  and symlinks as contract, so they cannot be ported without redesigning
-  that contract.
+- The `e2e_repository`, `e2e_workspace`, and benchmark binaries compile
+  and run everywhere; signal cases and the loss-free fork tracker are
+  Unix-only, so the required-id set is platform-scoped
+  (`fixture::platform_case_ids`). Repository fixture generation still
+  requires Unix modes and symlinks; porting the generator is the next
+  step toward running the repository suite on Windows.
 
 `zec update apply` refuses to replace the running executable on Windows with
 a documented error; tests/update_cli.rs verifies the behavior of both

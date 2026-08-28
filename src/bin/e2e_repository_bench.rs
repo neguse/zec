@@ -2,16 +2,17 @@ mod e2e_support;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    fs,
     path::Path,
-    process,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        mpsc::{self, Sender, TryRecvError},
-    },
+    sync::mpsc::{self, Sender, TryRecvError},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
+};
+#[cfg(unix)]
+use std::{
+    io, process,
+    sync::atomic::{AtomicU32, Ordering},
+    time::Instant,
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -25,7 +26,10 @@ use e2e_support::{
 use e2e_support::{
     SearchResultReport, expected_benchmark_quick_open_queries, expected_benchmark_search_rows,
 };
+#[cfg(unix)]
 use nix::libc;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 const STARTUP_WARMUPS: usize = 2;
 const STARTUP_SAMPLES: usize = 20;
@@ -39,18 +43,31 @@ const EDIT_SAMPLES: usize = 500;
 const SAVE_WARMUPS: usize = 2;
 const SAVE_SAMPLES: usize = 10;
 
+#[cfg(unix)]
 const NETLINK_CONNECTOR: i32 = 11;
+#[cfg(unix)]
 const CN_IDX_PROC: u32 = 1;
+#[cfg(unix)]
 const CN_VAL_PROC: u32 = 1;
+#[cfg(unix)]
 const PROC_CN_MCAST_IGNORE: u32 = 2;
+#[cfg(unix)]
 const PROC_CN_MCAST_LISTEN: u32 = 1;
+#[cfg(unix)]
 const NLMSG_NOOP: u16 = 1;
+#[cfg(unix)]
 const NLMSG_ERROR: u16 = 2;
+#[cfg(unix)]
 const NLMSG_DONE: u16 = 3;
+#[cfg(unix)]
 const NLMSG_OVERRUN: u16 = 4;
+#[cfg(unix)]
 const PROC_EVENT_FORK: u32 = 1;
+#[cfg(unix)]
 const NETLINK_HEADER_LEN: usize = 16;
+#[cfg(unix)]
 const CONNECTOR_HEADER_LEN: usize = 20;
+#[cfg(unix)]
 static NEXT_CONTROL_SEQUENCE: AtomicU32 = AtomicU32::new(1);
 
 fn main() -> Result<()> {
@@ -190,14 +207,19 @@ struct ProjectSearchObservation {
 }
 
 struct ArmedResourceMonitor {
+    // Loss-free fork tracking exists only on Linux; Windows samples the
+    // live process tree instead.
+    #[cfg(unix)]
     events: ProcEventSocket,
 }
 
+#[cfg(unix)]
 struct ProcEventSocket {
     fd: OwnedFd,
     subscribed: bool,
 }
 
+#[cfg(unix)]
 impl ProcEventSocket {
     fn subscribe() -> Result<Self> {
         let raw_fd = unsafe {
@@ -377,12 +399,14 @@ impl ProcEventSocket {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ProcEventSocket {
     fn drop(&mut self) {
         let _ = self.unsubscribe();
     }
 }
 
+#[cfg(unix)]
 fn parse_proc_events(
     datagram: &[u8],
     edges: &mut Vec<(i32, i32)>,
@@ -460,10 +484,12 @@ fn parse_proc_events(
     Ok(matched_acknowledgement)
 }
 
+#[cfg(unix)]
 fn observed_descendant_count(root: i32, edges: &[(i32, i32)]) -> usize {
     observed_descendant_pids(root, edges).len()
 }
 
+#[cfg(unix)]
 fn observed_descendant_pids(root: i32, edges: &[(i32, i32)]) -> BTreeSet<i32> {
     let mut descendants = BTreeSet::new();
     loop {
@@ -479,6 +505,7 @@ fn observed_descendant_pids(root: i32, edges: &[(i32, i32)]) -> BTreeSet<i32> {
     }
 }
 
+#[cfg(unix)]
 fn record_descendant_commands(root: i32, edges: &[(i32, i32)], commands: &mut BTreeSet<String>) {
     for pid in observed_descendant_pids(root, edges) {
         let command_line = fs::read(format!("/proc/{pid}/cmdline"))
@@ -502,14 +529,17 @@ fn record_descendant_commands(root: i32, edges: &[(i32, i32)], commands: &mut BT
     }
 }
 
+#[cfg(unix)]
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
 
+#[cfg(unix)]
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
 
+#[cfg(unix)]
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
     let value = bytes
         .get(offset..offset + 2)
@@ -517,6 +547,7 @@ fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
     Ok(u16::from_ne_bytes([value[0], value[1]]))
 }
 
+#[cfg(unix)]
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
     let value = bytes
         .get(offset..offset + 4)
@@ -524,6 +555,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
     Ok(u32::from_ne_bytes([value[0], value[1], value[2], value[3]]))
 }
 
+#[cfg(unix)]
 fn read_i32(bytes: &[u8], offset: usize) -> Result<i32> {
     Ok(i32::from_ne_bytes(read_u32(bytes, offset)?.to_ne_bytes()))
 }
@@ -560,6 +592,7 @@ struct ResourceMonitor {
     handle: Option<JoinHandle<Result<ResourceObservation>>>,
 }
 
+#[cfg(unix)]
 impl ArmedResourceMonitor {
     fn start(self, pid: i32) -> Result<ResourceMonitor> {
         let initial_vm_hwm_bytes = vm_hwm_bytes_if_present(pid)?.unwrap_or(0);
@@ -635,11 +668,66 @@ impl ArmedResourceMonitor {
     }
 }
 
+#[cfg(windows)]
+impl ArmedResourceMonitor {
+    fn start(self, pid: i32) -> Result<ResourceMonitor> {
+        let initial_vm_hwm_bytes = vm_hwm_bytes_if_present(pid)?.unwrap_or(0);
+        let initial_descendant_count = descendant_process_count(pid)?;
+        let (stop, receiver) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name(format!("e2e-resource-{pid}"))
+            .spawn(move || {
+                let mut observation = ResourceObservation {
+                    max_vm_hwm_bytes: initial_vm_hwm_bytes,
+                    max_descendant_count: initial_descendant_count,
+                    descendant_commands: BTreeSet::new(),
+                };
+                loop {
+                    match vm_hwm_bytes_if_present(pid) {
+                        Ok(Some(bytes)) => {
+                            observation.max_vm_hwm_bytes = observation.max_vm_hwm_bytes.max(bytes);
+                        }
+                        Ok(None) | Err(_) => {}
+                    }
+                    if let Ok(count) = descendant_process_count(pid) {
+                        observation.max_descendant_count =
+                            observation.max_descendant_count.max(count);
+                    }
+                    let stopping = match receiver.try_recv() {
+                        Ok(()) | Err(TryRecvError::Disconnected) => true,
+                        Err(TryRecvError::Empty) => false,
+                    };
+                    if stopping {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                ensure!(
+                    observation.max_vm_hwm_bytes > 0,
+                    "peak working set was never observed for zec"
+                );
+                Ok(observation)
+            })
+            .context("spawn continuous resource monitor")?;
+        Ok(ResourceMonitor {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
 impl ResourceMonitor {
     fn arm() -> Result<ArmedResourceMonitor> {
-        Ok(ArmedResourceMonitor {
-            events: ProcEventSocket::subscribe()?,
-        })
+        #[cfg(unix)]
+        {
+            Ok(ArmedResourceMonitor {
+                events: ProcEventSocket::subscribe()?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(ArmedResourceMonitor {})
+        }
     }
 
     fn finish(mut self) -> Result<ResourceObservation> {
@@ -1370,8 +1458,8 @@ mod tests {
             "Project search: E2E_BENCH_SEARCH  10/1000  {}:{}:{}  {}",
             expected.path, expected.line, expected.column, expected.preview
         );
-        assert_eq!(core.len(), 115);
-        let status_with_clipped_options = format!("{core}  [li");
+        assert_eq!(core.len(), 109);
+        let status_with_clipped_options = format!("{core}  [lit case");
         assert_eq!(
             status_with_clipped_options.len(),
             usize::from(e2e_support::COLS)
@@ -1408,7 +1496,9 @@ mod tests {
         assert!(token_immediately_after_cursor(screen, "marker"));
     }
 
+    #[cfg(unix)]
     #[test]
+    #[cfg(unix)]
     fn proc_events_capture_a_short_lived_descendant() {
         let mut events = ProcEventSocket::subscribe().expect("subscribe before root spawn");
         let mut root = Command::new("/bin/sh")

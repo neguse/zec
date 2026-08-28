@@ -15,6 +15,7 @@ use e2e_support::{
     command_output_with_timeout, environment_report, fixture, observe_poc_tests, open_fd_count,
     oracle_hashes, parse_invocation, reset_fixed_fixture, verify_acceptance_report, write_report,
 };
+#[cfg(unix)]
 use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
@@ -76,23 +77,26 @@ fn run(arguments: e2e_support::RunArguments) -> Result<()> {
     for run in 1..=fixture::WORKFLOW_RUNS {
         runner.case(&format!("A5_SAVE_{run:02}"), save_failure);
     }
-    for (name, signal) in [
-        ("INT", Signal::SIGINT),
-        ("QUIT", Signal::SIGQUIT),
-        ("TERM", Signal::SIGTERM),
-        ("HUP", Signal::SIGHUP),
-    ] {
+    #[cfg(unix)]
+    {
+        for (name, signal) in [
+            ("INT", Signal::SIGINT),
+            ("QUIT", Signal::SIGQUIT),
+            ("TERM", Signal::SIGTERM),
+            ("HUP", Signal::SIGHUP),
+        ] {
+            for run in 1..=fixture::WORKFLOW_RUNS {
+                runner.case(&format!("A5_{name}_{run:02}"), |zec| {
+                    signal_exit(zec, signal)
+                });
+            }
+        }
         for run in 1..=fixture::WORKFLOW_RUNS {
-            runner.case(&format!("A5_{name}_{run:02}"), |zec| {
-                signal_exit(zec, signal)
-            });
+            runner.case(&format!("A5_TSTP_CONT_{run:02}"), suspend_resume);
         }
     }
-    for run in 1..=fixture::WORKFLOW_RUNS {
-        runner.case(&format!("A5_TSTP_CONT_{run:02}"), suspend_resume);
-    }
 
-    let required = fixture::required_case_ids();
+    let required = fixture::platform_case_ids();
     ensure!(
         runner.cases.len() == required.len(),
         "internal case plan is incomplete"
@@ -1063,9 +1067,17 @@ fn save_failure(zec: &Path) -> Result<String> {
     let target_error = fs::write(&failed_path, b"must not be written")
         .err()
         .context("ENOTDIR target was unexpectedly writable")?;
+    // Unix reports ENOTDIR for a path whose parent is a regular file;
+    // Windows reports ERROR_PATH_NOT_FOUND or ERROR_DIRECTORY.
+    #[cfg(unix)]
+    let parent_is_file_errors = [nix::libc::ENOTDIR];
+    #[cfg(windows)]
+    let parent_is_file_errors = [3, 267];
     ensure!(
-        target_error.raw_os_error() == Some(nix::libc::ENOTDIR),
-        "fixed save-failure target does not produce ENOTDIR: {target_error}"
+        target_error
+            .raw_os_error()
+            .is_some_and(|code| parent_is_file_errors.contains(&code)),
+        "fixed save-failure target does not report a file parent: {target_error}"
     );
     let config = e2e_support::fresh_config_dir("A5_SAVE")?;
     let (mut session, baseline) =
@@ -1121,6 +1133,7 @@ fn save_failure(zec: &Path) -> Result<String> {
     Ok("ENOTDIR preserved dirty text and control tab remained saveable".to_owned())
 }
 
+#[cfg(unix)]
 fn signal_exit(zec: &Path, signal: Signal) -> Result<String> {
     let generated = reset_fixed_fixture()?;
     let config = e2e_support::fresh_config_dir(&format!("signal-{}", signal as i32))?;
@@ -1145,6 +1158,7 @@ fn signal_exit(zec: &Path, signal: Signal) -> Result<String> {
     ))
 }
 
+#[cfg(unix)]
 fn suspend_resume(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
     let config = e2e_support::fresh_config_dir("A5_TSTP_CONT")?;

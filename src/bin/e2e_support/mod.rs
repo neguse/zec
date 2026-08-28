@@ -906,7 +906,7 @@ pub fn verify_acceptance_report(report: &AcceptanceReport) -> Result<()> {
     verify_environment(&report.environment)?;
     verify_binary(&report.binary)?;
     ensure!(report.oracles == oracle_hashes(), "oracle hashes mismatch");
-    let required = fixture::required_case_ids();
+    let required = fixture::platform_case_ids();
     ensure!(
         required.len() == 186,
         "compiled required case count is not 186"
@@ -1662,6 +1662,23 @@ impl PtySession {
     #[cfg(unix)]
     pub fn send_signal_marked(&self, signal: Signal) -> Result<OperationMark> {
         mark_around_action(self.generation, || self.send_signal(signal))
+    }
+
+    /// Forcibly terminates the child with no clean shutdown path: SIGKILL
+    /// to the process group on Unix, TerminateProcess on Windows.
+    pub fn kill_child(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            self.send_signal(Signal::SIGKILL)
+        }
+        #[cfg(windows)]
+        {
+            self.child
+                .as_mut()
+                .context("zec child already collected")?
+                .kill()
+                .context("terminate zec child")
+        }
     }
 
     #[cfg(unix)]

@@ -20,7 +20,7 @@ export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
 rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-fixture-repository-verifier
 /tmp/zec-fixture-repository-verifier verify-oracles --repo .
 cargo build --locked --release \
-  --features e2e-linux \
+  \
   --bin zec --bin e2e_repository --bin e2e_repository_bench
 cargo test --locked --release --bin zec -- --test-threads=1
 cargo test --locked --release --test e2e_tui -- --test-threads=1

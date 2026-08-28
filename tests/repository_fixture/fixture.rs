@@ -660,6 +660,29 @@ pub fn expected_after_manifest(run: u8) -> Result<Vec<u8>, String> {
     Ok(manifest_bytes(&after_entries(run)?))
 }
 
+/// The required ids for the platform the suite runs on. Signal and
+/// job-control semantics do not exist on Windows, so those case families
+/// are Unix-only; every other id is required everywhere.
+pub fn platform_case_ids() -> Vec<String> {
+    let ids = required_case_ids();
+    if cfg!(unix) {
+        return ids;
+    }
+    ids.into_iter()
+        .filter(|id| {
+            ![
+                "A5_INT_",
+                "A5_QUIT_",
+                "A5_TERM_",
+                "A5_HUP_",
+                "A5_TSTP_CONT_",
+            ]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+        })
+        .collect()
+}
+
 pub fn required_case_ids() -> Vec<String> {
     let mut ids = vec![
         "A1_ROOT_IDENTITY".to_owned(),

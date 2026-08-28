@@ -35,14 +35,14 @@ manual-inspection substitutes for Pass are not recognized.
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
 cargo metadata --locked --format-version 1 --no-deps >/dev/null
 cargo fmt --all -- --check
-cargo test --locked --release --features e2e-linux \
+cargo test --locked --release \
   --bin zec -- --test-threads=1
-cargo test --locked --release --features e2e-linux \
+cargo test --locked --release \
   --test parity_contract --test e2e_tui \
   --test language_service --test settings_reload --test lsp_failures \
   --test workspace_layout --test project_panel \
   --test workspace_search --test workspace_sessions -- --test-threads=1
-cargo build --locked --release --features e2e-linux \
+cargo build --locked --release \
   --bin zec --bin e2e_workspace --bin e2e_workspace_bench
 timeout --signal=TERM --kill-after=5s 60m \
   ./target/release/e2e_workspace --zec ./target/release/zec \

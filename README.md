@@ -294,7 +294,7 @@ cargo build --locked --bin zec
 ```
 
 Normal editing, repository mode, saving, and search all work on Windows,
-including the ConPTY integrated terminal and the e2e_language suite. POSIX
-signal/job control, the Linux PTY e2e suite, and the repository e2e
-binaries remain Linux-only; building those requires
-`--features e2e-linux`.
+including the ConPTY integrated terminal, the TUI acceptance suite, and
+the e2e_language suite. Every e2e binary builds on Windows with no cargo
+feature; POSIX signal/job-control cases and repository fixture generation
+remain Unix-only (see docs/windows.md).

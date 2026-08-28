@@ -91,7 +91,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release --features e2e-linux \
+          cargo build --locked --release \
             --bin zec \
             --bin e2e_repository --bin e2e_repository_bench \
             --bin fixture_lsp --bin e2e_language --bin e2e_language_bench \
@@ -105,9 +105,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --features e2e-linux \
+          cargo test --locked --release \
             --bin zec -- --test-threads=1
-          cargo test --locked --release --features e2e-linux \
+          cargo test --locked --release \
             --test parity_contract --test e2e_tui --test update_cli \
             --test language_service --test settings_reload --test lsp_failures \
             --test workspace_layout --test project_panel \
