@@ -52,8 +52,8 @@ to this section.
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
-rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
-/tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
+rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-fixture-repository-verifier
+/tmp/zec-fixture-repository-verifier verify-oracles --repo .
 cargo test --locked --release --features e2e-linux \
   --bin zec -- --test-threads=1
 cargo test --locked --release --features e2e-linux \

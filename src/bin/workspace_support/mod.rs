@@ -23,8 +23,8 @@ pub const CONTRACT_VERSION: u32 = 3;
 pub const FRESH_PROCESS_RUNS: usize = 20;
 pub const REQUIRED_CASE_COUNT: usize = 361;
 pub const VM_HWM_LIMIT_BYTES: u64 = 1_879_048_192;
-pub const READY_SENTINEL: &str = "WORKSPACE_E2E_READY";
-pub const SEARCH_TOKEN: &str = "WORKSPACE_E2E_SEARCH_TOKEN";
+pub const READY_SENTINEL: &str = "E2E_WORKSPACE_READY";
+pub const SEARCH_TOKEN: &str = "E2E_WORKSPACE_SEARCH_TOKEN";
 
 pub const CAPABILITY_PREFIXES: &[&str] = &[
     "C2_LAYOUT",

@@ -111,8 +111,8 @@ jobs:
           bash -n script/run-alpha-1-and-2-gates
           bash -n script/verify-alpha-3-artifact
           bash -n script/verify-alpha-3-evidence
-          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
-          /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
+          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-fixture-repository-verifier
+          /tmp/zec-fixture-repository-verifier verify-oracles --repo .
 
       - name: Build all release gate binaries
         timeout-minutes: 90

@@ -26,8 +26,8 @@ checkout, all exit 0 on the first attempt is eligible for promotion.
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
-rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
-/tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
+rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-fixture-repository-verifier
+/tmp/zec-fixture-repository-verifier verify-oracles --repo .
 cargo build --locked --release \
   --features e2e-linux \
   --bin zec --bin e2e_repository --bin e2e_repository_bench
@@ -73,7 +73,7 @@ record must be a single uncancelled attempt, and any result other than
   at most 64 KiB.
 
 The fixture's normative inputs, queries, and expected results live in
-`tests/alpha_1/spec-v1.json`. The manifest is JSONL ordered by relative
+`tests/repository_fixture/spec-v1.json`. The manifest is JSONL ordered by relative
 path in UTF-8 bytes, each record fixed to `path`, `kind`, 4-digit octal
 `mode`, `size`, lowercase `content_sha256`, and `symlink_target`. mtime and
 inode are excluded, and each record and the file end with LF. The generator
@@ -110,7 +110,7 @@ SHA-256 values are recorded in the report.
 
 The two release-profile test commands pass all 93 unit/headless tests and
 the 1 actual-binary PTY test of the existing PoC graduation.
-`tests/alpha_1/poc-test-ids-v1.txt` pins the 94 baseline test ids, and the
+`tests/repository_fixture/poc-test-ids-v1.txt` pins the 94 baseline test ids, and the
 acceptance verifier confirms the current
 `cargo test --release -- --list` contains every id. Additional tests are
 allowed; losing an existing case to deletion, ignore, or filtering is
@@ -217,7 +217,7 @@ inputs and VT predicates.
   selected-result generation. Over 100 spec queries after 10 warm-ups:
   p95 ≤ 150 ms, max ≤ 500 ms.
 - Project search: each sample uses a fresh process in the index-ready
-  state and sends a never-before-run `ALPHA1_BENCH_SEARCH`. Measured to
+  state and sends a never-before-run `E2E_BENCH_SEARCH`. Measured to
   the complete generation with the expected 1,000 hits, 10 samples after
   2 warm-ups, p95 ≤ 5,000 ms. The total hit count is 1,000 and the list
   shown on screen is the spec-pinned first 100.

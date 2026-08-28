@@ -472,8 +472,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary Git metadata fixture");
         let dot_git = directory.path().join(".git");
         std::fs::create_dir(&dot_git).expect("create fake .git directory");
-        std::fs::write(dot_git.join("alpha1-excluded.txt"), "not a repository")
-            .expect("write exclusion sentinel");
+        std::fs::write(
+            dot_git.join("repository-e2e-excluded.txt"),
+            "not a repository",
+        )
+        .expect("write exclusion sentinel");
 
         let error = validate_git_repository_metadata(&dot_git)
             .expect_err("a .git directory without HEAD must be rejected");

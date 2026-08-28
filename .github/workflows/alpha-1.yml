@@ -108,8 +108,8 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --format-version 1 --no-deps >/dev/null
           cargo fmt --all -- --check
-          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
-          /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
+          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-fixture-repository-verifier
+          /tmp/zec-fixture-repository-verifier verify-oracles --repo .
 
       - name: Build the release gate binaries
         timeout-minutes: 90

@@ -324,9 +324,9 @@ fn actual_binary_preserves_edits_and_restores_the_pty_on_every_exit_path() -> Re
 
 #[test]
 fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
-    const READY: &str = "BETA1_WORKSPACE_READY";
-    const TERMINAL_READY: &str = "BETA1_TERMINAL_READY";
-    const TASK_READY: &str = "BETA1_TASK_READY";
+    const READY: &str = "E2E_WORKSPACE_READY";
+    const TERMINAL_READY: &str = "E2E_TERMINAL_READY";
+    const TASK_READY: &str = "E2E_TASK_READY";
 
     let temp = tempfile::tempdir().context("create Beta 1 PTY fixture")?;
     let root = temp.path().join("beta-1-repo");
@@ -339,7 +339,7 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
           {
             "label": "Beta 1 Task",
             "command": "sh",
-            "args": ["-c", "printf 'BETA1_TASK_READY\\n' | tee -a beta1-task.log"],
+            "args": ["-c", "printf 'E2E_TASK_READY\\n' | tee -a beta1-task.log"],
             "reveal": "always",
             "hide": "never"
           }
@@ -648,8 +648,8 @@ fn remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Result<()> 
 
 #[test]
 fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<()> {
-    const READY: &str = "BETA2_RICH_CONTENT_READY";
-    const UPDATED: &str = "BETA2_RICH_CONTENT_LIVE_UPDATE";
+    const READY: &str = "E2E_RICH_CONTENT_READY";
+    const UPDATED: &str = "E2E_RICH_CONTENT_LIVE_UPDATE";
     const HEADING: &str = "Target Heading";
 
     let temp = tempfile::tempdir().context("create Beta 2 rich-content fixture")?;
@@ -714,7 +714,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
         "local Markdown link through Zed Project",
         ACTION_TIMEOUT,
         |screen| {
-            screen.contains("BETA2_LOCAL_LINK_TARGET")
+            screen.contains("E2E_LOCAL_LINK_TARGET")
                 && screen.contains("opened guide.md:5:1 through Zed Project")
         },
     )?;
@@ -940,10 +940,10 @@ fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<(
     const LINE_COUNT: usize = 100_000;
     const LONG_LINE: usize = 50_000;
     const LONG_LINE_BYTES: usize = 64 * 1024;
-    const TOP: &str = "BETA2_LARGE_FILE_TOP";
-    const LONG: &str = "BETA2_LARGE_FILE_LONG_LINE";
-    const BOTTOM: &str = "BETA2_LARGE_FILE_BOTTOM";
-    const EDIT: &str = "BETA2_LARGE_FILE_EDITED_";
+    const TOP: &str = "E2E_LARGE_FILE_TOP";
+    const LONG: &str = "E2E_LARGE_FILE_LONG_LINE";
+    const BOTTOM: &str = "E2E_LARGE_FILE_BOTTOM";
+    const EDIT: &str = "E2E_LARGE_FILE_EDITED_";
 
     let temp = tempfile::tempdir().context("create Beta 2 large-file fixture")?;
     let path = temp.path().join("large-100000-lines.txt");
@@ -1043,19 +1043,16 @@ fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<(
 
 #[test]
 fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
-    const READY: &str = "BETA3_AGENT_EDITOR_READY";
-    const PROMPT: &str = "BETA3_AGENT_PROMPT";
+    const READY: &str = "E2E_AGENT_EDITOR_READY";
+    const PROMPT: &str = "E2E_AGENT_PROMPT";
 
     let temp = tempfile::tempdir().context("create Beta 3 ACP fixture")?;
     let root = temp.path().join("agent-project");
     fs::create_dir_all(root.join(".zed")).context("create Agent fixture project")?;
     fs::write(root.join("README.md"), format!("{READY}\n"))
         .context("write Agent fixture document")?;
-    fs::write(
-        root.join("AGENTS.md"),
-        "BETA3_EXTERNAL_AGENT_INSTRUCTIONS\n",
-    )
-    .context("write external Agent instructions")?;
+    fs::write(root.join("AGENTS.md"), "E2E_EXTERNAL_AGENT_INSTRUCTIONS\n")
+        .context("write external Agent instructions")?;
     fs::write(
         root.join(".zed/settings.json"),
         r#"{
@@ -1160,7 +1157,7 @@ fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
     session.paste("/instructions")?;
     session.send(ENTER)?;
     session.wait_for_screen("Agent effective instructions", ACTION_TIMEOUT, |screen| {
-        screen.contains("BETA3_EXTERNAL_AGENT_INSTRUCTIONS")
+        screen.contains("E2E_EXTERNAL_AGENT_INSTRUCTIONS")
             && screen.contains("agent-project/AGENTS.md")
     })?;
     session.paste("/auth fixture-terminal")?;
@@ -1170,7 +1167,7 @@ fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
         ACTION_TIMEOUT,
         |_| {
             fs::read_to_string(&terminal_auth_log)
-                .is_ok_and(|text| text.contains("BETA3_TERMINAL_AUTH_READY"))
+                .is_ok_and(|text| text.contains("E2E_TERMINAL_AUTH_READY"))
         },
     )?;
     session.wait_for_screen(
@@ -1245,7 +1242,7 @@ fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
 
 #[test]
 fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result<()> {
-    const READY: &str = "BETA3_NATIVE_AGENT_EDITOR_READY";
+    const READY: &str = "E2E_NATIVE_AGENT_EDITOR_READY";
 
     let temp = tempfile::tempdir().context("create native Zed Agent fixture")?;
     let root = temp.path().join("native-agent-project");
@@ -1253,7 +1250,7 @@ fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result
         .context("create native Agent fixture project")?;
     fs::write(root.join("README.md"), format!("{READY}\n"))
         .context("write native Agent fixture document")?;
-    fs::write(root.join("AGENTS.md"), "BETA3_NATIVE_AGENT_INSTRUCTIONS\n")
+    fs::write(root.join("AGENTS.md"), "E2E_NATIVE_AGENT_INSTRUCTIONS\n")
         .context("write native Agent instructions")?;
     fs::write(
         root.join(".agents/skills/native-fixture/SKILL.md"),
@@ -1294,7 +1291,7 @@ fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result
         "native Agent effective instructions",
         ACTION_TIMEOUT,
         |screen| {
-            screen.contains("BETA3_NATIVE_AGENT_INSTRUCTIONS")
+            screen.contains("E2E_NATIVE_AGENT_INSTRUCTIONS")
                 && screen.contains("native-agent-project/AGENTS.md")
         },
     )?;
@@ -1327,7 +1324,7 @@ fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result
 
 #[test]
 fn collaboration_notes_follow_invites_and_media_run_through_the_actual_binary() -> Result<()> {
-    const READY: &str = "PARITY1_COLLABORATION_EDITOR_READY";
+    const READY: &str = "E2E_COLLABORATION_EDITOR_READY";
     const ORIGINAL_NOTES: &str = "# Shared Notes\nCOLLAB_ORIGINAL\n";
     const EDITED_NOTES: &str = "# Shared Notes\nCOLLAB_EDITED\n";
     const FINAL_NOTES: &str = "# Shared Notes\nCOLLAB_FINAL\n";
@@ -2121,7 +2118,7 @@ int main(void) {
 
 #[test]
 fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Result<()> {
-    const READY: &str = "BETA2_CONFIGURATION_READY";
+    const READY: &str = "E2E_CONFIGURATION_READY";
 
     let temp = tempfile::tempdir().context("create Beta 2 configuration fixture")?;
     let root = temp.path().join("beta-2-configuration");
@@ -2525,8 +2522,8 @@ fn generate_ssh_key(path: &Path) -> Result<()> {
 }
 
 fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_PRESENTATION_SESSION_READY";
-    const INNER: &str = "ALPHA3_PRESENTATION_FOLD_INNER";
+    const READY: &str = "E2E_PRESENTATION_SESSION_READY";
+    const INNER: &str = "E2E_PRESENTATION_FOLD_INNER";
 
     let root = directory.join("presentation-session-repo");
     let session_directory = directory.join("presentation-session-state");
@@ -2535,7 +2532,7 @@ fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) 
     fs::write(
         &path,
         format!(
-            "one // {READY}\ntwo\n\nfn restored_fold() {{\n    // {INNER}\n}}\n// {}ALPHA3_PRESENTATION_WRAP_TAIL\n",
+            "one // {READY}\ntwo\n\nfn restored_fold() {{\n    // {INNER}\n}}\n// {}E2E_PRESENTATION_WRAP_TAIL\n",
             "w".repeat(190)
         ),
     )
@@ -2578,7 +2575,7 @@ fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) 
     first.send(ALT_Z)?;
     first.wait_for_screen("presentation wrap captured", ACTION_TIMEOUT, |screen| {
         screen.contains("soft wrap on")
-            && screen.contains("ALPHA3_PRESENTAT")
+            && screen.contains("E2E_PRESENTAT")
             && screen.contains("ION_WRAP_TAIL")
     })?;
     first.send(CTRL_G)?;
@@ -2615,7 +2612,7 @@ fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) 
     second.wait_for_screen("fold wrap and cursors restored", ACTION_TIMEOUT, |screen| {
         screen.contains(READY)
             && !screen.contains(INNER)
-            && screen.contains("ALPHA3_PRESENTAT")
+            && screen.contains("E2E_PRESENTAT")
             && screen.contains("ION_WRAP_TAIL")
     })?;
     second.paste("R")?;
@@ -2643,7 +2640,7 @@ fn workspace_session_restores_folds_wrap_and_multiple_cursors(directory: &Path) 
 }
 
 fn corrupt_workspace_generation_is_quarantined_and_falls_back(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_QUARANTINE_READY";
+    const READY: &str = "E2E_QUARANTINE_READY";
 
     let root = directory.join("quarantine-session-repo");
     let session_directory = directory.join("quarantine-session-state");
@@ -2757,9 +2754,9 @@ fn corrupt_workspace_generation_is_quarantined_and_falls_back(directory: &Path) 
 }
 
 fn advanced_editor_actions_use_zed_display_and_selection_state(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_ADVANCED_EDITOR_READY";
-    const INNER: &str = "ALPHA3_FOLDED_INNER";
-    const WRAP_TAIL: &str = "ALPHA3_SOFT_WRAP_TAIL";
+    const READY: &str = "E2E_ADVANCED_EDITOR_READY";
+    const INNER: &str = "E2E_FOLDED_INNER";
+    const WRAP_TAIL: &str = "E2E_SOFT_WRAP_TAIL";
 
     let root = directory.join("advanced-editor-repo");
     fs::create_dir_all(&root).context("create advanced editor fixture")?;
@@ -2854,7 +2851,7 @@ fn advanced_editor_actions_use_zed_display_and_selection_state(directory: &Path)
     session.send(ALT_Z)?;
     session.wait_for_screen("terminal-width soft wrap", ACTION_TIMEOUT, |screen| {
         screen.contains("soft wrap on")
-            && screen.contains("ALPHA3_SOFT_WRAP")
+            && screen.contains("E2E_SOFT_WRAP")
             && screen.contains("_TAIL")
     })?;
 
@@ -2870,7 +2867,7 @@ fn advanced_editor_actions_use_zed_display_and_selection_state(directory: &Path)
 }
 
 fn mouse_drag_multi_click_and_additive_selection_use_zed_ranges(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_MOUSE_READY";
+    const READY: &str = "E2E_MOUSE_READY";
 
     let root = directory.join("mouse-selection-repo");
     fs::create_dir_all(&root).context("create mouse selection fixture")?;
@@ -3005,7 +3002,7 @@ fn mouse_drag_multi_click_and_additive_selection_use_zed_ranges(directory: &Path
 }
 
 fn editor_projection_settings_render_whitespace_and_guides(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_PROJECTION_READY";
+    const READY: &str = "E2E_PROJECTION_READY";
 
     let workspace = directory.join("projection-workspace");
     let root = workspace.join("project");
@@ -3082,8 +3079,8 @@ fn editor_projection_settings_render_whitespace_and_guides(directory: &Path) -> 
 }
 
 fn workspace_session_restores_a_live_editable_multibuffer(directory: &Path) -> Result<()> {
-    const MATCH: &str = "ALPHA3_LIVE_MULTIBUFFER_MATCH";
-    const EDIT: &str = "ALPHA3_RESTORED_MULTIBUFFER_EDIT_";
+    const MATCH: &str = "E2E_LIVE_MULTIBUFFER_MATCH";
+    const EDIT: &str = "E2E_RESTORED_MULTIBUFFER_EDIT_";
 
     let root = directory.join("multibuffer-session-repo");
     let session_directory = directory.join("multibuffer-session-state");
@@ -3188,8 +3185,8 @@ fn workspace_session_restores_a_live_editable_multibuffer(directory: &Path) -> R
 }
 
 fn outline_filters_follows_and_jumps_through_zed_symbols(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_OUTLINE_READY";
-    const TARGET: &str = "ALPHA3_OUTLINE_JUMP_TARGET";
+    const READY: &str = "E2E_OUTLINE_READY";
+    const TARGET: &str = "E2E_OUTLINE_JUMP_TARGET";
 
     let root = directory.join("outline-repo");
     fs::create_dir_all(&root).context("create outline fixture")?;
@@ -3277,8 +3274,8 @@ fn outline_filters_follows_and_jumps_through_zed_symbols(directory: &Path) -> Re
 }
 
 fn periodic_session_snapshot_survives_sigkill(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_CRASH_SESSION_READY";
-    const RECOVERED: &str = "ALPHA3_PERIODIC_SNAPSHOT_SURVIVED_SIGKILL";
+    const READY: &str = "E2E_CRASH_SESSION_READY";
+    const RECOVERED: &str = "E2E_PERIODIC_SNAPSHOT_SURVIVED_SIGKILL";
 
     let root = directory.join("crash-session-repo");
     let session_directory = directory.join("crash-session-state");
@@ -3352,8 +3349,8 @@ fn periodic_session_snapshot_survives_sigkill(directory: &Path) -> Result<()> {
 }
 
 fn workspace_session_restores_layout_dock_and_unsaved_content(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_SESSION_FILE_READY";
-    const RECOVERED: &str = "ALPHA3_UNSAVED_SESSION_RECOVERY";
+    const READY: &str = "E2E_SESSION_FILE_READY";
+    const RECOVERED: &str = "E2E_UNSAVED_SESSION_RECOVERY";
 
     let root = directory.join("workspace-session-repo");
     let session_directory = directory.join("workspace-session-state");
@@ -3464,8 +3461,8 @@ fn workspace_session_restores_layout_dock_and_unsaved_content(directory: &Path) 
 }
 
 fn project_panel_mutations_preserve_dirty_buffer_identity(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_MUTATION_READY";
-    const DIRTY: &str = "ALPHA3_DIRTY_BUFFER_SURVIVES_RENAME";
+    const READY: &str = "E2E_MUTATION_READY";
+    const DIRTY: &str = "E2E_DIRTY_BUFFER_SURVIVES_RENAME";
 
     let root = directory.join("project-mutation-repo");
     fs::create_dir_all(&root).context("create project mutation fixture")?;
@@ -3620,9 +3617,9 @@ fn project_panel_mutations_preserve_dirty_buffer_identity(directory: &Path) -> R
 }
 
 fn project_panel_previews_and_replaces_by_entry_identity(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA3_PANEL_READY";
-    const FIRST: &str = "ALPHA3_PANEL_FIRST_PREVIEW";
-    const SECOND: &str = "ALPHA3_PANEL_SECOND_PREVIEW";
+    const READY: &str = "E2E_PANEL_READY";
+    const FIRST: &str = "E2E_PANEL_FIRST_PREVIEW";
+    const SECOND: &str = "E2E_PANEL_SECOND_PREVIEW";
 
     let root = directory.join("project-panel-repo");
     fs::create_dir_all(root.join("src")).context("create project panel fixture")?;
@@ -3703,7 +3700,7 @@ fn project_panel_previews_and_replaces_by_entry_identity(directory: &Path) -> Re
 }
 
 fn workspace_split_focus_move_and_collapse(directory: &Path) -> Result<()> {
-    const BODY: &str = "ALPHA3_WORKSPACE_SPLIT_BODY";
+    const BODY: &str = "E2E_WORKSPACE_SPLIT_BODY";
     let path = directory.join("workspace-split.txt");
     fs::write(&path, format!("{BODY}\nsecond row\n")).context("write split fixture")?;
 
@@ -3872,8 +3869,8 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
 }
 
 fn directory_quick_open_deduplicates_symlink_alias(directory: &Path) -> Result<()> {
-    const READY: &str = "ALPHA1_READY_SENTINEL";
-    const OPENED: &str = "ALPHA1_QUICK_OPEN_BODY";
+    const READY: &str = "E2E_READY_SENTINEL";
+    const OPENED: &str = "E2E_QUICK_OPEN_BODY";
 
     let root = directory.join("quick-open-repo");
     fs::create_dir_all(root.join("src")).context("create quick-open src")?;

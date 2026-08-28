@@ -555,14 +555,14 @@ fn quick_open(zec: &Path) -> Result<String> {
         &quick.query,
         &quick.expected_selected_path,
         &quick.expected_open_path,
-        "ALPHA1_EDIT_A_OLD",
+        "E2E_EDIT_A_OLD",
     )?;
     open_exact_quick(
         &mut session,
         &quick.alias_reopen_path,
         &quick.expected_selected_path,
         &quick.expected_open_path,
-        "ALPHA1_EDIT_A_OLD",
+        "E2E_EDIT_A_OLD",
     )?;
     let displayed_tab_count = quick.expected_tab_count_after_alias_reopen + 1;
     let expected_name = Path::new(&quick.expected_open_path)
@@ -806,10 +806,7 @@ fn stale_result(zec: &Path) -> Result<String> {
     let probe: StaleResultProbe =
         serde_json::from_slice(&output.stdout).context("parse stale-result probe JSON")?;
     ensure!(probe.publish_log == ["B"], "stale completion was published");
-    ensure!(
-        probe.final_query == "ALPHA1_STALE_B",
-        "final query is not B"
-    );
+    ensure!(probe.final_query == "E2E_STALE_B", "final query is not B");
     ensure!(probe.final_path == "src/stale-b.txt", "final path is not B");
     Ok("production command/reducer published B once and discarded A".to_owned())
 }
@@ -831,12 +828,12 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         &mut session,
         "日本 語.rs",
         fixture::EDIT_A_PATH,
-        "ALPHA1_EDIT_A_OLD",
+        "E2E_EDIT_A_OLD",
         None,
     )?;
-    select_current_match(&mut session, "ALPHA1_EDIT_A_OLD")?;
+    select_current_match(&mut session, "E2E_EDIT_A_OLD")?;
     let input_id_a = expected_ids[0].clone();
-    let replacement_a = format!("ALPHA1_EDIT_A_{run:02} {input_id_a}");
+    let replacement_a = format!("E2E_EDIT_A_{run:02} {input_id_a}");
     let replaced_a = session.paste_marked(&replacement_a)?;
     sent_ids.push(input_id_a.clone());
     session.wait_contains("buffer A input ID", replaced_a, &input_id_a)?;
@@ -845,14 +842,14 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
 
     open_project(
         &mut session,
-        "ALPHA1_FIND_B_OLD",
+        "E2E_FIND_B_OLD",
         fixture::EDIT_B_PATH,
-        "ALPHA1_FIND_B_OLD",
+        "E2E_FIND_B_OLD",
         None,
     )?;
-    select_current_match(&mut session, "ALPHA1_FIND_B_OLD")?;
+    select_current_match(&mut session, "E2E_FIND_B_OLD")?;
     let input_id_b = expected_ids[1].clone();
-    let replacement_b = format!("ALPHA1_EDIT_B_{run:02} {input_id_b}");
+    let replacement_b = format!("E2E_EDIT_B_{run:02} {input_id_b}");
     let replaced_b = session.paste_marked(&replacement_b)?;
     sent_ids.push(input_id_b.clone());
     session.wait_contains("buffer B input ID", replaced_b, &input_id_b)?;
@@ -863,12 +860,12 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         &mut session,
         "no-final-newline.txt",
         fixture::EDIT_C_PATH,
-        "ALPHA1_EDIT_C_OLD",
+        "E2E_EDIT_C_OLD",
         None,
     )?;
     session.send(END)?;
     let input_id_c = expected_ids[2].clone();
-    let appended = session.paste_marked(&format!(" :: ALPHA1_EDIT_C_{run:02} {input_id_c}"))?;
+    let appended = session.paste_marked(&format!(" :: E2E_EDIT_C_{run:02} {input_id_c}"))?;
     sent_ids.push(input_id_c.clone());
     session.wait_contains("buffer C input ID", appended, &input_id_c)?;
     applied_ids.push(input_id_c);
@@ -877,7 +874,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
     session.send(CTRL_N)?;
     let input_id_d = expected_ids[3].clone();
     let scratch =
-        format!("Alpha 1 scratch 日本語\nworkflow token ALPHA1_EDIT_D_{run:02} {input_id_d}\n");
+        format!("Alpha 1 scratch 日本語\nworkflow token E2E_EDIT_D_{run:02} {input_id_d}\n");
     let inserted_d = session.paste_marked(&scratch)?;
     sent_ids.push(input_id_d.clone());
     session.wait_contains("scratch D input ID", inserted_d, &input_id_d)?;
@@ -943,21 +940,9 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
     )?;
     reopen.wait_ready("repo", fixture::READY_SENTINEL)?;
     for (path, token, expected_cursor) in [
-        (
-            fixture::EDIT_A_PATH,
-            format!("ALPHA1_EDIT_A_{run:02}"),
-            (0, 2),
-        ),
-        (
-            fixture::EDIT_C_PATH,
-            format!("ALPHA1_EDIT_C_{run:02}"),
-            (0, 2),
-        ),
-        (
-            fixture::EDIT_D_PATH,
-            format!("ALPHA1_EDIT_D_{run:02}"),
-            (0, 2),
-        ),
+        (fixture::EDIT_A_PATH, format!("E2E_EDIT_A_{run:02}"), (0, 2)),
+        (fixture::EDIT_C_PATH, format!("E2E_EDIT_C_{run:02}"), (0, 2)),
+        (fixture::EDIT_D_PATH, format!("E2E_EDIT_D_{run:02}"), (0, 2)),
     ] {
         open_quick(&mut reopen, path, path, &token, Some(expected_cursor))?;
         ensure!(
@@ -971,7 +956,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
             "reopened workflow bytes differ for {path}"
         );
     }
-    let b_token = format!("ALPHA1_EDIT_B_{run:02}");
+    let b_token = format!("E2E_EDIT_B_{run:02}");
     open_project(
         &mut reopen,
         &b_token,
@@ -1057,7 +1042,7 @@ fn controlled_search_failure(zec: &Path) -> Result<String> {
         "control tab was not editable/saveable after EIO"
     );
     ensure!(
-        probe.control_disk_token == "ALPHA1_SEARCH_FAILURE_CONTINUED",
+        probe.control_disk_token == "E2E_SEARCH_FAILURE_CONTINUED",
         "continued edit disk token differs"
     );
     ensure!(
@@ -1088,7 +1073,7 @@ fn save_failure(zec: &Path) -> Result<String> {
         PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
     session.send(CTRL_N)?;
-    session.paste("ALPHA1_UNSAVED_ENOTDIR")?;
+    session.paste("E2E_UNSAVED_ENOTDIR")?;
     let prompt = session.send_marked(CTRL_S)?;
     session.wait_contains("ENOTDIR Save As prompt", prompt, "Save as:")?;
     session.paste(failed_relative)?;
@@ -1100,7 +1085,7 @@ fn save_failure(zec: &Path) -> Result<String> {
         |screen| {
             let contents = screen.contents();
             contents.contains("save failed:")
-                && contents.contains("ALPHA1_UNSAVED_ENOTDIR")
+                && contents.contains("E2E_UNSAVED_ENOTDIR")
                 && contents.contains(failed_relative)
         },
     )?;
@@ -1185,10 +1170,10 @@ fn suspend_resume(zec: &Path) -> Result<String> {
         )?;
         session.assert_raw(&baseline)?;
         session.send(CTRL_A)?;
-        session.paste("ALPHA1_TSTP_CONT_EDIT")?;
+        session.paste("E2E_TSTP_CONT_EDIT")?;
         save(&mut session)?;
         ensure!(
-            fs::read(generated.root.join(fixture::READY_PATH))? == b"ALPHA1_TSTP_CONT_EDIT",
+            fs::read(generated.root.join(fixture::READY_PATH))? == b"E2E_TSTP_CONT_EDIT",
             "post-SIGCONT edit did not reach disk"
         );
         clean_quit(&mut session, &baseline)?;
@@ -1310,7 +1295,7 @@ mod tests {
     #[test]
     fn opened_editor_frame_rejects_partial_prompt_cursor_and_accepts_exact_caret() {
         let path = "src/reopened.txt";
-        let body = "ALPHA1_REOPENED_BODY";
+        let body = "E2E_REOPENED_BODY";
         let partial = format!("{path}\n{body}\nQuick open: reopened");
         assert!(!opened_editor_frame_matches(
             &partial,

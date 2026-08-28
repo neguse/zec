@@ -1,4 +1,4 @@
-#[path = "../../tests/alpha_1/fixture.rs"]
+#[path = "../../tests/repository_fixture/fixture.rs"]
 mod fixture;
 
 use std::env;

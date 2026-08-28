@@ -221,7 +221,7 @@ fn auth_methods() -> Vec<acp::AuthMethod> {
             "command": "/bin/sh",
             "args": [
                 "-c",
-                "printf 'BETA3_TERMINAL_AUTH_READY\\n' | tee \"$ZEC_ACP_FIXTURE_AUTH_LOG\""
+                "printf 'E2E_TERMINAL_AUTH_READY\\n' | tee \"$ZEC_ACP_FIXTURE_AUTH_LOG\""
             ],
             "env": {"ZEC_ACP_FIXTURE_AUTH_LOG": auth_log}
         }

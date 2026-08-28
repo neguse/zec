@@ -24823,7 +24823,7 @@ async fn root_identity_probe(
         .context("repository root has no parent")?
         .join("outside-control.txt");
     let exclusion_queries = [
-        ".git/alpha1-excluded.txt".to_owned(),
+        ".git/repository-e2e-excluded.txt".to_owned(),
         "ignored/excluded.txt".to_owned(),
         "target/excluded.txt".to_owned(),
         outside.display().to_string(),
@@ -25334,7 +25334,7 @@ mod tests {
             .unwrap()
             .next
             .expect("initial paste starts immediately");
-        let prefix = prompt.request("ALPHA1_STALE_".to_owned()).unwrap();
+        let prefix = prompt.request("E2E_STALE_".to_owned()).unwrap();
         let prefix_key = prefix.key;
         let delayed = scheduler.request(prefix, ProjectSearchChange::Key).unwrap();
         assert!(delayed.next.is_none());
@@ -25347,7 +25347,7 @@ mod tests {
             expired.next.is_none(),
             "debounced key query consumed the replacement slot"
         );
-        assert_eq!(scheduler.pending_query(), Some("ALPHA1_STALE_"));
+        assert_eq!(scheduler.pending_query(), Some("E2E_STALE_"));
 
         let latest = scheduler
             .request(

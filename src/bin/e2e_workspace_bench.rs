@@ -66,8 +66,8 @@ const CTRL_ALT_RIGHT: &[u8] = b"\x1b[1;7C";
 const TAB: &[u8] = b"\t";
 const REGEX_QUERY: &str = "BENCH_SEARCH_0{5}";
 const REGEX_FIRST_RESULT: &str = "BENCH_SEARCH_00000";
-const REPLACE_TOKEN: &str = "ALPHA3_REPLACE_BENCH_TOKEN";
-const REPLACEMENT: &str = "ALPHA3_REPLACE_BENCH_RESULT";
+const REPLACE_TOKEN: &str = "E2E_REPLACE_BENCH_TOKEN";
+const REPLACEMENT: &str = "E2E_REPLACE_BENCH_RESULT";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -154,7 +154,7 @@ fn run(arguments: workspace_support::RunArguments) -> Result<()> {
     let sample_count = |canonical| development_samples.unwrap_or(canonical);
     let warmups = |canonical| development_samples.map_or(canonical, |_| 0);
 
-    let tree_fixture = Fixture::create("ALPHA3_BENCH_TREE")?;
+    let tree_fixture = Fixture::create("E2E_BENCH_TREE")?;
     prepare_large_source(
         &tree_fixture.source,
         workload.outline_symbols,
@@ -167,14 +167,14 @@ fn run(arguments: workspace_support::RunArguments) -> Result<()> {
     )?;
     let tree_manifest_before = tree_fixture.manifest()?;
 
-    let outline_fixture = Fixture::create("ALPHA3_BENCH_OUTLINE")?;
+    let outline_fixture = Fixture::create("E2E_BENCH_OUTLINE")?;
     prepare_large_source(
         &outline_fixture.source,
         workload.outline_symbols,
         workload.outline_symbols.saturating_add(2),
     )?;
-    let navigation_fixture = Fixture::create("ALPHA3_BENCH_NAVIGATION")?;
-    let session_fixture = Fixture::create("ALPHA3_BENCH_SESSION")?;
+    let navigation_fixture = Fixture::create("E2E_BENCH_NAVIGATION")?;
+    let session_fixture = Fixture::create("E2E_BENCH_SESSION")?;
 
     let mut correlation_ids = Vec::with_capacity(CORRELATION_COUNT);
     let mut memory = BTreeMap::new();
@@ -459,7 +459,7 @@ fn prepare_large_source(path: &Path, symbol_count: usize, line_count: usize) -> 
     );
     let mut source = String::with_capacity(line_count.saturating_mul(32));
     writeln!(source, "// {READY_SENTINEL}")?;
-    writeln!(source, "pub const ALPHA3_BENCH: usize = {symbol_count};")?;
+    writeln!(source, "pub const E2E_BENCH: usize = {symbol_count};")?;
     for index in 0..symbol_count {
         writeln!(source, "fn symbol_{index:05}() {{}}")?;
     }

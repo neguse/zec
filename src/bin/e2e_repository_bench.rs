@@ -784,10 +784,10 @@ fn project_search_metric(
             spawn_ready(zec, root, &format!("bench-project-{index:02}"))?;
         let prompt = session.send_marked(ALT_F)?;
         session.wait_contains("benchmark project-search prompt", prompt, "Project search:")?;
-        let operation = session.paste_marked("ALPHA1_BENCH_SEARCH")?;
+        let operation = session.paste_marked("E2E_BENCH_SEARCH")?;
         let first = &expected_rows[0];
         let expected_status = format!(
-            "Project search: ALPHA1_BENCH_SEARCH  1/{}  {}:{}:{}  {}",
+            "Project search: E2E_BENCH_SEARCH  1/{}  {}:{}:{}  {}",
             fixture::BENCH_SEARCH_HITS,
             first.path,
             first.line,
@@ -832,7 +832,7 @@ fn observe_ordered_project_search_rows(
         if index > 0 {
             let moved = session.send_marked(DOWN)?;
             let expected_status = format!(
-                "Project search: ALPHA1_BENCH_SEARCH  {}/{}  {}:{}:{}  {}",
+                "Project search: E2E_BENCH_SEARCH  {}/{}  {}:{}:{}  {}",
                 index + 1,
                 fixture::BENCH_SEARCH_HITS,
                 expected.path,
@@ -885,7 +885,7 @@ fn parse_project_search_status(
     screen: &vt100::Screen,
     expected: &SearchResultReport,
 ) -> Result<(usize, usize, SearchResultReport)> {
-    const PREFIX: &str = "Project search: ALPHA1_BENCH_SEARCH  ";
+    const PREFIX: &str = "Project search: E2E_BENCH_SEARCH  ";
     let contents = screen.contents();
     let status = contents
         .lines()
@@ -976,8 +976,8 @@ fn in_flight_metrics(
     let mut replace = Vec::with_capacity(IN_FLIGHT_ATTEMPTS);
     let mut cancel = Vec::with_capacity(IN_FLIGHT_ATTEMPTS);
     let mut quit = Vec::with_capacity(IN_FLIGHT_ATTEMPTS);
-    let replacement_query_a = "ALPHA1_STALE_A";
-    let replacement_query_b = "ALPHA1_STALE_B";
+    let replacement_query_a = "E2E_STALE_A";
+    let replacement_query_b = "E2E_STALE_B";
     let common_prefix_len = replacement_query_a
         .bytes()
         .zip(replacement_query_b.bytes())
@@ -1002,7 +1002,7 @@ fn in_flight_metrics(
         replace.push(session.wait_contains(
             "exact replacement query result",
             operation,
-            "Project search: ALPHA1_STALE_B  1/1  src/stale-b.txt:1:1  ALPHA1_STALE_B current query result",
+            "Project search: E2E_STALE_B  1/1  src/stale-b.txt:1:1  E2E_STALE_B current query result",
         )?);
         quit_clean(&mut session, &baseline, resources, monitor)?;
     }
@@ -1010,7 +1010,7 @@ fn in_flight_metrics(
     for index in 0..IN_FLIGHT_ATTEMPTS {
         let (mut session, baseline, _, monitor) =
             spawn_ready(zec, root, &format!("bench-cancel-{index:02}"))?;
-        begin_in_flight_search(&mut session, "ALPHA1_BENCH_SEARCH")?;
+        begin_in_flight_search(&mut session, "E2E_BENCH_SEARCH")?;
         let operation = session.send_marked(ESC)?;
         cancel.push(session.wait_absent(
             "cancel in-flight project search",
@@ -1023,7 +1023,7 @@ fn in_flight_metrics(
     for index in 0..IN_FLIGHT_ATTEMPTS {
         let (mut session, baseline, _, monitor) =
             spawn_ready(zec, root, &format!("bench-quit-{index:02}"))?;
-        begin_in_flight_search(&mut session, "ALPHA1_BENCH_SEARCH")?;
+        begin_in_flight_search(&mut session, "E2E_BENCH_SEARCH")?;
         let operation = session.send_marked(CTRL_Q)?;
         let status = session.wait_exit()?;
         ensure!(status.success(), "in-flight Ctrl-Q failed: {status}");
@@ -1342,7 +1342,7 @@ mod tests {
             preview: String::new(),
         };
         let header = format!(
-            "Project search: ALPHA1_BENCH_SEARCH  100/1000  {}:{}:{}  ",
+            "Project search: E2E_BENCH_SEARCH  100/1000  {}:{}:{}  ",
             expected.path, expected.line, expected.column
         );
         let preview_width = usize::from(e2e_support::COLS)
@@ -1364,10 +1364,10 @@ mod tests {
             path: "bench/search-0009.txt".to_owned(),
             line: 1,
             column: 11,
-            preview: "row 0009: ALPHA1_BENCH_SEARCH result 0009".to_owned(),
+            preview: "row 0009: E2E_BENCH_SEARCH result 0009".to_owned(),
         };
         let core = format!(
-            "Project search: ALPHA1_BENCH_SEARCH  10/1000  {}:{}:{}  {}",
+            "Project search: E2E_BENCH_SEARCH  10/1000  {}:{}:{}  {}",
             expected.path, expected.line, expected.column, expected.preview
         );
         assert_eq!(core.len(), 115);

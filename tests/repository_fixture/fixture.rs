@@ -31,13 +31,13 @@ pub const SEARCH_RESULT_LIMIT: usize = 100;
 pub const BENCH_QUICK_OPEN_QUERIES: usize = 100;
 pub const WORKFLOW_RUNS: u8 = 20;
 
-pub const FIXED_WORKSPACE: &str = "/tmp/zec-alpha-1-v1";
-pub const FIXED_ROOT: &str = "/tmp/zec-alpha-1-v1/repo";
-pub const FIXED_ROOT_ALIAS: &str = "/tmp/zec-alpha-1-v1/repo-alias";
-pub const FIXED_OUTSIDE_CONTROL: &str = "/tmp/zec-alpha-1-v1/outside-control.txt";
+pub const FIXED_WORKSPACE: &str = "/tmp/zec-repository-e2e-v1";
+pub const FIXED_ROOT: &str = "/tmp/zec-repository-e2e-v1/repo";
+pub const FIXED_ROOT_ALIAS: &str = "/tmp/zec-repository-e2e-v1/repo-alias";
+pub const FIXED_OUTSIDE_CONTROL: &str = "/tmp/zec-repository-e2e-v1/outside-control.txt";
 
 pub const READY_PATH: &str = "README.md";
-pub const READY_SENTINEL: &str = "ALPHA1_READY_SENTINEL";
+pub const READY_SENTINEL: &str = "E2E_READY_SENTINEL";
 pub const EDIT_A_PATH: &str = "src/日本 語.rs";
 pub const EDIT_B_PATH: &str = "src/crlf-edit.rs";
 pub const EDIT_C_PATH: &str = "src/no-final-newline.txt";
@@ -45,11 +45,12 @@ pub const EDIT_D_PATH: &str = "scratch/新規 メモ.txt";
 pub const OUTSIDE_CONTROL_NAME: &str = "outside-control.txt";
 pub const ROOT_ALIAS_SUFFIX: &str = "-alias";
 
-pub const SPEC_RELATIVE_PATH: &str = "tests/alpha_1/spec-v1.json";
-pub const BEFORE_MANIFEST_RELATIVE_PATH: &str = "tests/alpha_1/expected-before-manifest-v1.jsonl";
+pub const SPEC_RELATIVE_PATH: &str = "tests/repository_fixture/spec-v1.json";
+pub const BEFORE_MANIFEST_RELATIVE_PATH: &str =
+    "tests/repository_fixture/expected-before-manifest-v1.jsonl";
 pub const AFTER_MANIFEST_RELATIVE_PATH: &str =
-    "tests/alpha_1/expected-after-workflow-01-manifest-v1.jsonl";
-pub const POC_TEST_IDS_RELATIVE_PATH: &str = "tests/alpha_1/poc-test-ids-v1.txt";
+    "tests/repository_fixture/expected-after-workflow-01-manifest-v1.jsonl";
+pub const POC_TEST_IDS_RELATIVE_PATH: &str = "tests/repository_fixture/poc-test-ids-v1.txt";
 
 const GENERATOR_SOURCE: &[u8] = include_bytes!("fixture.rs");
 const CHECKED_SPEC: &[u8] = include_bytes!("spec-v1.json");
@@ -60,18 +61,18 @@ const CHECKED_POC_TEST_IDS: &str = include_str!("poc-test-ids-v1.txt");
 
 const README_CONTENT: &str = concat!(
     "# Alpha 1 deterministic repository\n\n",
-    "ALPHA1_READY_SENTINEL\n",
+    "E2E_READY_SENTINEL\n",
     "This repository is generated from seed 0x5a45435f414c5048.\n",
 );
 const EDIT_A_BEFORE: &[u8] =
-    b"\xef\xbb\xbf// Alpha 1 UTF-8 BOM fixture\npub const TOKEN: &str = \"ALPHA1_EDIT_A_OLD\";\n";
+    b"\xef\xbb\xbf// Alpha 1 UTF-8 BOM fixture\npub const TOKEN: &str = \"E2E_EDIT_A_OLD\";\n";
 const EDIT_B_BEFORE: &[u8] =
-    b"// Alpha 1 CRLF fixture\r\npub const TOKEN: &str = \"ALPHA1_FIND_B_OLD\";\r\n";
-const EDIT_C_BEFORE: &[u8] = b"Alpha 1 file without final newline :: ALPHA1_EDIT_C_OLD";
-const CONTROL_CONTENT: &str = "ALPHA1_EXCLUDED_SENTINEL in-scope control\n";
-const STALE_A_CONTENT: &str = "ALPHA1_STALE_A old query result\n";
-const STALE_B_CONTENT: &str = "ALPHA1_STALE_B current query result\n";
-const EXCLUDED_CONTENT: &str = "ALPHA1_EXCLUDED_SENTINEL excluded by repository rules\n";
+    b"// Alpha 1 CRLF fixture\r\npub const TOKEN: &str = \"E2E_FIND_B_OLD\";\r\n";
+const EDIT_C_BEFORE: &[u8] = b"Alpha 1 file without final newline :: E2E_EDIT_C_OLD";
+const CONTROL_CONTENT: &str = "E2E_EXCLUDED_SENTINEL in-scope control\n";
+const STALE_A_CONTENT: &str = "E2E_STALE_A old query result\n";
+const STALE_B_CONTENT: &str = "E2E_STALE_B current query result\n";
+const EXCLUDED_CONTENT: &str = "E2E_EXCLUDED_SENTINEL excluded by repository rules\n";
 const DOT_GITIGNORE_CONTENT: &str = "/ignored/\n/target/\n";
 const SPACE_PATH_CONTENT: &str = "space path fixture\n";
 const UNICODE_PATH_CONTENT: &str = "Unicode path fixture: 日本語 e\u{301}\n";
@@ -289,7 +290,7 @@ fn validate_run(run: u8) -> Result<(), String> {
 }
 
 fn bench_search_content(index: u16) -> String {
-    format!("row {index:04}: ALPHA1_BENCH_SEARCH result {index:04}\n")
+    format!("row {index:04}: E2E_BENCH_SEARCH result {index:04}\n")
 }
 
 fn large_lines_content() -> Vec<u8> {
@@ -305,13 +306,13 @@ fn large_lines_content() -> Vec<u8> {
 
 fn edit_a_after(run: u8) -> Vec<u8> {
     EDIT_A_BEFORE
-        .windows(b"ALPHA1_EDIT_A_OLD".len())
-        .position(|window| window == b"ALPHA1_EDIT_A_OLD")
+        .windows(b"E2E_EDIT_A_OLD".len())
+        .position(|window| window == b"E2E_EDIT_A_OLD")
         .map(|position| {
             let mut bytes = EDIT_A_BEFORE.to_vec();
             bytes.splice(
-                position..position + b"ALPHA1_EDIT_A_OLD".len(),
-                format!("ALPHA1_EDIT_A_{run:02} A3_{run:02}_0001").bytes(),
+                position..position + b"E2E_EDIT_A_OLD".len(),
+                format!("E2E_EDIT_A_{run:02} A3_{run:02}_0001").bytes(),
             );
             bytes
         })
@@ -320,13 +321,13 @@ fn edit_a_after(run: u8) -> Vec<u8> {
 
 fn edit_b_after(run: u8) -> Vec<u8> {
     EDIT_B_BEFORE
-        .windows(b"ALPHA1_FIND_B_OLD".len())
-        .position(|window| window == b"ALPHA1_FIND_B_OLD")
+        .windows(b"E2E_FIND_B_OLD".len())
+        .position(|window| window == b"E2E_FIND_B_OLD")
         .map(|position| {
             let mut bytes = EDIT_B_BEFORE.to_vec();
             bytes.splice(
-                position..position + b"ALPHA1_FIND_B_OLD".len(),
-                format!("ALPHA1_EDIT_B_{run:02} A3_{run:02}_0002").bytes(),
+                position..position + b"E2E_FIND_B_OLD".len(),
+                format!("E2E_EDIT_B_{run:02} A3_{run:02}_0002").bytes(),
             );
             bytes
         })
@@ -335,13 +336,13 @@ fn edit_b_after(run: u8) -> Vec<u8> {
 
 fn edit_c_after(run: u8) -> Vec<u8> {
     let mut bytes = EDIT_C_BEFORE.to_vec();
-    write!(&mut bytes, " :: ALPHA1_EDIT_C_{run:02} A3_{run:02}_0003")
+    write!(&mut bytes, " :: E2E_EDIT_C_{run:02} A3_{run:02}_0003")
         .expect("write to Vec cannot fail");
     bytes
 }
 
 fn edit_d_after(run: u8) -> Vec<u8> {
-    format!("Alpha 1 scratch 日本語\nworkflow token ALPHA1_EDIT_D_{run:02} A3_{run:02}_0004\n")
+    format!("Alpha 1 scratch 日本語\nworkflow token E2E_EDIT_D_{run:02} A3_{run:02}_0004\n")
         .into_bytes()
 }
 
@@ -753,7 +754,7 @@ pub fn spec_bytes() -> Vec<u8> {
     output.push_str("  },\n");
     output.push_str("  \"root_inputs\": [\n");
     output.push_str(
-        "    {\"id\":\"cwd\",\"cwd\":\"/tmp/zec-alpha-1-v1/repo\",\"argument\":null},\n    {\"id\":\"directory\",\"cwd\":\"/tmp/zec-alpha-1-v1\",\"argument\":\"repo\"},\n    {\"id\":\"dot\",\"cwd\":\"/tmp/zec-alpha-1-v1/repo\",\"argument\":\".\"},\n    {\"id\":\"dotdot\",\"cwd\":\"/tmp/zec-alpha-1-v1/repo/src\",\"argument\":\"..\"},\n    {\"id\":\"absolute\",\"cwd\":\"/tmp/zec-alpha-1-v1\",\"argument\":\"/tmp/zec-alpha-1-v1/repo\"},\n    {\"id\":\"symlink_alias\",\"cwd\":\"/tmp/zec-alpha-1-v1\",\"argument\":\"/tmp/zec-alpha-1-v1/repo-alias\"}\n  ],\n",
+        "    {\"id\":\"cwd\",\"cwd\":\"/tmp/zec-repository-e2e-v1/repo\",\"argument\":null},\n    {\"id\":\"directory\",\"cwd\":\"/tmp/zec-repository-e2e-v1\",\"argument\":\"repo\"},\n    {\"id\":\"dot\",\"cwd\":\"/tmp/zec-repository-e2e-v1/repo\",\"argument\":\".\"},\n    {\"id\":\"dotdot\",\"cwd\":\"/tmp/zec-repository-e2e-v1/repo/src\",\"argument\":\"..\"},\n    {\"id\":\"absolute\",\"cwd\":\"/tmp/zec-repository-e2e-v1\",\"argument\":\"/tmp/zec-repository-e2e-v1/repo\"},\n    {\"id\":\"symlink_alias\",\"cwd\":\"/tmp/zec-repository-e2e-v1\",\"argument\":\"/tmp/zec-repository-e2e-v1/repo-alias\"}\n  ],\n",
     );
     writeln!(
         output,
@@ -773,14 +774,14 @@ pub fn spec_bytes() -> Vec<u8> {
     )
     .expect("write to String cannot fail");
     output.push_str(
-        "    \"aliases\": [\"src/日本 語.rs\",\"./src/日本 語.rs\",\"src/../src/日本 語.rs\",\"aliases/日本 語.rs\",\"/tmp/zec-alpha-1-v1/repo/src/日本 語.rs\"],\n    \"expected_repository_root_count\": 1,\n    \"expected_worktree_root_count\": 1,\n    \"expected_buffer_id_count\": 1,\n    \"expected_tab_id_count\": 1\n  },\n",
+        "    \"aliases\": [\"src/日本 語.rs\",\"./src/日本 語.rs\",\"src/../src/日本 語.rs\",\"aliases/日本 語.rs\",\"/tmp/zec-repository-e2e-v1/repo/src/日本 語.rs\"],\n    \"expected_repository_root_count\": 1,\n    \"expected_worktree_root_count\": 1,\n    \"expected_buffer_id_count\": 1,\n    \"expected_tab_id_count\": 1\n  },\n",
     );
     output.push_str(
-        "  \"outside_trace\": {\n    \"path\": \"/tmp/zec-alpha-1-v1/outside-control.txt\",\n    \"allowed_operations\": [\"open-self\",\"stat-self\",\"stat-ancestor-git\"],\n    \"outside_parent_read_dir_count\": 0,\n    \"outside_sibling_read_dir_count\": 0\n  },\n  \"partial_startup\": {\n    \"normal_path\": \"README.md\",\n    \"eloop_path\": \"links/root-loop\",\n    \"expected_error\": \"ELOOP\",\n    \"editable_token\": \"ALPHA1_PARTIAL_STARTUP_EDIT\",\n    \"expected_exit_code\": 0\n  },\n",
+        "  \"outside_trace\": {\n    \"path\": \"/tmp/zec-repository-e2e-v1/outside-control.txt\",\n    \"allowed_operations\": [\"open-self\",\"stat-self\",\"stat-ancestor-git\"],\n    \"outside_parent_read_dir_count\": 0,\n    \"outside_sibling_read_dir_count\": 0\n  },\n  \"partial_startup\": {\n    \"normal_path\": \"README.md\",\n    \"eloop_path\": \"links/root-loop\",\n    \"expected_error\": \"ELOOP\",\n    \"editable_token\": \"E2E_PARTIAL_STARTUP_EDIT\",\n    \"expected_exit_code\": 0\n  },\n",
     );
     output.push_str("  \"exclusions\": {\n");
     output.push_str(
-        "    \"sentinel\": \"ALPHA1_EXCLUDED_SENTINEL\",\n    \"excluded_paths\": [\".git/alpha1-excluded.txt\",\"ignored/excluded.txt\",\"target/excluded.txt\",\"tests/binary-with-nul.dat\",\"/tmp/zec-alpha-1-v1/outside-control.txt\"],\n    \"in_scope_control_path\": \"src/control.txt\",\n    \"quick_open_exclusion_queries\": [\n      {\"query\":\".git/alpha1-excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"ignored/excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"target/excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"/tmp/zec-alpha-1-v1/outside-control.txt\",\"expected_results\":[]}\n    ],\n",
+        "    \"sentinel\": \"E2E_EXCLUDED_SENTINEL\",\n    \"excluded_paths\": [\".git/repository-e2e-excluded.txt\",\"ignored/excluded.txt\",\"target/excluded.txt\",\"tests/binary-with-nul.dat\",\"/tmp/zec-repository-e2e-v1/outside-control.txt\"],\n    \"in_scope_control_path\": \"src/control.txt\",\n    \"quick_open_exclusion_queries\": [\n      {\"query\":\".git/repository-e2e-excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"ignored/excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"target/excluded.txt\",\"expected_results\":[]},\n      {\"query\":\"/tmp/zec-repository-e2e-v1/outside-control.txt\",\"expected_results\":[]}\n    ],\n",
     );
     output.push_str("    \"project_search_expected_results\": [\n");
     write_search_result(
@@ -789,7 +790,7 @@ pub fn spec_bytes() -> Vec<u8> {
         "src/control.txt",
         1,
         1,
-        "ALPHA1_EXCLUDED_SENTINEL in-scope control",
+        "E2E_EXCLUDED_SENTINEL in-scope control",
         false,
     );
     output.push_str("    ]\n  },\n");
@@ -799,16 +800,15 @@ pub fn spec_bytes() -> Vec<u8> {
     output.push_str(
         "  \"project_search\": {\n    \"shortcut_bytes_hex\": \"1b66\",\n    \"case_sensitive\": true,\n    \"unicode_normalization\": \"none\",\n    \"result_limit\": 100,\n    \"coordinates\": \"1-based logical line and BOM-excluded Unicode scalar column\",\n    \"queries\": [\n",
     );
-    output.push_str(
-        "      {\"id\":\"edit_b\",\"text\":\"ALPHA1_FIND_B_OLD\",\"expected_results\":[\n",
-    );
+    output
+        .push_str("      {\"id\":\"edit_b\",\"text\":\"E2E_FIND_B_OLD\",\"expected_results\":[\n");
     write_search_result(
         &mut output,
         "        ",
         EDIT_B_PATH,
         2,
         26,
-        "pub const TOKEN: &str = \"ALPHA1_FIND_B_OLD\";",
+        "pub const TOKEN: &str = \"E2E_FIND_B_OLD\";",
         false,
     );
     output.push_str("      ]},\n");
@@ -841,7 +841,7 @@ pub fn spec_bytes() -> Vec<u8> {
     );
     output.push_str("      ]},\n");
     output.push_str(
-        "      {\"id\":\"excluded\",\"text\":\"ALPHA1_EXCLUDED_SENTINEL\",\"expected_results\":[\n",
+        "      {\"id\":\"excluded\",\"text\":\"E2E_EXCLUDED_SENTINEL\",\"expected_results\":[\n",
     );
     write_search_result(
         &mut output,
@@ -849,35 +849,33 @@ pub fn spec_bytes() -> Vec<u8> {
         "src/control.txt",
         1,
         1,
-        "ALPHA1_EXCLUDED_SENTINEL in-scope control",
+        "E2E_EXCLUDED_SENTINEL in-scope control",
         false,
     );
     output.push_str("      ]},\n");
-    output
-        .push_str("      {\"id\":\"stale_a\",\"text\":\"ALPHA1_STALE_A\",\"expected_results\":[\n");
+    output.push_str("      {\"id\":\"stale_a\",\"text\":\"E2E_STALE_A\",\"expected_results\":[\n");
     write_search_result(
         &mut output,
         "        ",
         "src/stale-a.txt",
         1,
         1,
-        "ALPHA1_STALE_A old query result",
+        "E2E_STALE_A old query result",
         false,
     );
     output.push_str("      ]},\n");
-    output
-        .push_str("      {\"id\":\"stale_b\",\"text\":\"ALPHA1_STALE_B\",\"expected_results\":[\n");
+    output.push_str("      {\"id\":\"stale_b\",\"text\":\"E2E_STALE_B\",\"expected_results\":[\n");
     write_search_result(
         &mut output,
         "        ",
         "src/stale-b.txt",
         1,
         1,
-        "ALPHA1_STALE_B current query result",
+        "E2E_STALE_B current query result",
         false,
     );
     output.push_str("      ]},\n");
-    output.push_str("      {\"id\":\"benchmark\",\"text\":\"ALPHA1_BENCH_SEARCH\",\"expected_total_hits\":1000,\"expected_results\":[\n");
+    output.push_str("      {\"id\":\"benchmark\",\"text\":\"E2E_BENCH_SEARCH\",\"expected_total_hits\":1000,\"expected_results\":[\n");
     for index in 0..SEARCH_RESULT_LIMIT {
         write_search_result(
             &mut output,
@@ -885,16 +883,16 @@ pub fn spec_bytes() -> Vec<u8> {
             &format!("bench/search-{index:04}.txt"),
             1,
             11,
-            &format!("row {index:04}: ALPHA1_BENCH_SEARCH result {index:04}"),
+            &format!("row {index:04}: E2E_BENCH_SEARCH result {index:04}"),
             index + 1 != SEARCH_RESULT_LIMIT,
         );
     }
     output.push_str("      ]}\n    ]\n  },\n");
     output.push_str(
-        "  \"stale_result_schedule\": {\n    \"query_a\": \"ALPHA1_STALE_A\",\n    \"query_b\": \"ALPHA1_STALE_B\",\n    \"completion_order\": [\"B\",\"A\"],\n    \"expected_publish_log\": [\"B\"],\n    \"expected_final_query\": \"ALPHA1_STALE_B\",\n    \"expected_final_path\": \"src/stale-b.txt\"\n  },\n  \"in_flight_actions\": {\n    \"replace_query_expected\": \"new-query-results-only\",\n    \"escape_expected\": \"prompt-absent-and-no-stale-publish\",\n    \"ctrl_q_expected\": \"child-exited-and-no-stale-publish\"\n  },\n",
+        "  \"stale_result_schedule\": {\n    \"query_a\": \"E2E_STALE_A\",\n    \"query_b\": \"E2E_STALE_B\",\n    \"completion_order\": [\"B\",\"A\"],\n    \"expected_publish_log\": [\"B\"],\n    \"expected_final_query\": \"E2E_STALE_B\",\n    \"expected_final_path\": \"src/stale-b.txt\"\n  },\n  \"in_flight_actions\": {\n    \"replace_query_expected\": \"new-query-results-only\",\n    \"escape_expected\": \"prompt-absent-and-no-stale-publish\",\n    \"ctrl_q_expected\": \"child-exited-and-no-stale-publish\"\n  },\n",
     );
     output.push_str(
-        "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"ALPHA1_EDIT_A_OLD\",\"with_template\":\"ALPHA1_EDIT_A_{RUN_2} A3_{RUN_2}_0001\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"ALPHA1_FIND_B_OLD\",\"with_template\":\"ALPHA1_EDIT_B_{RUN_2} A3_{RUN_2}_0002\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: ALPHA1_EDIT_C_{RUN_2} A3_{RUN_2}_0003\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"Alpha 1 scratch 日本語\\nworkflow token ALPHA1_EDIT_D_{RUN_2} A3_{RUN_2}_0004\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
+        "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"E2E_EDIT_A_OLD\",\"with_template\":\"E2E_EDIT_A_{RUN_2} A3_{RUN_2}_0001\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"E2E_FIND_B_OLD\",\"with_template\":\"E2E_EDIT_B_{RUN_2} A3_{RUN_2}_0002\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: E2E_EDIT_C_{RUN_2} A3_{RUN_2}_0003\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"Alpha 1 scratch 日本語\\nworkflow token E2E_EDIT_D_{RUN_2} A3_{RUN_2}_0004\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
     );
     output.push_str(
         "  \"benchmark\": {\n    \"report_schema_version\": 1,\n    \"startup\": {\"warmups\":2,\"samples\":20,\"p95_max_us\":3000000},\n    \"quick_open\": {\"warmups\":10,\"samples\":100,\"p95_max_us\":150000,\"max_us\":500000,\"queries\":[\n",
@@ -933,7 +931,7 @@ pub fn spec_bytes() -> Vec<u8> {
     }
     output.push_str("  ],\n");
     output.push_str(
-        "  \"oracles\": {\n    \"generator_source\": \"tests/alpha_1/fixture.rs\",\n    \"spec\": \"tests/alpha_1/spec-v1.json\",\n    \"before_manifest\": \"tests/alpha_1/expected-before-manifest-v1.jsonl\",\n    \"after_manifest\": \"tests/alpha_1/expected-after-workflow-01-manifest-v1.jsonl\",\n    \"after_manifest_workflow_run\": 1,\n    \"poc_test_ids\": \"tests/alpha_1/poc-test-ids-v1.txt\",\n    \"poc_test_count\": 94,\n    \"acceptance_case_count\": 186\n  }\n",
+        "  \"oracles\": {\n    \"generator_source\": \"tests/repository_fixture/fixture.rs\",\n    \"spec\": \"tests/repository_fixture/spec-v1.json\",\n    \"before_manifest\": \"tests/repository_fixture/expected-before-manifest-v1.jsonl\",\n    \"after_manifest\": \"tests/repository_fixture/expected-after-workflow-01-manifest-v1.jsonl\",\n    \"after_manifest_workflow_run\": 1,\n    \"poc_test_ids\": \"tests/repository_fixture/poc-test-ids-v1.txt\",\n    \"poc_test_count\": 94,\n    \"acceptance_case_count\": 186\n  }\n",
     );
     output.push_str("}\n");
     output.into_bytes()
@@ -1045,13 +1043,13 @@ pub fn generate(root: &Path) -> Result<GeneratedFixture, String> {
     fs::create_dir(&git_dir)
         .map_err(|error| format!("create excluded .git {}: {error}", git_dir.display()))?;
     set_mode(&git_dir, 0o755)?;
-    let git_sentinel = git_dir.join("alpha1-excluded.txt");
+    let git_sentinel = git_dir.join("repository-e2e-excluded.txt");
     fs::write(&git_sentinel, EXCLUDED_CONTENT)
         .map_err(|error| format!("write excluded .git sentinel: {error}"))?;
     set_mode(&git_sentinel, 0o644)?;
     fs::write(
         &outside_control,
-        "ALPHA1_EXCLUDED_SENTINEL root-outside control\n",
+        "E2E_EXCLUDED_SENTINEL root-outside control\n",
     )
     .map_err(|error| {
         format!(
@@ -1441,7 +1439,7 @@ mod tests {
             assert!(
                 edit_a
                     .windows(16)
-                    .any(|window| window == format!("ALPHA1_EDIT_A_{run:02}").as_bytes())
+                    .any(|window| window == format!("E2E_EDIT_A_{run:02}").as_bytes())
             );
             let edit_b = expected_workflow_file(EDIT_B_PATH, run).expect("edit B");
             assert_eq!(edit_b.windows(2).filter(|pair| *pair == b"\r\n").count(), 2);

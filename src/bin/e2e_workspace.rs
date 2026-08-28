@@ -312,7 +312,7 @@ fn run_standard_capability(zec: &Path, prefix: &str, case_id: &str) -> Result<St
 
 fn run_session_restore(zec: &Path, case_id: &str) -> Result<String> {
     let fixture = Fixture::create(case_id)?;
-    let marker = format!("ALPHA3_SESSION_RECOVERED_{case_id}");
+    let marker = format!("E2E_SESSION_RECOVERED_{case_id}");
     let (mut first, first_baseline) = ready(&fixture, zec)?;
     first.send(CTRL_N)?;
     let mark = first.paste_marked(&marker)?;
@@ -338,7 +338,7 @@ fn run_session_restore(zec: &Path, case_id: &str) -> Result<String> {
 
 fn run_crash_recovery(zec: &Path, case_id: &str) -> Result<String> {
     let fixture = Fixture::create(case_id)?;
-    let marker = format!("ALPHA3_CRASH_RECOVERED_{case_id}");
+    let marker = format!("E2E_CRASH_RECOVERED_{case_id}");
     let (mut crashed, _baseline) = ready(&fixture, zec)?;
     crashed.send(CTRL_N)?;
     let mark = crashed.paste_marked(&marker)?;
@@ -518,7 +518,7 @@ fn replace_fingerprint_conflict(zec: &Path, case_id: &str) -> Result<String> {
         },
     )?;
     session.send(TAB)?;
-    let mark = session.paste_marked("ALPHA3_REPLACED")?;
+    let mark = session.paste_marked("E2E_REPLACED")?;
     let saw_restarted_search = Cell::new(false);
     session.wait_after(
         "replacement field search refresh",
@@ -526,12 +526,12 @@ fn replace_fingerprint_conflict(zec: &Path, case_id: &str) -> Result<String> {
         e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
-            if contents.contains("ALPHA3_REPLACED") && contents.contains("searching…") {
+            if contents.contains("E2E_REPLACED") && contents.contains("searching…") {
                 saw_restarted_search.set(true);
                 false
             } else {
                 saw_restarted_search.get()
-                    && contents.contains("ALPHA3_REPLACED")
+                    && contents.contains("E2E_REPLACED")
                     && contents.contains("1/2")
                     && !contents.contains("searching…")
             }

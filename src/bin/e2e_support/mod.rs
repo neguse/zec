@@ -28,7 +28,7 @@ use portable_pty::{
 use serde::{Deserialize, Serialize};
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Parser};
 
-#[path = "../../../tests/alpha_1/fixture.rs"]
+#[path = "../../../tests/repository_fixture/fixture.rs"]
 pub mod fixture;
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
@@ -41,7 +41,8 @@ pub const SCENARIO_TIMEOUT: Duration = Duration::from_secs(120);
 const EVENT_POLL: Duration = Duration::from_millis(25);
 const TRANSCRIPT_LIMIT: usize = 256 * 1024;
 const DIAGNOSTIC_TAIL: usize = 8 * 1024;
-const EXPECTED_POC_IDS: &str = include_str!("../../../tests/alpha_1/poc-test-ids-v1.txt");
+const EXPECTED_POC_IDS: &str =
+    include_str!("../../../tests/repository_fixture/poc-test-ids-v1.txt");
 
 pub const CTRL_A: &[u8] = b"\x01";
 pub const CTRL_G: &[u8] = b"\x07";
@@ -1202,7 +1203,7 @@ fn verify_binary(binary: &BinaryReport) -> Result<()> {
 pub fn reset_fixed_fixture() -> Result<fixture::GeneratedFixture> {
     let workspace = Path::new(fixture::FIXED_WORKSPACE);
     ensure!(
-        workspace == Path::new("/tmp/zec-alpha-1-v1"),
+        workspace == Path::new("/tmp/zec-repository-e2e-v1"),
         "refusing to reset unexpected fixture path {}",
         workspace.display()
     );
