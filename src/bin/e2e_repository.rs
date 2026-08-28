@@ -37,7 +37,7 @@ fn main() -> Result<()> {
                 "current checkout is missing/ignoring fixed PoC IDs: {missing:?}"
             );
             println!(
-                "Alpha 1 acceptance report verified: {}/{} cases",
+                "Repository acceptance report verified: {}/{} cases",
                 report.passed, report.required_case_count
             );
             Ok(())
@@ -118,7 +118,7 @@ fn run(arguments: e2e_support::RunArguments) -> Result<()> {
     };
     write_report(&arguments.report, &report)?;
     println!(
-        "Alpha 1 acceptance: {}/{} passed; report {}",
+        "Repository acceptance: {}/{} passed; report {}",
         report.passed,
         report.required_case_count,
         arguments.report.display()
@@ -316,7 +316,7 @@ struct PartialStartupOracle {
 }
 
 fn repository_oracle() -> Result<RepositoryOracle> {
-    serde_json::from_slice(&fixture::spec_bytes()).context("parse compiled Alpha 1 spec")
+    serde_json::from_slice(&fixture::spec_bytes()).context("parse compiled repository spec")
 }
 
 fn run_probe(zec: &Path, case: &str, path: &Path) -> Result<Output> {
@@ -614,7 +614,7 @@ fn project_query<'a>(
         .queries
         .iter()
         .find(|query| query.id == id)
-        .with_context(|| format!("Alpha 1 project-search oracle is missing {id}"))
+        .with_context(|| format!("repository project-search oracle is missing {id}"))
 }
 
 fn wait_project_query(session: &mut PtySession, query: &ProjectSearchQueryOracle) -> Result<()> {

@@ -1,4 +1,4 @@
-//! Alpha 3 Zed-query and all-or-nothing replacement contract tests.
+//! Zed-query and all-or-nothing replacement contract tests.
 
 #[path = "../src/project_search.rs"]
 mod project_search;

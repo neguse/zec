@@ -84,7 +84,7 @@ pub(crate) fn classify_single_file_accesses(
 
 /// zec's filesystem boundary.
 ///
-/// Besides optionally recording path access for the Alpha 1 single-file
+/// Besides optionally recording path access for the single-file
 /// oracle, this rejects directories that merely happen to be named `.git`
 /// before Zed's GitStore starts a repository worker for them.
 pub(crate) struct ZecFs {
@@ -325,7 +325,7 @@ impl Fs for ZecFs {
         path: &Path,
     ) -> Result<Pin<Box<dyn Send + Stream<Item = Result<PathBuf>>>>> {
         // Every local Zed Project starts an unrelated, process-global cleanup
-        // of old js-debug-companion downloads. The Alpha 1 single-file probe
+        // of old js-debug-companion downloads. The single-file probe
         // uses an isolated filesystem authority so that housekeeping must not
         // race with (or be mistaken for) traversal of the controlled file's
         // parent. Answering this one private directory from an empty in-memory
@@ -423,18 +423,18 @@ mod tests {
 
     #[test]
     fn rejects_parent_path_as_single_file_access() {
-        let target = Path::new("/tmp/zec-alpha-1/outside.txt");
+        let target = Path::new("/tmp/zec-outside/outside.txt");
         let parent_access = FsPathAccess {
             kind: FsPathKind::Stat,
             method: "metadata",
-            path: PathBuf::from("/tmp/zec-alpha-1"),
+            path: PathBuf::from("/tmp/zec-outside"),
         };
         assert!(classify_single_file_accesses(&[parent_access], target).is_err());
     }
 
     #[test]
     fn classifies_only_exact_ancestor_git_markers() {
-        let target = Path::new("/tmp/zec-alpha-1/outside.txt");
+        let target = Path::new("/tmp/zec-outside/outside.txt");
         let accesses = [
             FsPathAccess {
                 kind: FsPathKind::Open,
@@ -444,7 +444,7 @@ mod tests {
             FsPathAccess {
                 kind: FsPathKind::Stat,
                 method: "metadata",
-                path: PathBuf::from("/tmp/zec-alpha-1/.git"),
+                path: PathBuf::from("/tmp/zec-outside/.git"),
             },
         ];
         assert_eq!(

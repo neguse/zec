@@ -1,4 +1,4 @@
-//! Alpha 3 workspace-model and cell-layout contract tests.
+//! Workspace-model and cell-layout contract tests.
 //!
 //! These modules are shared verbatim with the actual `zec` binary. Keeping a
 //! dedicated integration target makes the milestone gate fail if either file

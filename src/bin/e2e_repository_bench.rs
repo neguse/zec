@@ -59,7 +59,7 @@ fn main() -> Result<()> {
             let report = e2e_support::read_report::<BenchmarkReport>(&path)?;
             verify_benchmark_report(&report)
                 .with_context(|| format!("verify {}", path.display()))?;
-            println!("Alpha 1 benchmark report verified");
+            println!("Repository benchmark report verified");
             Ok(())
         }
         Invocation::Run(arguments) => run(arguments),
@@ -89,7 +89,7 @@ fn run(arguments: e2e_support::RunArguments) -> Result<()> {
 
     if resources.max_descendant_count > 0 {
         eprintln!(
-            "Alpha 1 descendant diagnostics ({} observed): {:?}",
+            "Repository benchmark descendant diagnostics ({} observed): {:?}",
             resources.max_descendant_count, resources.descendant_commands
         );
     }
@@ -166,7 +166,7 @@ fn run(arguments: e2e_support::RunArguments) -> Result<()> {
     };
     write_report(&arguments.report, &report)?;
     println!(
-        "Alpha 1 benchmark: startup p95={}us, quick-open p95={}us, search p95={}us, replace max={}us, cancel max={}us, quit max={}us, edit p95={}us, save max={}us; report {}",
+        "Repository benchmark: startup p95={}us, quick-open p95={}us, search p95={}us, replace max={}us, cancel max={}us, quit max={}us, edit p95={}us, save max={}us; report {}",
         report.startup.p95_us,
         report.quick_open.p95_us,
         report.project_search.p95_us,
@@ -567,7 +567,7 @@ impl ArmedResourceMonitor {
         let (stop, receiver) = mpsc::channel();
         let mut events = self.events;
         let handle = thread::Builder::new()
-            .name(format!("alpha-1-resource-{pid}"))
+            .name(format!("e2e-resource-{pid}"))
             .spawn(move || {
                 let mut fork_edges = Vec::new();
                 let mut observation = ResourceObservation {
@@ -924,7 +924,7 @@ fn parse_project_search_status(
         .context("project-search status core exceeded terminal width")?;
     // Every fixed benchmark row leaves at most six cells, so only the
     // ASCII prefix of ProjectSearchPrompt's default option summary can be
-    // rendered. Alpha 3 deliberately exposes search modes before actions.
+    // rendered. The prompt deliberately exposes search modes before actions.
     const PROJECT_SEARCH_DEFAULT_OPTIONS_PREFIX: &str =
         "  [lit case:off word:off ignored:off open:off full:off]";
     ensure!(

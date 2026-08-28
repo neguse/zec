@@ -130,7 +130,7 @@ fn main() -> Result<()> {
         Invocation::Verify(path) => {
             let report = read_json_report::<BenchmarkReport>(&path)?;
             verify_report(&report).with_context(|| format!("verify {}", path.display()))?;
-            println!("Alpha 3 benchmark report verified");
+            println!("Workspace benchmark report verified");
             Ok(())
         }
         Invocation::Run(arguments) => run(arguments),
@@ -416,7 +416,7 @@ fn run(arguments: workspace_support::RunArguments) -> Result<()> {
     };
     write_json_report(&arguments.report, &report)?;
     println!(
-        "Alpha 3 benchmark: redraw={}us panel={}us outline={}us regex={}us replace={}us navigation={}us restore={}us VmHWM={} bytes; report {}",
+        "Workspace benchmark: redraw={}us panel={}us outline={}us regex={}us replace={}us navigation={}us restore={}us VmHWM={} bytes; report {}",
         report.four_pane_redraw.p95_us,
         report.project_panel_initial_ready.p95_us,
         report.outline_update.p95_us,

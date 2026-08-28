@@ -1,4 +1,4 @@
-//! Alpha 3 project-panel identity, mutation, and confinement contract tests.
+//! Project-panel identity, mutation, and confinement contract tests.
 
 #[path = "../src/project_panel.rs"]
 mod project_panel;

@@ -73,7 +73,7 @@ fn main() -> Result<()> {
         Invocation::Verify(path) => {
             let report = read_report::<BenchmarkReport>(&path)?;
             verify_report(&report).with_context(|| format!("verify {}", path.display()))?;
-            println!("Alpha 2 benchmark report verified");
+            println!("Language benchmark report verified");
             Ok(())
         }
         Invocation::Run(arguments) => run(arguments),
@@ -554,7 +554,7 @@ fn run(arguments: language_support::RunArguments) -> Result<()> {
     };
     write_report(&arguments.report, &report)?;
     println!(
-        "Alpha 2 benchmark: completion p95={}us, diagnostics p95={}us, definition p95={}us, references p95={}us, rename p95={}us, VmHWM={} bytes; report {}",
+        "Language benchmark: completion p95={}us, diagnostics p95={}us, definition p95={}us, references p95={}us, rename p95={}us, VmHWM={} bytes; report {}",
         report.completion.p95_us,
         report.diagnostics.p95_us,
         report.definition.p95_us,

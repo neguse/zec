@@ -273,7 +273,7 @@ impl Fixture {
         let temp = tempfile::Builder::new()
             .prefix("zec-workspace-e2e-")
             .tempdir()
-            .context("create Alpha 3 fixture")?;
+            .context("create workspace fixture")?;
         let root = temp.path().join("project");
         let source_directory = root.join("src");
         let locked = root.join("locked");

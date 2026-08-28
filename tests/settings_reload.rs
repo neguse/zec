@@ -75,7 +75,7 @@ fn settings_keymap_and_format_on_save_reload_through_zed() {
         &source,
         &[],
         Duration::from_secs(25),
-        "Alpha 2 settings probe",
+        "language settings probe",
     );
     assert_eq!(report["initial"]["tab_size"], 5);
     assert_eq!(report["initial"]["format_on_save"], "off");

@@ -353,7 +353,7 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn create(lsp: &Path, mode: FixtureMode<'_>) -> Result<Self> {
-        let temp = tempfile::tempdir().context("create Alpha 2 fixture directory")?;
+        let temp = tempfile::tempdir().context("create language fixture directory")?;
         let workspace = temp.path();
         let root = workspace.join("project");
         let source_dir = root.join("src");

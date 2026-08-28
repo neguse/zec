@@ -65,7 +65,7 @@ fn main() -> Result<()> {
             let report = read_json_report::<AcceptanceReport>(&path)?;
             verify_report(&report).with_context(|| format!("verify {}", path.display()))?;
             println!(
-                "Alpha 3 acceptance report verified: {}/{} cases",
+                "Workspace acceptance report verified: {}/{} cases",
                 report.passed, report.required_case_count
             );
             Ok(())
@@ -178,7 +178,7 @@ fn run(arguments: workspace_support::RunArguments) -> Result<()> {
     };
     write_json_report(&arguments.report, &report)?;
     println!(
-        "Alpha 3 acceptance: {}/{} passed; report {}",
+        "Workspace acceptance: {}/{} passed; report {}",
         report.passed,
         report.required_case_count,
         arguments.report.display()
@@ -212,7 +212,7 @@ fn ready(fixture: &Fixture, zec: &Path) -> Result<(PtySession, TerminalBaseline)
     session.wait_ready("zec project", READY_SENTINEL)?;
     session.assert_raw(&baseline)?;
     let mark = session.send_marked(CTRL_PAGE_DOWN)?;
-    session.wait_contains("activate Alpha 3 source tab", mark, "[main.rs]")?;
+    session.wait_contains("activate workspace source tab", mark, "[main.rs]")?;
     Ok((session, baseline))
 }
 
@@ -374,7 +374,7 @@ fn run_failure_scenario(zec: &Path, scenario: &str, case_id: &str) -> Result<Str
         "WATCHER_OVERFLOW_RESCAN_REORDER" => watcher_rescan(zec, case_id),
         "STALE_OUTLINE_PANEL_SEARCH_GENERATION" => stale_generation(zec, case_id),
         "CRASH_DURING_RECOVERY_JOURNAL_COMMIT" => run_crash_recovery(zec, case_id),
-        _ => anyhow::bail!("unknown Alpha 3 failure scenario {scenario}"),
+        _ => anyhow::bail!("unknown workspace failure scenario {scenario}"),
     }
 }
 

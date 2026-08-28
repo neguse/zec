@@ -23797,7 +23797,7 @@ mod tests {
         ignore = "pinned GPUI Windows backend requires the process main thread; window creation is covered by --smoke"
     )]
     #[test]
-    // Keep this Alpha 1 PoC identifier stable. The standalone-file path is now
+    // Keep this pinned PoC identifier stable. The standalone-file path is now
     // backed by a Zed Project internally, but the externally observable reload
     // and undo contract represented by this pinned test ID is unchanged.
     fn clean_file_auto_reloads_without_project_and_reload_is_undoable() {

@@ -106,13 +106,9 @@ pub fn parse_invocation(requires_repo: bool) -> Result<Invocation> {
             Some("--help" | "-h") => {
                 println!(
                     "Usage: {} --zec PATH {}--assert --report PATH\n       {} --verify-report PATH",
-                    std::env::args()
-                        .next()
-                        .unwrap_or_else(|| "alpha_1".to_owned()),
+                    std::env::args().next().unwrap_or_else(|| "e2e".to_owned()),
                     if requires_repo { "--repo PATH " } else { "" },
-                    std::env::args()
-                        .next()
-                        .unwrap_or_else(|| "alpha_1".to_owned()),
+                    std::env::args().next().unwrap_or_else(|| "e2e".to_owned()),
                 );
                 std::process::exit(0);
             }
@@ -607,7 +603,7 @@ pub fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> 
         .take()
         .context("bounded command has no stderr")?;
     let stdout_reader = thread::Builder::new()
-        .name("alpha-1-command-stdout".to_owned())
+        .name("e2e-command-stdout".to_owned())
         .spawn(move || {
             let mut bytes = Vec::new();
             stdout.read_to_end(&mut bytes)?;
@@ -615,7 +611,7 @@ pub fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> 
         })
         .context("spawn bounded stdout reader")?;
     let stderr_reader = thread::Builder::new()
-        .name("alpha-1-command-stderr".to_owned())
+        .name("e2e-command-stderr".to_owned())
         .spawn(move || {
             let mut bytes = Vec::new();
             stderr.read_to_end(&mut bytes)?;
@@ -694,12 +690,12 @@ pub fn expected_poc_ids() -> Vec<String> {
 }
 
 pub fn benchmark_oracle() -> Result<BenchmarkOracle> {
-    let spec: serde_json::Value =
-        serde_json::from_slice(&fixture::spec_bytes()).context("parse generated Alpha 1 spec")?;
+    let spec: serde_json::Value = serde_json::from_slice(&fixture::spec_bytes())
+        .context("parse generated repository spec")?;
     serde_json::from_value(
         spec.get("benchmark")
             .cloned()
-            .context("Alpha 1 spec has no benchmark object")?,
+            .context("repository spec has no benchmark object")?,
     )
     .context("parse complete benchmark oracle")
 }
@@ -1377,7 +1373,7 @@ impl PtySession {
         let writer = master.take_writer().context("take PTY writer")?;
         let (sender, events) = mpsc::sync_channel(64);
         let reader_thread = thread::Builder::new()
-            .name("alpha-1-pty-reader".to_owned())
+            .name("e2e-pty-reader".to_owned())
             .spawn(move || {
                 let mut buffer = [0_u8; 8192];
                 loop {

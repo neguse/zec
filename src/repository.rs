@@ -33,7 +33,7 @@ use util::{paths::PathStyle, rel_path::RelPath};
 use worktree::decode_byte_header;
 use zed_fs::Fs;
 
-/// Alpha 1's fixed number of project-search rows shown to the user.
+/// The fixed number of project-search rows shown to the user.
 pub const PROJECT_SEARCH_DISPLAY_LIMIT: usize = 100;
 
 /// The pipeline never creates more workers than GPUI advertises CPUs, and
@@ -449,7 +449,7 @@ impl RepositoryIndex {
     }
 
     /// Build from an already-scanned entry stream. This is also the seam used
-    /// by the deterministic Alpha 1 controlled provider.
+    /// by the deterministic controlled search provider.
     pub fn from_entries(
         root: RepositoryRoot,
         entries: impl IntoIterator<Item = RepositoryEntry>,
@@ -773,7 +773,7 @@ pub fn start_literal_project_search(
 
 /// Start one fully configured Zed project search. Literal/regex, case, word,
 /// ignored-file, include/exclude and open-buffer-only semantics all come from
-/// `query`; the bounded worker lifecycle is shared with the Alpha 1 literal
+/// `query`; the bounded worker lifecycle is shared with the literal
 /// entry point above.
 pub fn start_project_search(
     zed_query: Arc<SearchQuery>,

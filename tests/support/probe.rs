@@ -1,4 +1,4 @@
-//! Shared cross-platform fixture plumbing for the Alpha 2 actual-binary tests.
+//! Shared cross-platform fixture plumbing for the language actual-binary tests.
 //!
 //! Isolation works through `ZEC_DATA_DIR` (identical on every platform); the
 //! XDG variables additionally fence off Unix-only side channels. The fixture
@@ -33,7 +33,7 @@ pub struct ProbeEnvironment {
 
 impl ProbeEnvironment {
     pub fn new(package_name: &str) -> Self {
-        let temp = tempfile::tempdir().expect("create Alpha 2 test directory");
+        let temp = tempfile::tempdir().expect("create language test directory");
         let root = temp.path().join("project");
         let source_dir = root.join("src");
         let zed_dir = root.join(".zed");
@@ -58,7 +58,7 @@ impl ProbeEnvironment {
             &rustup_home,
             &cargo_home,
         ] {
-            fs::create_dir_all(directory).expect("create Alpha 2 fixture directory");
+            fs::create_dir_all(directory).expect("create language fixture directory");
         }
         fs::write(
             root.join("Cargo.toml"),

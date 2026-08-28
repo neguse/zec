@@ -26,7 +26,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
           "ensure_final_newline_on_save": false
         }"#,
     )
-    .expect("write Alpha 2 fixture project settings");
+    .expect("write language fixture project settings");
     let source = probe_env.source_dir.join("main.rs");
     fs::write(&source, "fn main() {\n    let _value = alpha_;\n}   \n")
         .expect("write fixture Rust source");
@@ -44,7 +44,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
         &source,
         &[],
         Duration::from_secs(25),
-        "Alpha 2 probe",
+        "language probe",
     );
     assert_eq!(report["language"], "Rust");
     assert_eq!(report["servers"][0]["name"], "rust-analyzer");

@@ -1,4 +1,4 @@
-//! Alpha 3 immutable-generation session and recovery contract tests.
+//! Immutable-generation session and recovery contract tests.
 
 #[path = "../src/workspace_model.rs"]
 mod workspace_model;

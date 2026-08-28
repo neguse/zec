@@ -50,7 +50,7 @@ fn main() -> Result<()> {
             let report = read_report::<AcceptanceReport>(&path)?;
             verify_report(&report).with_context(|| format!("verify {}", path.display()))?;
             println!(
-                "Alpha 2 acceptance report verified: {}/{} cases",
+                "Language acceptance report verified: {}/{} cases",
                 report.passed, report.required_case_count
             );
             Ok(())
@@ -183,7 +183,7 @@ fn run(arguments: language_support::RunArguments) -> Result<()> {
     };
     write_report(&arguments.report, &report)?;
     println!(
-        "Alpha 2 acceptance: {}/{} passed; report {}",
+        "Language acceptance: {}/{} passed; report {}",
         report.passed,
         report.required_case_count,
         arguments.report.display()

@@ -333,19 +333,19 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     const TERMINAL_READY: &str = "E2E_TERMINAL_READY";
     const TASK_READY: &str = "E2E_TASK_READY";
 
-    let temp = tempfile::tempdir().context("create Beta 1 PTY fixture")?;
-    let root = temp.path().join("beta-1-repo");
-    fs::create_dir_all(root.join(".zed")).context("create Beta 1 fixture")?;
+    let temp = tempfile::tempdir().context("create E2E PTY fixture")?;
+    let root = temp.path().join("e2e-repo");
+    fs::create_dir_all(root.join(".zed")).context("create E2E fixture")?;
     let readme = root.join("README.md");
-    fs::write(&readme, format!("{READY}\n")).context("write Beta 1 README")?;
+    fs::write(&readme, format!("{READY}\n")).context("write E2E README")?;
     // The task must print its sentinel and append it to a log file; each
     // platform uses its native shell for that.
     #[cfg(unix)]
     let tasks = r#"[
           {
-            "label": "Beta 1 Task",
+            "label": "E2E Task",
             "command": "sh",
-            "args": ["-c", "printf 'E2E_TASK_READY\\n' | tee -a beta1-task.log"],
+            "args": ["-c", "printf 'E2E_TASK_READY\\n' | tee -a e2e-task.log"],
             "reveal": "always",
             "hide": "never"
           }
@@ -353,30 +353,30 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     #[cfg(windows)]
     let tasks = r#"[
           {
-            "label": "Beta 1 Task",
+            "label": "E2E Task",
             "command": "pwsh",
-            "args": ["-NoProfile", "-Command", "'E2E_TASK_READY' | tee -Append beta1-task.log"],
+            "args": ["-NoProfile", "-Command", "'E2E_TASK_READY' | tee -Append e2e-task.log"],
             "reveal": "always",
             "hide": "never"
           }
         ]"#;
-    fs::write(root.join(".zed/tasks.json"), tasks).context("write Beta 1 tasks")?;
+    fs::write(root.join(".zed/tasks.json"), tasks).context("write E2E tasks")?;
     git(&root, &["init"])?;
     git(&root, &["config", "user.email", "zec@example.invalid"])?;
     git(&root, &["config", "user.name", "zec acceptance"])?;
     git(&root, &["add", "README.md"])?;
     git(&root, &["commit", "-m", "fixture"])?;
     fs::write(&readme, format!("{READY}\nmodified for Git panel\n"))
-        .context("modify Beta 1 README")?;
+        .context("modify E2E README")?;
 
     let pair = open_pty()?;
     let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str(), readme.as_os_str()])?;
-    session.wait_for_screen("Beta 1 worktree trust", STARTUP_TIMEOUT, |screen| {
-        screen.contains("Worktree Trust") && screen.contains("beta-1-repo")
+    session.wait_for_screen("E2E worktree trust", STARTUP_TIMEOUT, |screen| {
+        screen.contains("Worktree Trust") && screen.contains("e2e-repo")
     })?;
     session.send(ENTER)?;
-    session.wait_for_screen("Beta 1 workspace ready", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E workspace ready", ACTION_TIMEOUT, |screen| {
         screen.contains(READY) && !screen.contains("Worktree Trust")
     })?;
 
@@ -386,16 +386,16 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     })?;
     #[cfg(unix)]
     session.paste(&format!(
-        "printf '{TERMINAL_READY}\\n' | tee beta1-terminal.log"
+        "printf '{TERMINAL_READY}\\n' | tee e2e-terminal.log"
     ))?;
     #[cfg(windows)]
-    session.paste(&format!("'{TERMINAL_READY}' | tee beta1-terminal.log"))?;
+    session.paste(&format!("'{TERMINAL_READY}' | tee e2e-terminal.log"))?;
     session.send(ENTER)?;
     session.wait_until(
         "terminal command output and side effect",
         ACTION_TIMEOUT,
         |_| {
-            fs::read_to_string(root.join("beta1-terminal.log"))
+            fs::read_to_string(root.join("e2e-terminal.log"))
                 .is_ok_and(|text| text.contains(TERMINAL_READY))
         },
     )?;
@@ -403,7 +403,7 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
         screen.contains(TERMINAL_READY)
     })?;
     session.send(F3)?;
-    session.wait_for_screen("Beta 1 terminal hidden", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E terminal hidden", ACTION_TIMEOUT, |screen| {
         screen.contains("terminal panel hidden")
     })?;
 
@@ -439,14 +439,14 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     session.paste("Run Task")?;
     session.send(ENTER)?;
     session.wait_for_screen("Zed TaskInventory picker", ACTION_TIMEOUT, |screen| {
-        screen.contains("Tasks") && screen.contains("Beta 1 Task")
+        screen.contains("Tasks") && screen.contains("E2E Task")
     })?;
     session.send(ENTER)?;
     session.wait_for_screen("Zed task terminal output", ACTION_TIMEOUT, |screen| {
         screen.contains(TASK_READY)
     })?;
     session.wait_until("task side effect", ACTION_TIMEOUT, |_| {
-        fs::read_to_string(root.join("beta1-task.log"))
+        fs::read_to_string(root.join("e2e-task.log"))
             .is_ok_and(|text| text.lines().count() == 1 && text.contains(TASK_READY))
     })?;
     session.wait_for_screen("Zed task completion", ACTION_TIMEOUT, |screen| {
@@ -457,13 +457,13 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     session.paste("Rerun Last Task")?;
     session.send(ENTER)?;
     session.wait_until("rerun task side effect", ACTION_TIMEOUT, |_| {
-        fs::read_to_string(root.join("beta1-task.log")).is_ok_and(|text| text.lines().count() == 2)
+        fs::read_to_string(root.join("e2e-task.log")).is_ok_and(|text| text.lines().count() == 2)
     })?;
 
     session.send(F3)?;
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
-    ensure!(status.success(), "Beta 1 zec exit failed: {status}");
+    ensure!(status.success(), "E2E zec exit failed: {status}");
     session.assert_terminal_restored(&termios_before)
 }
 
@@ -480,11 +480,11 @@ fn remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Result<()> 
             std::env::var_os("ZEC_REQUIRE_REMOTE_SSH").is_none(),
             "ZEC_REQUIRE_REMOTE_SSH is set but sshd is unavailable"
         );
-        eprintln!("skipping Beta 2 remote acceptance: sshd is unavailable");
+        eprintln!("skipping E2E remote acceptance: sshd is unavailable");
         return Ok(());
     };
 
-    let temp = tempfile::tempdir().context("create Beta 2 remote fixture")?;
+    let temp = tempfile::tempdir().context("create E2E remote fixture")?;
     let root = temp.path().join("remote-project");
     fs::create_dir_all(root.join(".zed")).context("create remote fixture")?;
     let readme = root.join("README.md");
@@ -665,7 +665,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
     const UPDATED: &str = "E2E_RICH_CONTENT_LIVE_UPDATE";
     const HEADING: &str = "Target Heading";
 
-    let temp = tempfile::tempdir().context("create Beta 2 rich-content fixture")?;
+    let temp = tempfile::tempdir().context("create E2E rich-content fixture")?;
     let root = temp.path().join("rich-content-project");
     fs::create_dir_all(root.join("assets")).context("create rich-content fixture")?;
     let readme = root.join("README.md");
@@ -948,7 +948,7 @@ fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<(
     const BOTTOM: &str = "E2E_LARGE_FILE_BOTTOM";
     const EDIT: &str = "E2E_LARGE_FILE_EDITED_";
 
-    let temp = tempfile::tempdir().context("create Beta 2 large-file fixture")?;
+    let temp = tempfile::tempdir().context("create E2E large-file fixture")?;
     let path = temp.path().join("large-100000-lines.txt");
     let mut contents = String::with_capacity(2 * 1024 * 1024);
     for row in 1..=LINE_COUNT {
@@ -970,7 +970,7 @@ fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<(
     }
     ensure!(contents.lines().count() == LINE_COUNT);
     ensure!(contents.lines().nth(LONG_LINE - 1).unwrap().len() == LONG_LINE_BYTES);
-    fs::write(&path, contents).context("write Beta 2 large-file fixture")?;
+    fs::write(&path, contents).context("write E2E large-file fixture")?;
 
     let pair = open_pty()?;
     let termios_before = capture_baseline(&pair)?;
@@ -1008,7 +1008,7 @@ fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<(
     session.wait_until("large-file edit persisted", ACTION_TIMEOUT, |_| {
         fs::read_to_string(&path).is_ok_and(|text| text.contains(&format!("{EDIT}{BOTTOM}")))
     })?;
-    let persisted = fs::read_to_string(&path).context("read saved Beta 2 large file")?;
+    let persisted = fs::read_to_string(&path).context("read saved E2E large file")?;
     ensure!(persisted.lines().count() == LINE_COUNT);
     let expected_last_line = format!("{EDIT}{BOTTOM}");
     ensure!(persisted.lines().last() == Some(expected_last_line.as_str()));
@@ -1046,7 +1046,7 @@ fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "E2E_AGENT_EDITOR_READY";
     const PROMPT: &str = "E2E_AGENT_PROMPT";
 
-    let temp = tempfile::tempdir().context("create Beta 3 ACP fixture")?;
+    let temp = tempfile::tempdir().context("create E2E ACP fixture")?;
     let root = temp.path().join("agent-project");
     fs::create_dir_all(root.join(".zed")).context("create Agent fixture project")?;
     fs::write(root.join("README.md"), format!("{READY}\n"))
@@ -1928,13 +1928,13 @@ fn debugger_and_repl_run_through_zed_dap_in_the_actual_binary() -> Result<()> {
             !require_gdb_dap,
             "ZEC_REQUIRE_GDB_DAP is set but GDB is unavailable"
         );
-        eprintln!("skipping Beta 1 DAP acceptance: GDB is unavailable");
+        eprintln!("skipping E2E DAP acceptance: GDB is unavailable");
         return Ok(());
     }
 
-    let temp = tempfile::tempdir().context("create Beta 1 DAP fixture")?;
-    let root = temp.path().join("beta-1-debugger");
-    fs::create_dir_all(root.join(".zed")).context("create Beta 1 fixture")?;
+    let temp = tempfile::tempdir().context("create E2E DAP fixture")?;
+    let root = temp.path().join("e2e-debugger");
+    fs::create_dir_all(root.join(".zed")).context("create E2E fixture")?;
     let source = root.join("main.c");
     let binary = root.join("debuggee");
     fs::write(
@@ -1949,7 +1949,7 @@ int main(void) {
 }
 "#,
     )
-    .context("write Beta 1 C source")?;
+    .context("write E2E C source")?;
     let compile = Command::new("cc")
         .args([
             "-g",
@@ -1961,8 +1961,8 @@ int main(void) {
         ])
         .current_dir(&root)
         .status()
-        .context("compile Beta 1 debuggee")?;
-    ensure!(compile.success(), "Beta 1 debuggee compilation failed");
+        .context("compile E2E debuggee")?;
+    ensure!(compile.success(), "E2E debuggee compilation failed");
     let gdb_preflight = Command::new("gdb")
         .args([
             "-q",
@@ -1991,7 +1991,7 @@ int main(void) {
             gdb_preflight_output.trim()
         );
         eprintln!(
-            "skipping Beta 1 DAP acceptance: this environment denies ptrace ({})",
+            "skipping E2E DAP acceptance: this environment denies ptrace ({})",
             gdb_preflight_output.trim()
         );
         return Ok(());
@@ -2005,7 +2005,7 @@ int main(void) {
         root.join(".zed/debug.json"),
         serde_json::to_vec_pretty(&serde_json::json!([
           {
-            "label": "Beta 1 GDB",
+            "label": "E2E GDB",
             "adapter": "GDB",
             "request": "launch",
             "program": binary,
@@ -2013,23 +2013,23 @@ int main(void) {
           }
         ]))?,
     )
-    .context("write Beta 1 debug configuration")?;
+    .context("write E2E debug configuration")?;
     git(&root, &["init"])?;
     git(&root, &["config", "user.email", "zec@example.invalid"])?;
     git(&root, &["config", "user.name", "zec acceptance"])?;
     git(&root, &["add", "main.c", ".zed/debug.json"])?;
     git(&root, &["commit", "-m", "debug fixture"])?;
-    ensure!(binary.is_file(), "Beta 1 debuggee binary is missing");
+    ensure!(binary.is_file(), "E2E debuggee binary is missing");
 
     let pair = open_pty()?;
     let termios_before = capture_baseline(&pair)?;
     let mut session = PtySession::spawn(pair, &[root.as_os_str(), source.as_os_str()])?;
-    session.wait_for_screen("Beta 1 worktree trust", STARTUP_TIMEOUT, |screen| {
-        screen.contains("Worktree Trust") && screen.contains("beta-1-debugger")
+    session.wait_for_screen("E2E worktree trust", STARTUP_TIMEOUT, |screen| {
+        screen.contains("Worktree Trust") && screen.contains("e2e-debugger")
     })?;
     session.send(ENTER)?;
     session.send(CTRL_PAGE_DOWN)?;
-    session.wait_for_screen("Beta 1 source ready", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E source ready", ACTION_TIMEOUT, |screen| {
         screen.contains("volatile int answer")
             && screen.contains("[main.c]")
             && !screen.contains("Worktree Trust")
@@ -2037,75 +2037,71 @@ int main(void) {
     session.send(b"\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B")?;
 
     session.send(F1)?;
-    session.wait_for_screen("Beta 1 breakpoint command", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E breakpoint command", ACTION_TIMEOUT, |screen| {
         screen.contains("Command palette:")
     })?;
     session.paste("Toggle Breakpoint")?;
     session.send(ENTER)?;
-    session.wait_for_screen("Beta 1 breakpoint toggled", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E breakpoint toggled", ACTION_TIMEOUT, |screen| {
         screen.contains("breakpoint toggled")
     })?;
 
     session.send(F1)?;
     session.paste("Toggle Debugger Panel")?;
     session.send(ENTER)?;
-    session.wait_for_screen(
-        "Beta 1 idle debugger projection",
-        ACTION_TIMEOUT,
-        |screen| {
-            screen.contains("Debugger · No session · DAP · idle") && screen.contains("main.c:6")
-        },
-    )?;
+    session.wait_for_screen("E2E idle debugger projection", ACTION_TIMEOUT, |screen| {
+        screen.contains("Debugger · No session · DAP · idle") && screen.contains("main.c:6")
+    })?;
     session.send(b"\x1b")?;
-    session.wait_for_screen("Beta 1 editor refocused", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E editor refocused", ACTION_TIMEOUT, |screen| {
         screen.contains("editor focused")
     })?;
 
     session.send(F5)?;
-    session.wait_for_screen("Beta 1 configuration picker", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E configuration picker", ACTION_TIMEOUT, |screen| {
         screen.contains("Debug Configurations")
-            && screen.contains("Beta 1 GDB")
+            && screen.contains("E2E GDB")
             && screen.contains("GDB")
     })?;
     session.send(ENTER)?;
-    session.wait_for_screen("Beta 1 breakpoint stop", STARTUP_TIMEOUT, |screen| {
-        screen.contains("Debugger · Beta 1 GDB · GDB · stopped")
+    session.wait_for_screen("E2E breakpoint stop", STARTUP_TIMEOUT, |screen| {
+        screen.contains("Debugger · E2E GDB · GDB · stopped")
     })?;
 
     session.send(b":")?;
-    session.wait_for_screen("Beta 1 Debug REPL", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E Debug REPL", ACTION_TIMEOUT, |screen| {
         screen.contains("Debug console:")
     })?;
     session.paste("print 1+1")?;
     session.send(ENTER)?;
-    session.wait_for_screen("Beta 1 Debug REPL result", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E Debug REPL result", ACTION_TIMEOUT, |screen| {
         screen.contains("> print 1+1") && screen.contains("< $1 = 2")
     })?;
     session.send(b"\x1b")?;
-    session.wait_for_screen("Beta 1 Debug REPL closed", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E Debug REPL closed", ACTION_TIMEOUT, |screen| {
         !screen.contains("Debug console:")
     })?;
     session.send(b"c")?;
-    session.wait_for_screen("Beta 1 continue", ACTION_TIMEOUT, |screen| {
-        screen.contains("Debugger · Beta 1 GDB · GDB · running")
+    session.wait_for_screen("E2E continue", ACTION_TIMEOUT, |screen| {
+        screen.contains("Debugger · E2E GDB · GDB · running")
     })?;
     session.send(b"p")?;
-    session.wait_for_screen("Beta 1 pause", ACTION_TIMEOUT, |screen| {
-        screen.contains("Debugger · Beta 1 GDB · GDB · stopped")
+    session.wait_for_screen("E2E pause", ACTION_TIMEOUT, |screen| {
+        screen.contains("Debugger · E2E GDB · GDB · stopped")
     })?;
     session.send(b"n")?;
-    session.wait_for_screen("Beta 1 step over", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E step over", ACTION_TIMEOUT, |screen| {
         screen.contains("step over requested")
-            || screen.contains("Debugger · Beta 1 GDB · GDB · stopped")
+            || screen.contains("Debugger · E2E GDB · GDB · stopped")
     })?;
     session.send(b"k")?;
-    session.wait_for_screen("Beta 1 debugger shutdown", ACTION_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E debugger shutdown", ACTION_TIMEOUT, |screen| {
         screen.contains("Debugger · No session · DAP · idle") || screen.contains("stop requested")
     })?;
 
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
-    ensure!(status.success(), "Beta 1 zec exit failed: {status}");
+    ensure!(status.success(), "E2E zec exit failed: {status}");
     session.assert_terminal_restored(&termios_before)
 }
 
@@ -2113,8 +2109,8 @@ int main(void) {
 fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "E2E_CONFIGURATION_READY";
 
-    let temp = tempfile::tempdir().context("create Beta 2 configuration fixture")?;
-    let root = temp.path().join("beta-2-configuration");
+    let temp = tempfile::tempdir().context("create E2E configuration fixture")?;
+    let root = temp.path().join("e2e-configuration");
     let xdg_config = temp.path().join("xdg-config");
     let xdg_data = temp.path().join("xdg-data");
     let data_root = temp.path().join("zec-data");
@@ -2122,15 +2118,14 @@ fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Resu
     let update_manifest = temp.path().join("zec-update-v1.json");
     let extension = data_root
         .join("extensions/installed")
-        .join("beta-2-console-theme");
-    let dev_extension = temp.path().join("beta-2-dev-extension");
-    fs::create_dir_all(&root).context("create Beta 2 root")?;
-    fs::create_dir_all(&zed_config).context("create Beta 2 Zed config")?;
-    fs::create_dir_all(extension.join("themes")).context("create Beta 2 installed extension")?;
-    fs::create_dir_all(dev_extension.join("themes"))
-        .context("create Beta 2 dev extension source")?;
+        .join("e2e-console-theme");
+    let dev_extension = temp.path().join("e2e-dev-extension");
+    fs::create_dir_all(&root).context("create E2E root")?;
+    fs::create_dir_all(&zed_config).context("create E2E Zed config")?;
+    fs::create_dir_all(extension.join("themes")).context("create E2E installed extension")?;
+    fs::create_dir_all(dev_extension.join("themes")).context("create E2E dev extension source")?;
     let source = root.join("README.md");
-    fs::write(&source, format!("{READY}\n")).context("write Beta 2 source")?;
+    fs::write(&source, format!("{READY}\n")).context("write E2E source")?;
     fs::write(
         zed_config.join("settings.json"),
         r#"{
@@ -2139,13 +2134,13 @@ fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Resu
           "auto_update_extensions": { "html": false }
         }"#,
     )
-    .context("write Beta 2 settings")?;
+    .context("write E2E settings")?;
     fs::write(
         zed_config.join("global_settings.json"),
         r#"{"show_whitespaces":"none"}"#,
     )
-    .context("write Beta 2 global settings")?;
-    fs::write(zed_config.join("keymap.json"), "[]").context("write Beta 2 keymap")?;
+    .context("write E2E global settings")?;
+    fs::write(zed_config.join("keymap.json"), "[]").context("write E2E keymap")?;
     fs::write(
         &update_manifest,
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -2165,27 +2160,27 @@ fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Resu
             }]
         }))?,
     )
-    .context("write Beta 2 update manifest")?;
+    .context("write E2E update manifest")?;
     fs::write(
         extension.join("extension.toml"),
-        r#"id = "beta-2-console-theme"
-name = "Beta 2 Console Theme"
+        r#"id = "e2e-console-theme"
+name = "E2E Console Theme"
 description = "A local extension fixture indexed by the real Zed extension host."
 version = "1.2.3"
 schema_version = 1
 authors = ["zec acceptance"]
-themes = ["themes/beta-2-console-theme.json"]
+themes = ["themes/e2e-console-theme.json"]
 "#,
     )
-    .context("write Beta 2 extension manifest")?;
+    .context("write E2E extension manifest")?;
     fs::write(
-        extension.join("themes/beta-2-console-theme.json"),
+        extension.join("themes/e2e-console-theme.json"),
         r##"{
           "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
-          "name": "Beta 2 Console Theme Family",
+          "name": "E2E Console Theme Family",
           "author": "zec acceptance",
           "themes": [{
-            "name": "Beta 2 Console Dark",
+            "name": "E2E Console Dark",
             "appearance": "dark",
             "style": {
               "background": "#101820ff",
@@ -2195,27 +2190,27 @@ themes = ["themes/beta-2-console-theme.json"]
           }]
         }"##,
     )
-    .context("write Beta 2 extension theme")?;
+    .context("write E2E extension theme")?;
     fs::write(
         dev_extension.join("extension.toml"),
-        r#"id = "beta-2-dev-theme"
-name = "Beta 2 Dev Theme"
+        r#"id = "e2e-dev-theme"
+name = "E2E Dev Theme"
 description = "A dev extension installed from the console picker."
 version = "0.4.2"
 schema_version = 1
 authors = ["zec acceptance"]
-themes = ["themes/beta-2-dev-theme.json"]
+themes = ["themes/e2e-dev-theme.json"]
 "#,
     )
-    .context("write Beta 2 dev extension manifest")?;
+    .context("write E2E dev extension manifest")?;
     fs::write(
-        dev_extension.join("themes/beta-2-dev-theme.json"),
+        dev_extension.join("themes/e2e-dev-theme.json"),
         r##"{
           "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
-          "name": "Beta 2 Dev Theme Family",
+          "name": "E2E Dev Theme Family",
           "author": "zec acceptance",
           "themes": [{
-            "name": "Beta 2 Dev Dark",
+            "name": "E2E Dev Dark",
             "appearance": "dark",
             "style": {
               "background": "#182010ff",
@@ -2225,7 +2220,7 @@ themes = ["themes/beta-2-dev-theme.json"]
           }]
         }"##,
     )
-    .context("write Beta 2 dev extension theme")?;
+    .context("write E2E dev extension theme")?;
 
     let pair = open_pty()?;
     let termios_before = capture_baseline(&pair)?;
@@ -2239,7 +2234,7 @@ themes = ["themes/beta-2-dev-theme.json"]
         ),
     ];
     let mut session = PtySession::spawn_with_env(pair, &[source.as_os_str()], &environment)?;
-    session.wait_for_screen("Beta 2 editor ready", STARTUP_TIMEOUT, |screen| {
+    session.wait_for_screen("E2E editor ready", STARTUP_TIMEOUT, |screen| {
         screen.contains(READY)
     })?;
 
@@ -2253,7 +2248,7 @@ themes = ["themes/beta-2-dev-theme.json"]
     session.wait_for_screen("installed extension scope", ACTION_TIMEOUT, |screen| {
         screen.contains("Extensions · installed")
             && screen.contains("Extensions [installed]:")
-            && screen.contains("Beta 2 Console Theme")
+            && screen.contains("E2E Console Theme")
             && screen.contains("1.2.3")
     })?;
     session.send(CTRL_D)?;
@@ -2263,10 +2258,10 @@ themes = ["themes/beta-2-dev-theme.json"]
     session.paste(&dev_extension.display().to_string())?;
     session.send(ENTER)?;
     session.wait_for_screen("dev extension installed", STARTUP_TIMEOUT, |screen| {
-        screen.contains("Beta 2 Dev Theme")
+        screen.contains("E2E Dev Theme")
             && screen.contains("dev 0.4.2")
             && (screen.contains("dev extension installed")
-                || screen.contains("extension beta-2-dev-theme installed"))
+                || screen.contains("extension e2e-dev-theme installed"))
     })?;
     session.send(b"\x1b")?;
     session.wait_for_screen("extension picker closed", ACTION_TIMEOUT, |screen| {
@@ -2279,25 +2274,24 @@ themes = ["themes/beta-2-dev-theme.json"]
     session.wait_for_screen("bundled theme picker", ACTION_TIMEOUT, |screen| {
         screen.contains("Themes:") && screen.contains("Themes")
     })?;
-    session.paste("Beta 2 Dev Dark")?;
+    session.paste("E2E Dev Dark")?;
     session.wait_for_screen("filtered extension theme", ACTION_TIMEOUT, |screen| {
-        screen.contains("Beta 2 Dev Dark")
+        screen.contains("E2E Dev Dark")
     })?;
     session.send(ENTER)?;
     session.wait_for_screen("theme applied", ACTION_TIMEOUT, |screen| {
-        screen.contains("theme applied: Beta 2 Dev Dark")
-            || screen.contains("user settings reloaded")
+        screen.contains("theme applied: E2E Dev Dark") || screen.contains("user settings reloaded")
     })?;
     session.wait_until("theme persisted to settings", ACTION_TIMEOUT, |_| {
         fs::read_to_string(zed_config.join("settings.json"))
-            .is_ok_and(|settings| settings.contains("Beta 2 Dev Dark"))
+            .is_ok_and(|settings| settings.contains("E2E Dev Dark"))
     })?;
 
     session.send(F1)?;
     session.paste("Open Settings File")?;
     session.send(ENTER)?;
     session.wait_for_screen("settings file opened", ACTION_TIMEOUT, |screen| {
-        screen.contains("settings.json") && screen.contains("Beta 2 Dev Dark")
+        screen.contains("settings.json") && screen.contains("E2E Dev Dark")
     })?;
 
     session.send(F1)?;
@@ -2309,31 +2303,31 @@ themes = ["themes/beta-2-dev-theme.json"]
 
     fs::write(
         dev_extension.join("extension.toml"),
-        r#"id = "beta-2-dev-theme"
-name = "Beta 2 Dev Theme"
+        r#"id = "e2e-dev-theme"
+name = "E2E Dev Theme"
 description = "A dev extension rebuilt from the console picker."
 version = "0.4.3"
 schema_version = 1
 authors = ["zec acceptance"]
-themes = ["themes/beta-2-dev-theme.json"]
+themes = ["themes/e2e-dev-theme.json"]
 "#,
     )
-    .context("update Beta 2 dev extension manifest")?;
+    .context("update E2E dev extension manifest")?;
     session.send(F1)?;
     session.paste("Extensions")?;
     session.send(ENTER)?;
     session.wait_for_screen("extension picker reopened", ACTION_TIMEOUT, |screen| {
-        screen.contains("Extensions · all") && screen.contains("Beta 2 Dev Theme")
+        screen.contains("Extensions · all") && screen.contains("E2E Dev Theme")
     })?;
-    session.paste("Beta 2 Dev Theme")?;
+    session.paste("E2E Dev Theme")?;
     session.wait_for_screen(
         "dev extension selected for rebuild",
         ACTION_TIMEOUT,
-        |screen| screen.contains("Beta 2 Dev Theme") && screen.contains("dev 0.4.2"),
+        |screen| screen.contains("E2E Dev Theme") && screen.contains("dev 0.4.2"),
     )?;
     session.send(ENTER)?;
     session.wait_for_screen("dev extension rebuilt", STARTUP_TIMEOUT, |screen| {
-        screen.contains("Beta 2 Dev Theme") && screen.contains("dev 0.4.3")
+        screen.contains("E2E Dev Theme") && screen.contains("dev 0.4.3")
     })?;
     session.send(DELETE)?;
     session.wait_for_screen(
@@ -2342,9 +2336,7 @@ themes = ["themes/beta-2-dev-theme.json"]
         |screen| screen.contains("press Delete again"),
     )?;
     session.send(DELETE)?;
-    let installed_dev_extension = data_root
-        .join("extensions/installed")
-        .join("beta-2-dev-theme");
+    let installed_dev_extension = data_root.join("extensions/installed").join("e2e-dev-theme");
     session.wait_until("dev extension symlink removed", ACTION_TIMEOUT, |_| {
         !installed_dev_extension.exists()
     })?;
@@ -2370,7 +2362,7 @@ themes = ["themes/beta-2-dev-theme.json"]
 
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
-    ensure!(status.success(), "Beta 2 zec exit failed: {status}");
+    ensure!(status.success(), "E2E zec exit failed: {status}");
     session.assert_terminal_restored(&termios_before)
 }
 
