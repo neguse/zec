@@ -95,6 +95,12 @@ jobs:
           cargo --version
           rustfmt --version
 
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: linux-release-gates
+          cache-on-failure: true
+
       - name: Verify lockfile, Alpha 1 oracles, and formatting
         timeout-minutes: 15
         shell: bash

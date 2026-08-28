@@ -96,6 +96,12 @@ jobs:
           cargo --version
           rustfmt --version
 
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: linux-debug
+          cache-on-failure: true
+
       - name: Verify lockfile and formatting
         timeout-minutes: 15
         shell: bash
@@ -170,6 +176,12 @@ jobs:
           rustc --version --verbose
           cargo --version
           rustfmt --version
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: windows-debug
+          cache-on-failure: true
 
       - name: Verify lockfile and formatting
         timeout-minutes: 15
