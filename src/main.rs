@@ -5449,7 +5449,6 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                     && let Some(keystroke) = input::to_gpui_keystroke(*key)
                 {
                     if let Err(error) = cx.update_window(input_window, |_root, window, cx| {
-                        window.activate_window();
                         window.dispatch_keystroke(keystroke, cx)
                     }) {
                         failure = Some(format!("failed to dispatch keymap input: {error}"));
@@ -11456,7 +11455,6 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                             quit_armed = false;
                             message = None;
                             if let Err(error) = cx.update_window(input_window, |_root, window, cx| {
-                                window.activate_window();
                                 window.dispatch_keystroke(keystroke, cx)
                             }) {
                                 failure = Some(format!("failed to dispatch keystroke: {error}"));
@@ -23049,9 +23047,6 @@ fn dispatch_probe_keystrokes(
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
     let input_window: AnyWindowHandle = (*editor_window).into();
-    cx.update_window(input_window, |_root, window, _cx| {
-        window.activate_window();
-    })?;
     for key in keys {
         let keystroke =
             Keystroke::parse(key).with_context(|| format!("parse probe keystroke {key}"))?;

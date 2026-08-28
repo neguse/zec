@@ -113,6 +113,10 @@ impl ProbeEnvironment {
             if fs::hard_link(fixture_server, &target).is_err() {
                 fs::copy(fixture_server, &target).expect("copy fixture as rust-analyzer.exe");
             }
+            // First execution of a fresh binary can stall on hosted runners
+            // (on-access antivirus scan); absorb that outside the probe's
+            // discovery window.
+            let _ = Command::new(&target).arg("--help").output();
         }
     }
 

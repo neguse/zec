@@ -607,7 +607,6 @@ impl NotebookState {
     fn dispatch_action(&self, action: Box<dyn Action>, cx: &mut gpui::AsyncApp) -> Result<()> {
         cx.update_window(self.window.into(), move |_root, window, cx| {
             window.draw(cx).clear(cx);
-            window.activate_window();
             window.dispatch_action(action, cx);
         })
         .context("dispatch action to Zed NotebookEditor")
@@ -616,7 +615,6 @@ impl NotebookState {
     fn dispatch_text(&self, text: String, cx: &mut gpui::AsyncApp) -> Result<()> {
         cx.update_window(self.window.into(), move |_root, window, cx| {
             window.draw(cx).clear(cx);
-            window.activate_window();
             window.dispatch_action(Box::new(HandleInput(text)), cx);
         })
         .context("dispatch text input to Zed notebook cell editor")
@@ -625,7 +623,6 @@ impl NotebookState {
     fn dispatch_keystroke(&self, keystroke: Keystroke, cx: &mut gpui::AsyncApp) -> Result<()> {
         cx.update_window(self.window.into(), move |_root, window, cx| {
             window.draw(cx).clear(cx);
-            window.activate_window();
             window.dispatch_keystroke(keystroke, cx);
         })
         .context("dispatch keystroke to Zed notebook cell editor")?;
