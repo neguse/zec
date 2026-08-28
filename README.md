@@ -36,8 +36,10 @@ verification coverage are recorded in [docs/windows.md](docs/windows.md).
 The everyday regression run, on top of unit and PTY tests, is this
 actual-binary integration set; see [docs/alpha-2.md](docs/alpha-2.md) for
 the full judgment procedure including the canonical 20-process acceptance
-run, the benchmark, re-verification of the repository loop, and
-evidence-only promotion.
+run and the benchmark. Every push to main also runs the three e2e suites
+(repository, language, workspace) from one release build via
+`.github/workflows/e2e.yml`; `script/run-e2e-suites` reproduces that run
+locally.
 
 ```sh
 cargo test --locked --test parity_contract --test e2e_tui \

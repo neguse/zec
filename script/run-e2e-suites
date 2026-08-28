@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Runs the repository, language, and workspace e2e suites (acceptance and
+# benchmark) against release binaries and verifies every report.
+set -euo pipefail
+
+output_root="${1:?usage: run-e2e-suites OUTPUT_DIR}"
+zec="${ZEC_E2E_ZEC:-./target/release/zec}"
+lsp="${ZEC_E2E_FIXTURE_LSP:-./target/release/fixture_lsp}"
+e2e_repository="${ZEC_E2E_REPOSITORY_ACCEPTANCE:-./target/release/e2e_repository}"
+e2e_repository_bench="${ZEC_E2E_REPOSITORY_BENCH:-./target/release/e2e_repository_bench}"
+e2e_language="${ZEC_E2E_LANGUAGE_ACCEPTANCE:-./target/release/e2e_language}"
+e2e_language_bench="${ZEC_E2E_LANGUAGE_BENCH:-./target/release/e2e_language_bench}"
+e2e_workspace="${ZEC_E2E_WORKSPACE_ACCEPTANCE:-./target/release/e2e_workspace}"
+e2e_workspace_bench="${ZEC_E2E_WORKSPACE_BENCH:-./target/release/e2e_workspace_bench}"
+
+mkdir -p "$output_root"/{repository,language,workspace}
+output_root="$(realpath "$output_root")"
+
+timeout --signal=TERM --kill-after=5s 45m \
+  "$e2e_repository" --zec "$zec" --repo . --assert \
+  --report "$output_root/repository/acceptance.json"
+"$e2e_repository" --verify-report "$output_root/repository/acceptance.json"
+
+timeout --signal=TERM --kill-after=5s 20m \
+  "$e2e_repository_bench" --zec "$zec" --assert \
+  --report "$output_root/repository/benchmark.json"
+"$e2e_repository_bench" --verify-report "$output_root/repository/benchmark.json"
+
+timeout --signal=TERM --kill-after=5s 45m \
+  "$e2e_language" --zec "$zec" --lsp "$lsp" --assert \
+  --report "$output_root/language/acceptance.json"
+"$e2e_language" --verify-report "$output_root/language/acceptance.json"
+
+timeout --signal=TERM --kill-after=5s 20m \
+  "$e2e_language_bench" --zec "$zec" --lsp "$lsp" --assert \
+  --report "$output_root/language/benchmark.json"
+"$e2e_language_bench" --verify-report "$output_root/language/benchmark.json"
+
+timeout --signal=TERM --kill-after=5s 60m \
+  "$e2e_workspace" --zec "$zec" --assert \
+  --report "$output_root/workspace/acceptance.json"
+"$e2e_workspace" --verify-report "$output_root/workspace/acceptance.json"
+
+timeout --signal=TERM --kill-after=5s 20m \
+  "$e2e_workspace_bench" --zec "$zec" --assert \
+  --report "$output_root/workspace/benchmark.json"
+"$e2e_workspace_bench" --verify-report "$output_root/workspace/benchmark.json"
+
+(
+  cd "$output_root"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > SHA256SUMS
+)
+
+echo "e2e suite reports verified: $output_root"
