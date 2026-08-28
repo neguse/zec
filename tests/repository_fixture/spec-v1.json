@@ -98,13 +98,13 @@
       {"id":"edit_b","text":"E2E_FIND_B_OLD","expected_results":[
         {"path":"src/crlf-edit.rs","line":2,"column":26,"preview":"pub const TOKEN: &str = \"E2E_FIND_B_OLD\";"}
       ]},
-      {"id":"case_variant","text":"alpha1_find_b_old","expected_results":[]},
+      {"id":"case_variant","text":"e2e_find_b_old","expected_results":[]},
       {"id":"nfc_no_normalization","text":"é","expected_results":[]},
       {"id":"nfd_scalar_column","text":"é","expected_results":[
         {"path":"docs/組合せ-é.txt","line":1,"column":27,"preview":"Unicode path fixture: 日本語 é"}
       ]},
-      {"id":"bom_scalar_column","text":"Alpha 1 UTF-8 BOM fixture","expected_results":[
-        {"path":"src/日本 語.rs","line":1,"column":4,"preview":"// Alpha 1 UTF-8 BOM fixture"}
+      {"id":"bom_scalar_column","text":"UTF-8 BOM fixture","expected_results":[
+        {"path":"src/日本 語.rs","line":1,"column":4,"preview":"// UTF-8 BOM fixture"}
       ]},
       {"id":"excluded","text":"E2E_EXCLUDED_SENTINEL","expected_results":[
         {"path":"src/control.txt","line":1,"column":1,"preview":"E2E_EXCLUDED_SENTINEL in-scope control"}
@@ -242,7 +242,7 @@
     "edit_a": {"path":"src/日本 語.rs","encoding":"UTF-8 BOM","replace":"E2E_EDIT_A_OLD","with_template":"E2E_EDIT_A_{RUN_2} A3_{RUN_2}_0001"},
     "edit_b": {"path":"src/crlf-edit.rs","line_endings":"CRLF","replace":"E2E_FIND_B_OLD","with_template":"E2E_EDIT_B_{RUN_2} A3_{RUN_2}_0002"},
     "edit_c": {"path":"src/no-final-newline.txt","final_newline_before":false,"append":" :: E2E_EDIT_C_{RUN_2} A3_{RUN_2}_0003"},
-    "edit_d": {"path":"scratch/新規 メモ.txt","contents_template":"Alpha 1 scratch 日本語\nworkflow token E2E_EDIT_D_{RUN_2} A3_{RUN_2}_0004\n"},
+    "edit_d": {"path":"scratch/新規 メモ.txt","contents_template":"zec scratch 日本語\nworkflow token E2E_EDIT_D_{RUN_2} A3_{RUN_2}_0004\n"},
     "reopen_paths": ["src/日本 語.rs","src/crlf-edit.rs","src/no-final-newline.txt","scratch/新規 メモ.txt"],
     "expected_dirty_conflict_deleted_markers": 0,
     "expected_exit_code": 0,

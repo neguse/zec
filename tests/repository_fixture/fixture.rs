@@ -1,8 +1,8 @@
-//! Deterministic Alpha 1 repository fixture and its versioned oracles.
+//! Deterministic repository fixture and its versioned oracles.
 //!
 //! This module deliberately uses only `std`: the acceptance and benchmark
 //! binaries can include it without introducing a second fixture model or a
-//! runtime dependency. Paths and bytes produced here are part of the Alpha 1
+//! runtime dependency. Paths and bytes produced here are part of the suite
 //! oracle and must change only together with `spec-v1.json` and the checked-in
 //! manifests.
 
@@ -60,15 +60,14 @@ const CHECKED_AFTER_MANIFEST: &[u8] =
 const CHECKED_POC_TEST_IDS: &str = include_str!("poc-test-ids-v1.txt");
 
 const README_CONTENT: &str = concat!(
-    "# Alpha 1 deterministic repository\n\n",
+    "# zec deterministic repository\n\n",
     "E2E_READY_SENTINEL\n",
     "This repository is generated from seed 0x5a45435f414c5048.\n",
 );
 const EDIT_A_BEFORE: &[u8] =
-    b"\xef\xbb\xbf// Alpha 1 UTF-8 BOM fixture\npub const TOKEN: &str = \"E2E_EDIT_A_OLD\";\n";
-const EDIT_B_BEFORE: &[u8] =
-    b"// Alpha 1 CRLF fixture\r\npub const TOKEN: &str = \"E2E_FIND_B_OLD\";\r\n";
-const EDIT_C_BEFORE: &[u8] = b"Alpha 1 file without final newline :: E2E_EDIT_C_OLD";
+    b"\xef\xbb\xbf// UTF-8 BOM fixture\npub const TOKEN: &str = \"E2E_EDIT_A_OLD\";\n";
+const EDIT_B_BEFORE: &[u8] = b"// CRLF fixture\r\npub const TOKEN: &str = \"E2E_FIND_B_OLD\";\r\n";
+const EDIT_C_BEFORE: &[u8] = b"file without final newline :: E2E_EDIT_C_OLD";
 const CONTROL_CONTENT: &str = "E2E_EXCLUDED_SENTINEL in-scope control\n";
 const STALE_A_CONTENT: &str = "E2E_STALE_A old query result\n";
 const STALE_B_CONTENT: &str = "E2E_STALE_B current query result\n";
@@ -236,7 +235,7 @@ fn before_entries() -> Vec<PlannedEntry> {
         .sum::<u64>();
     let remaining = EXPECTED_UTF8_TEXT_BYTES
         .checked_sub(fixed_text_bytes)
-        .expect("fixed Alpha 1 fixture exceeds text payload budget");
+        .expect("fixed fixture exceeds text payload budget");
     let base_size = remaining / filler_count as u64;
     let extra_files = (remaining % filler_count as u64) as usize;
 
@@ -296,7 +295,7 @@ fn bench_search_content(index: u16) -> String {
 fn large_lines_content() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(LARGE_LOGICAL_LINES * 22);
     for index in 0..LARGE_LOGICAL_LINES {
-        write!(&mut bytes, "large-line-{index:06} alpha1").expect("write to Vec cannot fail");
+        write!(&mut bytes, "large-line-{index:06} zec").expect("write to Vec cannot fail");
         if index + 1 != LARGE_LOGICAL_LINES {
             bytes.push(b'\n');
         }
@@ -342,7 +341,7 @@ fn edit_c_after(run: u8) -> Vec<u8> {
 }
 
 fn edit_d_after(run: u8) -> Vec<u8> {
-    format!("Alpha 1 scratch 日本語\nworkflow token E2E_EDIT_D_{run:02} A3_{run:02}_0004\n")
+    format!("zec scratch 日本語\nworkflow token E2E_EDIT_D_{run:02} A3_{run:02}_0004\n")
         .into_bytes()
 }
 
@@ -813,7 +812,7 @@ pub fn spec_bytes() -> Vec<u8> {
     );
     output.push_str("      ]},\n");
     output.push_str(
-        "      {\"id\":\"case_variant\",\"text\":\"alpha1_find_b_old\",\"expected_results\":[]},\n",
+        "      {\"id\":\"case_variant\",\"text\":\"e2e_find_b_old\",\"expected_results\":[]},\n",
     );
     output.push_str(
         "      {\"id\":\"nfc_no_normalization\",\"text\":\"é\",\"expected_results\":[]},\n",
@@ -829,14 +828,14 @@ pub fn spec_bytes() -> Vec<u8> {
         false,
     );
     output.push_str("      ]},\n");
-    output.push_str("      {\"id\":\"bom_scalar_column\",\"text\":\"Alpha 1 UTF-8 BOM fixture\",\"expected_results\":[\n");
+    output.push_str("      {\"id\":\"bom_scalar_column\",\"text\":\"UTF-8 BOM fixture\",\"expected_results\":[\n");
     write_search_result(
         &mut output,
         "        ",
         EDIT_A_PATH,
         1,
         4,
-        "// Alpha 1 UTF-8 BOM fixture",
+        "// UTF-8 BOM fixture",
         false,
     );
     output.push_str("      ]},\n");
@@ -892,7 +891,7 @@ pub fn spec_bytes() -> Vec<u8> {
         "  \"stale_result_schedule\": {\n    \"query_a\": \"E2E_STALE_A\",\n    \"query_b\": \"E2E_STALE_B\",\n    \"completion_order\": [\"B\",\"A\"],\n    \"expected_publish_log\": [\"B\"],\n    \"expected_final_query\": \"E2E_STALE_B\",\n    \"expected_final_path\": \"src/stale-b.txt\"\n  },\n  \"in_flight_actions\": {\n    \"replace_query_expected\": \"new-query-results-only\",\n    \"escape_expected\": \"prompt-absent-and-no-stale-publish\",\n    \"ctrl_q_expected\": \"child-exited-and-no-stale-publish\"\n  },\n",
     );
     output.push_str(
-        "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"E2E_EDIT_A_OLD\",\"with_template\":\"E2E_EDIT_A_{RUN_2} A3_{RUN_2}_0001\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"E2E_FIND_B_OLD\",\"with_template\":\"E2E_EDIT_B_{RUN_2} A3_{RUN_2}_0002\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: E2E_EDIT_C_{RUN_2} A3_{RUN_2}_0003\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"Alpha 1 scratch 日本語\\nworkflow token E2E_EDIT_D_{RUN_2} A3_{RUN_2}_0004\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
+        "  \"workflow\": {\n    \"runs\": 20,\n    \"retry_count\": 0,\n    \"fresh_fixture_each_run\": true,\n    \"fresh_config_each_run\": true,\n    \"fresh_process_each_run\": true,\n    \"input_id_template\": \"A3_{RUN_2}_{SEQUENCE_4}\",\n    \"edit_a\": {\"path\":\"src/日本 語.rs\",\"encoding\":\"UTF-8 BOM\",\"replace\":\"E2E_EDIT_A_OLD\",\"with_template\":\"E2E_EDIT_A_{RUN_2} A3_{RUN_2}_0001\"},\n    \"edit_b\": {\"path\":\"src/crlf-edit.rs\",\"line_endings\":\"CRLF\",\"replace\":\"E2E_FIND_B_OLD\",\"with_template\":\"E2E_EDIT_B_{RUN_2} A3_{RUN_2}_0002\"},\n    \"edit_c\": {\"path\":\"src/no-final-newline.txt\",\"final_newline_before\":false,\"append\":\" :: E2E_EDIT_C_{RUN_2} A3_{RUN_2}_0003\"},\n    \"edit_d\": {\"path\":\"scratch/新規 メモ.txt\",\"contents_template\":\"zec scratch 日本語\\nworkflow token E2E_EDIT_D_{RUN_2} A3_{RUN_2}_0004\\n\"},\n    \"reopen_paths\": [\"src/日本 語.rs\",\"src/crlf-edit.rs\",\"src/no-final-newline.txt\",\"scratch/新規 メモ.txt\"],\n    \"expected_dirty_conflict_deleted_markers\": 0,\n    \"expected_exit_code\": 0,\n    \"terminal_baseline_fields\": [\"tcgetattr\",\"alternate-screen\",\"mouse-tracking\",\"bracketed-paste\",\"cursor-visibility\",\"application-cursor-mode\",\"application-keypad-mode\"]\n  },\n",
     );
     output.push_str(
         "  \"benchmark\": {\n    \"report_schema_version\": 1,\n    \"startup\": {\"warmups\":2,\"samples\":20,\"p95_max_us\":3000000},\n    \"quick_open\": {\"warmups\":10,\"samples\":100,\"p95_max_us\":150000,\"max_us\":500000,\"queries\":[\n",
@@ -972,7 +971,7 @@ pub fn expected_workflow_file(path: &str, run: u8) -> Result<Vec<u8>, String> {
         EDIT_B_PATH => Ok(edit_b_after(run)),
         EDIT_C_PATH => Ok(edit_c_after(run)),
         EDIT_D_PATH => Ok(edit_d_after(run)),
-        _ => Err(format!("{path:?} is not an Alpha 1 workflow output path")),
+        _ => Err(format!("{path:?} is not a workflow output path")),
     }
 }
 
@@ -1083,21 +1082,19 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
         .map_err(|error| format!("chmod {:04o} {}: {error}", mode, path.display()))
 }
 
-/// The Alpha 1 manifest oracle encodes Unix modes and symlinks, so fixture
+/// The manifest oracle encodes Unix modes and symlinks, so fixture
 /// generation is meaningful only on Unix; this stub keeps the module
 /// compiling on Windows for the harness code that shares it.
 #[cfg(not(unix))]
 fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
     let _ = (path, mode);
-    Err("Alpha 1 fixture generation requires Unix file modes".to_owned())
+    Err("fixture generation requires Unix file modes".to_owned())
 }
 
 #[cfg(not(unix))]
 fn symlink(target: impl AsRef<Path>, path: impl AsRef<Path>) -> std::io::Result<()> {
     let _ = (target.as_ref(), path.as_ref());
-    Err(std::io::Error::other(
-        "Alpha 1 fixture symlinks require Unix",
-    ))
+    Err(std::io::Error::other("fixture symlinks require Unix"))
 }
 
 fn entry_mode(metadata: &fs::Metadata) -> u32 {

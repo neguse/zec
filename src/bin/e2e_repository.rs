@@ -873,8 +873,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
 
     session.send(CTRL_N)?;
     let input_id_d = expected_ids[3].clone();
-    let scratch =
-        format!("Alpha 1 scratch 日本語\nworkflow token E2E_EDIT_D_{run:02} {input_id_d}\n");
+    let scratch = format!("zec scratch 日本語\nworkflow token E2E_EDIT_D_{run:02} {input_id_d}\n");
     let inserted_d = session.paste_marked(&scratch)?;
     sent_ids.push(input_id_d.clone());
     session.wait_contains("scratch D input ID", inserted_d, &input_id_d)?;
@@ -1350,10 +1349,7 @@ mod tests {
             terminal_cell_column("Unicode path fixture: 日本語 e\u{301}", 27).unwrap(),
             30
         );
-        assert_eq!(
-            terminal_cell_column("// Alpha 1 UTF-8 BOM fixture", 4).unwrap(),
-            4
-        );
+        assert_eq!(terminal_cell_column("// UTF-8 BOM fixture", 4).unwrap(), 4);
         assert_eq!(terminal_cell_column("control", 1).unwrap(), 1);
         assert!(terminal_cell_column("control", 0).is_err());
         assert!(terminal_cell_column("control", 9).is_err());
