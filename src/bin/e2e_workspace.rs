@@ -1,7 +1,7 @@
-#[path = "alpha_1_support/mod.rs"]
-mod alpha_1_support;
-mod alpha_2_support;
-mod alpha_3_support;
+#[path = "e2e_support/mod.rs"]
+mod e2e_support;
+mod language_support;
+mod workspace_support;
 
 use std::{
     cell::Cell,
@@ -13,22 +13,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alpha_1_support::{
-    CTRL_N, CTRL_Q, CTRL_W, DELETE, END, ENTER, ESC, PtySession, TerminalBaseline,
-};
-use alpha_2_support::{CaseResult, CorrelationTrace, EvidenceFile};
-use alpha_3_support::{
+use anyhow::{Context as _, Result, ensure};
+use e2e_support::{CTRL_N, CTRL_Q, CTRL_W, DELETE, END, ENTER, ESC, PtySession, TerminalBaseline};
+use language_support::{CaseResult, CorrelationTrace, EvidenceFile};
+use nix::sys::signal::Signal;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use workspace_support::{
     CAPABILITY_PREFIXES, CONTRACT_VERSION, FAILURE_SCENARIOS, FRESH_PROCESS_RUNS, Fixture,
-    GateBinary, Invocation, READY_SENTINEL, REPORT_SCHEMA_VERSION, REQUIRED_CASE_COUNT,
-    SEARCH_TOKEN, acceptance_case_ids, artifacts_directory, canonical_acceptance_case_ids,
+    Invocation, READY_SENTINEL, REPORT_SCHEMA_VERSION, REQUIRED_CASE_COUNT, SEARCH_TOKEN,
+    SuiteBinary, acceptance_case_ids, artifacts_directory, canonical_acceptance_case_ids,
     canonical_environment, duration_us, json_bytes, parse_invocation, persist_bytes,
     read_json_report, verify_canonical_environment, verify_cases, verify_correlation,
     write_json_report,
 };
-use anyhow::{Context as _, Result, ensure};
-use nix::sys::signal::Signal;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 const F4: &[u8] = b"\x1bOS";
 const F7: &[u8] = b"\x1b[18~";
@@ -47,8 +45,8 @@ struct AcceptanceReport {
     schema_version: u32,
     contract_version: u32,
     report_kind: String,
-    environment: alpha_1_support::EnvironmentReport,
-    binary: GateBinary,
+    environment: e2e_support::EnvironmentReport,
+    binary: SuiteBinary,
     fresh_process_runs: usize,
     capability_family_count: usize,
     failure_scenario_count: usize,
@@ -76,10 +74,10 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(arguments: alpha_3_support::RunArguments) -> Result<()> {
+fn run(arguments: workspace_support::RunArguments) -> Result<()> {
     let zec = fs::canonicalize(&arguments.zec).context("canonicalize --zec")?;
     let artifacts = artifacts_directory(&arguments.report, "acceptance")?;
-    let process_runs = std::env::var("ZEC_ALPHA3_DEV_RUNS")
+    let process_runs = std::env::var("ZEC_E2E_DEV_RUNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|runs| *runs > 0)
@@ -118,7 +116,7 @@ fn run(arguments: alpha_3_support::RunArguments) -> Result<()> {
         input_ids: required.clone(),
         apply_ids: required.clone(),
     };
-    let binary = GateBinary::collect(&zec)?;
+    let binary = SuiteBinary::collect(&zec)?;
     let mut evidence = Vec::new();
     persist_bytes(
         &mut evidence,
@@ -160,7 +158,7 @@ fn run(arguments: alpha_3_support::RunArguments) -> Result<()> {
     let report = AcceptanceReport {
         schema_version: REPORT_SCHEMA_VERSION,
         contract_version: CONTRACT_VERSION,
-        report_kind: "alpha_3_acceptance".to_owned(),
+        report_kind: "e2e_workspace".to_owned(),
         environment: canonical_environment()?,
         binary,
         fresh_process_runs: process_runs,
@@ -269,7 +267,7 @@ fn run_standard_capability(zec: &Path, prefix: &str, case_id: &str) -> Result<St
             session.wait_after(
                 "project search results",
                 mark,
-                alpha_1_support::SCREEN_TIMEOUT,
+                e2e_support::SCREEN_TIMEOUT,
                 |screen| screen.contents().contains(&expected_result),
             )?;
             let mark = session.send_marked(F9)?;
@@ -291,7 +289,7 @@ fn run_standard_capability(zec: &Path, prefix: &str, case_id: &str) -> Result<St
             session.wait_after(
                 "legacy capability report",
                 mark,
-                alpha_1_support::SCREEN_TIMEOUT,
+                e2e_support::SCREEN_TIMEOUT,
                 |screen| {
                     let contents = screen.contents();
                     contents.contains("terminal keyboard=legacy")
@@ -513,7 +511,7 @@ fn replace_fingerprint_conflict(zec: &Path, case_id: &str) -> Result<String> {
     session.wait_after(
         "replace search ready",
         mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains(SEARCH_TOKEN) && !contents.contains("searching…")
@@ -525,7 +523,7 @@ fn replace_fingerprint_conflict(zec: &Path, case_id: &str) -> Result<String> {
     session.wait_after(
         "replacement field search refresh",
         mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             if contents.contains("ALPHA3_REPLACED") && contents.contains("searching…") {
@@ -546,7 +544,7 @@ fn replace_fingerprint_conflict(zec: &Path, case_id: &str) -> Result<String> {
     session.wait_after(
         "replace fingerprint conflict",
         mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("replace acceptance failed")
@@ -569,18 +567,18 @@ fn resize_storm(zec: &Path, case_id: &str) -> Result<String> {
     let mut final_mark = session.mark();
     for _ in 0..20 {
         session.resize(1, 1)?;
-        final_mark = session.resize(alpha_1_support::COLS, alpha_1_support::ROWS)?;
+        final_mark = session.resize(e2e_support::COLS, e2e_support::ROWS)?;
     }
     session.wait_after(
         "redraw after resize storm",
         final_mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
-            screen.size() == (alpha_1_support::ROWS, alpha_1_support::COLS)
+            screen.size() == (e2e_support::ROWS, e2e_support::COLS)
                 && screen.contents().contains(READY_SENTINEL)
                 && screen
-                    .rows(0, alpha_1_support::COLS)
-                    .nth(usize::from(alpha_1_support::ROWS.saturating_sub(1)))
+                    .rows(0, e2e_support::COLS)
+                    .nth(usize::from(e2e_support::ROWS.saturating_sub(1)))
                     .is_some_and(|row| row.contains("zec project"))
         },
     )?;
@@ -634,7 +632,7 @@ fn stale_generation(zec: &Path, case_id: &str) -> Result<String> {
     session.wait_after(
         "latest project-search generation",
         mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains(&latest)
@@ -661,10 +659,7 @@ fn verify_report(report: &AcceptanceReport) -> Result<()> {
         report.contract_version == CONTRACT_VERSION,
         "contract differs"
     );
-    ensure!(
-        report.report_kind == "alpha_3_acceptance",
-        "report kind differs"
-    );
+    ensure!(report.report_kind == "e2e_workspace", "report kind differs");
     verify_canonical_environment(&report.environment)?;
     report.binary.verify()?;
     ensure!(

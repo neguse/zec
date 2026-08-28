@@ -111,7 +111,7 @@ jobs:
           bash -n script/run-alpha-1-and-2-gates
           bash -n script/verify-alpha-3-artifact
           bash -n script/verify-alpha-3-evidence
-          rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
           /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 
       - name: Build all release gate binaries
@@ -119,11 +119,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release --features alpha-1-linux \
+          cargo build --locked --release --features e2e-linux \
             --bin zec \
-            --bin alpha_1_acceptance --bin alpha_1_bench \
-            --bin alpha_2_fixture_lsp --bin alpha_2_acceptance --bin alpha_2_bench \
-            --bin alpha_3_acceptance --bin alpha_3_bench
+            --bin e2e_repository --bin e2e_repository_bench \
+            --bin fixture_lsp --bin e2e_language --bin e2e_language_bench \
+            --bin e2e_workspace --bin e2e_workspace_bench
 
       - name: Run regression and Alpha 3 integration tests
         timeout-minutes: 45
@@ -132,13 +132,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --features alpha-1-linux \
+          cargo test --locked --release --features e2e-linux \
             --bin zec -- --test-threads=1
-          cargo test --locked --release --features alpha-1-linux \
-            --test parity_contract --test pty_acceptance \
-            --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures \
-            --test alpha_3_workspace --test alpha_3_project_panel \
-            --test alpha_3_search --test alpha_3_session -- --test-threads=1
+          cargo test --locked --release --features e2e-linux \
+            --test parity_contract --test e2e_tui \
+            --test language_service --test settings_reload --test lsp_failures \
+            --test workspace_layout --test project_panel \
+            --test workspace_search --test workspace_sessions -- --test-threads=1
 
       - name: Run headless smoke
         timeout-minutes: 5
@@ -162,9 +162,9 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=5s 60m \
-            ./target/release/alpha_3_acceptance --zec ./target/release/zec \
+            ./target/release/e2e_workspace --zec ./target/release/zec \
             --assert --report target/alpha-3/acceptance.json
-          ./target/release/alpha_3_acceptance \
+          ./target/release/e2e_workspace \
             --verify-report target/alpha-3/acceptance.json
 
       - name: Run Alpha 3 benchmark
@@ -173,9 +173,9 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=5s 20m \
-            ./target/release/alpha_3_bench --zec ./target/release/zec \
+            ./target/release/e2e_workspace_bench --zec ./target/release/zec \
             --assert --report target/alpha-3/benchmark.json
-          ./target/release/alpha_3_bench \
+          ./target/release/e2e_workspace_bench \
             --verify-report target/alpha-3/benchmark.json
 
       - name: Record artifact checksums

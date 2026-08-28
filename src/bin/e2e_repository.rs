@@ -1,4 +1,4 @@
-mod alpha_1_support;
+mod e2e_support;
 
 use std::{
     ffi::OsStr,
@@ -8,13 +8,13 @@ use std::{
     time::Instant,
 };
 
-use alpha_1_support::{
+use anyhow::{Context as _, Result, ensure};
+use e2e_support::{
     ALT_F, AcceptanceReport, CTRL_A, CTRL_N, CTRL_P, CTRL_Q, CTRL_S, CTRL_W, END, ENTER, ESC,
     InputTrace, Invocation, PtySession, REPORT_SCHEMA_VERSION, TerminalBaseline, binary_report,
     command_output_with_timeout, environment_report, fixture, observe_poc_tests, open_fd_count,
     oracle_hashes, parse_invocation, reset_fixed_fixture, verify_acceptance_report, write_report,
 };
-use anyhow::{Context as _, Result, ensure};
 use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
@@ -22,7 +22,7 @@ use unicode_width::UnicodeWidthStr;
 fn main() -> Result<()> {
     match parse_invocation(true)? {
         Invocation::Verify(path) => {
-            let report = alpha_1_support::read_report::<AcceptanceReport>(&path)?;
+            let report = e2e_support::read_report::<AcceptanceReport>(&path)?;
             verify_acceptance_report(&report)
                 .with_context(|| format!("verify {}", path.display()))?;
             let repo = std::env::current_dir().context("resolve verifier repository cwd")?;
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
+fn run(arguments: e2e_support::RunArguments) -> Result<()> {
     let repo = fs::canonicalize(arguments.repo.as_ref().expect("parser requires repo"))
         .context("canonicalize --repo")?;
     fixture::verify_oracles(&repo).map_err(anyhow::Error::msg)?;
@@ -103,7 +103,7 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
     let report = AcceptanceReport {
         schema_version: REPORT_SCHEMA_VERSION,
         contract_version: fixture::CONTRACT_VERSION,
-        report_kind: "alpha_1_acceptance".to_owned(),
+        report_kind: "e2e_repository".to_owned(),
         environment: environment_report()?,
         binary: binary_report(&zec)?,
         oracles: oracle_hashes(),
@@ -131,7 +131,7 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
 
 struct AcceptanceRunner<'a> {
     zec: &'a Path,
-    cases: Vec<alpha_1_support::CaseResult>,
+    cases: Vec<e2e_support::CaseResult>,
 }
 
 impl AcceptanceRunner<'_> {
@@ -156,10 +156,10 @@ impl AcceptanceRunner<'_> {
     fn record(&mut self, id: &str, started: Instant, result: Result<(String, Option<InputTrace>)>) {
         let elapsed = started.elapsed();
         let duration_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-        let result = if elapsed > alpha_1_support::SCENARIO_TIMEOUT {
+        let result = if elapsed > e2e_support::SCENARIO_TIMEOUT {
             Err(anyhow::anyhow!(
                 "PTY scenario exceeded {} seconds",
-                alpha_1_support::SCENARIO_TIMEOUT.as_secs()
+                e2e_support::SCENARIO_TIMEOUT.as_secs()
             ))
         } else {
             result
@@ -167,7 +167,7 @@ impl AcceptanceRunner<'_> {
         match result {
             Ok((detail, input_trace)) => {
                 println!("PASS {id}: {detail}");
-                self.cases.push(alpha_1_support::CaseResult {
+                self.cases.push(e2e_support::CaseResult {
                     id: id.to_owned(),
                     passed: true,
                     duration_us,
@@ -177,7 +177,7 @@ impl AcceptanceRunner<'_> {
             }
             Err(error) => {
                 eprintln!("FAIL {id}: {error:#}");
-                self.cases.push(alpha_1_support::CaseResult {
+                self.cases.push(e2e_support::CaseResult {
                     id: id.to_owned(),
                     passed: false,
                     duration_us,
@@ -237,7 +237,7 @@ struct QuickOpenExclusionProbe {
 }
 
 #[derive(Debug, Deserialize)]
-struct Alpha1Oracle {
+struct RepositoryOracle {
     root_inputs: Vec<RootInputOracle>,
     identity: IdentityOracle,
     exclusions: ExclusionsOracle,
@@ -315,40 +315,36 @@ struct PartialStartupOracle {
     expected_exit_code: i32,
 }
 
-fn alpha_1_oracle() -> Result<Alpha1Oracle> {
+fn repository_oracle() -> Result<RepositoryOracle> {
     serde_json::from_slice(&fixture::spec_bytes()).context("parse compiled Alpha 1 spec")
 }
 
 fn run_probe(zec: &Path, case: &str, path: &Path) -> Result<Output> {
     let mut command = Command::new(zec);
     command
-        .args([
-            OsStr::new("--alpha-1-probe"),
-            OsStr::new(case),
-            path.as_os_str(),
-        ])
+        .args([OsStr::new("probe"), OsStr::new(case), path.as_os_str()])
         .env("LC_ALL", "C.UTF-8")
         .env("LANG", "C.UTF-8");
-    command_output_with_timeout(&mut command, alpha_1_support::SCENARIO_TIMEOUT)
+    command_output_with_timeout(&mut command, e2e_support::SCENARIO_TIMEOUT)
         .with_context(|| format!("run production {case} probe"))
 }
 
 fn root_identity(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let oracle = alpha_1_oracle()?;
+    let oracle = repository_oracle()?;
     let root_inputs =
         serde_json::to_string(&oracle.root_inputs).context("serialize normative root inputs")?;
     let mut command = Command::new(zec);
     command
         .args([
-            OsStr::new("--alpha-1-probe"),
+            OsStr::new("probe"),
             OsStr::new("root-identity"),
             generated.root.as_os_str(),
             OsStr::new(&root_inputs),
         ])
         .env("LC_ALL", "C.UTF-8")
         .env("LANG", "C.UTF-8");
-    let output = command_output_with_timeout(&mut command, alpha_1_support::SCENARIO_TIMEOUT)
+    let output = command_output_with_timeout(&mut command, e2e_support::SCENARIO_TIMEOUT)
         .context("run production root-identity probe")?;
     ensure!(
         output.status.success(),
@@ -464,7 +460,7 @@ struct OutsideTraceProbe {
 
 fn outside_trace(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let oracle = alpha_1_oracle()?;
+    let oracle = repository_oracle()?;
     let output = run_probe(zec, "outside-trace", &generated.outside_control)?;
     ensure!(
         output.status.success(),
@@ -505,7 +501,7 @@ fn outside_trace(zec: &Path) -> Result<String> {
 
 fn partial_startup(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let oracle = alpha_1_oracle()?;
+    let oracle = repository_oracle()?;
     let partial = &oracle.partial_startup;
     ensure!(
         partial.expected_error == "ELOOP",
@@ -515,7 +511,7 @@ fn partial_startup(zec: &Path) -> Result<String> {
         partial.expected_exit_code == 0,
         "partial-startup expected exit code must be zero"
     );
-    let config = alpha_1_support::fresh_config_dir("A1_PARTIAL_STARTUP")?;
+    let config = e2e_support::fresh_config_dir("A1_PARTIAL_STARTUP")?;
     let normal = generated.root.join(&partial.normal_path);
     let loop_path = generated.root.join(&partial.eloop_path);
     let (mut session, baseline) = PtySession::spawn(
@@ -544,13 +540,13 @@ fn partial_startup(zec: &Path) -> Result<String> {
 
 fn quick_open(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let oracle = alpha_1_oracle()?;
+    let oracle = repository_oracle()?;
     let quick = &oracle.quick_open;
     ensure!(
         quick.shortcut_bytes_hex == "10",
         "quick-open shortcut oracle differs from Ctrl-P"
     );
-    let config = alpha_1_support::fresh_config_dir("A2_QUICK_OPEN")?;
+    let config = e2e_support::fresh_config_dir("A2_QUICK_OPEN")?;
     let (mut session, baseline) =
         PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
@@ -598,7 +594,7 @@ fn open_exact_quick(
     session.wait_after(
         "exact quick-open target",
         opened,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains(opened_path)
@@ -609,7 +605,10 @@ fn open_exact_quick(
     Ok(())
 }
 
-fn project_query<'a>(oracle: &'a Alpha1Oracle, id: &str) -> Result<&'a ProjectSearchQueryOracle> {
+fn project_query<'a>(
+    oracle: &'a RepositoryOracle,
+    id: &str,
+) -> Result<&'a ProjectSearchQueryOracle> {
     oracle
         .project_search
         .queries
@@ -667,7 +666,7 @@ fn open_project_query(session: &mut PtySession, query: &ProjectSearchQueryOracle
     session.wait_after(
         &format!("open exact project-search result {}", query.id),
         opened,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             let expected_row = u16::try_from(expected.line.saturating_sub(1)).ok();
@@ -709,8 +708,8 @@ fn terminal_cell_column(line: &str, scalar_column: u32) -> Result<usize> {
 
 fn project_search(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let oracle = alpha_1_oracle()?;
-    let config = alpha_1_support::fresh_config_dir("A2_PROJECT_SEARCH")?;
+    let oracle = repository_oracle()?;
+    let config = e2e_support::fresh_config_dir("A2_PROJECT_SEARCH")?;
     let (mut session, baseline) =
         PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
@@ -737,7 +736,7 @@ fn project_search(zec: &Path) -> Result<String> {
     session.wait_after(
         "cancel in-flight stale-A search",
         cancelled,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             !contents.contains("Project search:")
@@ -757,7 +756,7 @@ fn project_search(zec: &Path) -> Result<String> {
     session.wait_after(
         "new project query only",
         current,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains(&stale_b_status)
@@ -817,7 +816,7 @@ fn stale_result(zec: &Path) -> Result<String> {
 
 fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
     let generated = reset_fixed_fixture()?;
-    let config = alpha_1_support::fresh_config_dir(&format!("A3_WORKFLOW_{run:02}"))?;
+    let config = e2e_support::fresh_config_dir(&format!("A3_WORKFLOW_{run:02}"))?;
     let (mut session, baseline) =
         PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
@@ -890,7 +889,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
     session.wait_after(
         "workflow Save As completion and clean four-tab status",
         saved,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("saved")
@@ -935,7 +934,7 @@ fn workflow(zec: &Path, run: u8) -> Result<(String, InputTrace)> {
         file_ids.push(observed_id.to_owned());
     }
 
-    let reopen_config = alpha_1_support::fresh_config_dir(&format!("A3_WORKFLOW_{run:02}_REOPEN"))?;
+    let reopen_config = e2e_support::fresh_config_dir(&format!("A3_WORKFLOW_{run:02}_REOPEN"))?;
     let (mut reopen, reopen_baseline) = PtySession::spawn(
         zec,
         &generated.root,
@@ -1084,7 +1083,7 @@ fn save_failure(zec: &Path) -> Result<String> {
         target_error.raw_os_error() == Some(nix::libc::ENOTDIR),
         "fixed save-failure target does not produce ENOTDIR: {target_error}"
     );
-    let config = alpha_1_support::fresh_config_dir("A5_SAVE")?;
+    let config = e2e_support::fresh_config_dir("A5_SAVE")?;
     let (mut session, baseline) =
         PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
     session.wait_ready("repo", fixture::READY_SENTINEL)?;
@@ -1097,7 +1096,7 @@ fn save_failure(zec: &Path) -> Result<String> {
     session.wait_after(
         "ENOTDIR save failure",
         failed,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("save failed:")
@@ -1140,14 +1139,14 @@ fn save_failure(zec: &Path) -> Result<String> {
 
 fn signal_exit(zec: &Path, signal: Signal) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let config = alpha_1_support::fresh_config_dir(&format!("signal-{}", signal as i32))?;
+    let config = e2e_support::fresh_config_dir(&format!("signal-{}", signal as i32))?;
     let fd_before = open_fd_count()?;
     {
         let (mut session, baseline) =
             PtySession::spawn(zec, &generated.root, &[generated.root.as_os_str()], &config)?;
         session.wait_ready("repo", fixture::READY_SENTINEL)?;
         session.assert_raw(&baseline)?;
-        alpha_1_support::wait_for_no_descendant_processes(session.pid()?)?;
+        e2e_support::wait_for_no_descendant_processes(session.pid()?)?;
         session.send_signal(signal)?;
         let status = session.wait_exit()?;
         ensure!(status.success(), "{signal:?} exit was not normal: {status}");
@@ -1164,7 +1163,7 @@ fn signal_exit(zec: &Path, signal: Signal) -> Result<String> {
 
 fn suspend_resume(zec: &Path) -> Result<String> {
     let generated = reset_fixed_fixture()?;
-    let config = alpha_1_support::fresh_config_dir("A5_TSTP_CONT")?;
+    let config = e2e_support::fresh_config_dir("A5_TSTP_CONT")?;
     let fd_before = open_fd_count()?;
     {
         let (mut session, baseline) =
@@ -1177,7 +1176,7 @@ fn suspend_resume(zec: &Path) -> Result<String> {
         session.wait_after(
             "Ready after SIGCONT",
             resumed,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 screen.alternate_screen()
                     && screen.contents().contains(fixture::READY_SENTINEL)
@@ -1232,7 +1231,7 @@ fn open_quick(
     session.wait_after(
         "quick-open target editor frame",
         opened,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             opened_editor_frame_matches(
@@ -1264,7 +1263,7 @@ fn open_project(
     session.wait_after(
         "project-search target editor frame",
         opened,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             opened_editor_frame_matches(

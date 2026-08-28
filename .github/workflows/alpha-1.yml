@@ -108,12 +108,12 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --format-version 1 --no-deps >/dev/null
           cargo fmt --all -- --check
-          rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
           /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 
       - name: Build the release gate binaries
         timeout-minutes: 90
-        run: cargo build --locked --release --features alpha-1-linux --bin zec --bin alpha_1_acceptance --bin alpha_1_bench
+        run: cargo build --locked --release --features e2e-linux --bin zec --bin e2e_repository --bin e2e_repository_bench
 
       - name: Run PoC regression tests
         timeout-minutes: 30
@@ -121,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release --bin zec -- --test-threads=1
-          cargo test --locked --release --test pty_acceptance -- --test-threads=1
+          cargo test --locked --release --test e2e_tui -- --test-threads=1
 
       - name: Run headless smoke
         timeout-minutes: 5
@@ -141,9 +141,9 @@ jobs:
           set -euo pipefail
           mkdir -p target/alpha-1
           timeout --signal=TERM --kill-after=5s 45m \
-            ./target/release/alpha_1_acceptance --zec ./target/release/zec \
+            ./target/release/e2e_repository --zec ./target/release/zec \
             --repo . --assert --report target/alpha-1/acceptance.json
-          ./target/release/alpha_1_acceptance \
+          ./target/release/e2e_repository \
             --verify-report target/alpha-1/acceptance.json
 
       - name: Run Alpha 1 benchmark
@@ -152,9 +152,9 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=5s 20m \
-            ./target/release/alpha_1_bench --zec ./target/release/zec \
+            ./target/release/e2e_repository_bench --zec ./target/release/zec \
             --assert --report target/alpha-1/benchmark.json
-          ./target/release/alpha_1_bench \
+          ./target/release/e2e_repository_bench \
             --verify-report target/alpha-1/benchmark.json
 
       - name: Record artifact checksums

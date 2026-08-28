@@ -323,7 +323,7 @@ fn actual_binary_preserves_edits_and_restores_the_pty_on_every_exit_path() -> Re
 }
 
 #[test]
-fn beta_1_terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
+fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "BETA1_WORKSPACE_READY";
     const TERMINAL_READY: &str = "BETA1_TERMINAL_READY";
     const TASK_READY: &str = "BETA1_TASK_READY";
@@ -453,7 +453,7 @@ fn beta_1_terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
 }
 
 #[test]
-fn beta_2_remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Result<()> {
+fn remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Result<()> {
     const READY: &str = "REMOTE_WORKSPACE_READY";
     const EDITED: &str = "REMOTE_EDITED";
     const TERMINAL_READY: &str = "REMOTE_TERMINAL_OK";
@@ -647,7 +647,7 @@ fn beta_2_remote_ssh_uses_zed_project_authorities_in_the_actual_binary() -> Resu
 }
 
 #[test]
-fn beta_2_markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<()> {
+fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<()> {
     const READY: &str = "BETA2_RICH_CONTENT_READY";
     const UPDATED: &str = "BETA2_RICH_CONTENT_LIVE_UPDATE";
     const HEADING: &str = "Target Heading";
@@ -936,7 +936,7 @@ fn beta_2_markdown_and_images_run_through_zed_project_in_the_actual_binary() -> 
 }
 
 #[test]
-fn beta_2_large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<()> {
+fn large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> Result<()> {
     const LINE_COUNT: usize = 100_000;
     const LONG_LINE: usize = 50_000;
     const LONG_LINE_BYTES: usize = 64 * 1024;
@@ -1042,7 +1042,7 @@ fn beta_2_large_file_opens_navigates_edits_and_saves_in_the_actual_binary() -> R
 }
 
 #[test]
-fn beta_3_agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
+fn agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "BETA3_AGENT_EDITOR_READY";
     const PROMPT: &str = "BETA3_AGENT_PROMPT";
 
@@ -1072,7 +1072,7 @@ fn beta_3_agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Resul
 
     let terminal_auth_log = temp.path().join("agent-terminal-auth.log");
     let agent_configuration = serde_json::to_string(&serde_json::json!({
-        "command": env!("CARGO_BIN_EXE_zec_acp_fixture"),
+        "command": env!("CARGO_BIN_EXE_fixture_acp"),
         "args": [],
         "env": {
             "ZEC_ACP_FIXTURE_AUTH_LOG": terminal_auth_log
@@ -1244,7 +1244,7 @@ fn beta_3_agent_acp_permissions_and_mcp_run_through_the_actual_binary() -> Resul
 }
 
 #[test]
-fn beta_3_native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result<()> {
+fn native_zed_agent_and_local_commands_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "BETA3_NATIVE_AGENT_EDITOR_READY";
 
     let temp = tempfile::tempdir().context("create native Zed Agent fixture")?;
@@ -1326,8 +1326,7 @@ fn beta_3_native_zed_agent_and_local_commands_run_through_the_actual_binary() ->
 }
 
 #[test]
-fn parity_1_collaboration_notes_follow_invites_and_media_run_through_the_actual_binary()
--> Result<()> {
+fn collaboration_notes_follow_invites_and_media_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "PARITY1_COLLABORATION_EDITOR_READY";
     const ORIGINAL_NOTES: &str = "# Shared Notes\nCOLLAB_ORIGINAL\n";
     const EDITED_NOTES: &str = "# Shared Notes\nCOLLAB_EDITED\n";
@@ -1586,8 +1585,8 @@ fn parity_1_collaboration_notes_follow_invites_and_media_run_through_the_actual_
 }
 
 #[test]
-fn parity_1_notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary()
--> Result<()> {
+fn notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary() -> Result<()>
+{
     const MARKDOWN: &str = "NOTEBOOK_MARKDOWN_READY";
     const PRELOADED: &str = "NOTEBOOK_PRELOADED_STREAM";
     const EDITED: &str = "NOTEBOOK_EDITED_FROM_TERMINAL";
@@ -1928,7 +1927,7 @@ fn open_markdown_preview(session: &mut PtySession) -> Result<()> {
 }
 
 #[test]
-fn beta_1_debugger_and_repl_run_through_zed_dap_in_the_actual_binary() -> Result<()> {
+fn debugger_and_repl_run_through_zed_dap_in_the_actual_binary() -> Result<()> {
     let require_gdb_dap = std::env::var_os("ZEC_REQUIRE_GDB_DAP").is_some();
     let gdb = Command::new("gdb").arg("--version").output();
     if !gdb.is_ok_and(|output| output.status.success()) {
@@ -2121,7 +2120,7 @@ int main(void) {
 }
 
 #[test]
-fn beta_2_extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Result<()> {
+fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Result<()> {
     const READY: &str = "BETA2_CONFIGURATION_READY";
 
     let temp = tempfile::tempdir().context("create Beta 2 configuration fixture")?;
@@ -4089,7 +4088,7 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
     fs::write(xdg_config.join("zed/keymap.json"), "[]").context("write restricted keymap")?;
 
     symlink(
-        Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp")),
+        Path::new(env!("CARGO_BIN_EXE_fixture_lsp")),
         bin_dir.join("rust-analyzer"),
     )
     .context("link PTY fixture language server")?;
@@ -4117,9 +4116,9 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
         (OsStr::new("XDG_STATE_HOME"), xdg_state.as_os_str()),
         (OsStr::new("RUSTUP_HOME"), rustup_home.as_os_str()),
         (OsStr::new("CARGO_HOME"), cargo_home.as_os_str()),
-        (OsStr::new("ZEC_ALPHA2_LSP_LOG"), log.as_os_str()),
+        (OsStr::new("ZEC_FIXTURE_LSP_LOG"), log.as_os_str()),
         (
-            OsStr::new("ZEC_ALPHA2_LSP_SCENARIO"),
+            OsStr::new("ZEC_FIXTURE_LSP_SCENARIO"),
             OsStr::new("inlay-hints"),
         ),
         (OsStr::new("ZEC_KEYBOARD_PROTOCOL"), OsStr::new("kitty")),

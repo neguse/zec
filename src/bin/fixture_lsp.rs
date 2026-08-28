@@ -13,16 +13,16 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 fn main() -> Result<()> {
     if env::args_os().skip(1).any(|argument| argument == "--help") {
-        println!("alpha_2_fixture_lsp: deterministic LSP 3.17 fixture server");
+        println!("fixture_lsp: deterministic LSP 3.17 fixture server");
         return Ok(());
     }
 
-    let log_path = env::var_os("ZEC_ALPHA2_LSP_LOG").map(PathBuf::from);
-    let scenario = env::var("ZEC_ALPHA2_LSP_SCENARIO").unwrap_or_else(|_| "normal".to_owned());
+    let log_path = env::var_os("ZEC_FIXTURE_LSP_LOG").map(PathBuf::from);
+    let scenario = env::var("ZEC_FIXTURE_LSP_SCENARIO").unwrap_or_else(|_| "normal".to_owned());
     let restart_attempt = if scenario == "restart-once" {
-        let state_path = env::var_os("ZEC_ALPHA2_RESTART_STATE")
+        let state_path = env::var_os("ZEC_FIXTURE_LSP_RESTART_STATE")
             .map(PathBuf::from)
-            .context("restart-once requires ZEC_ALPHA2_RESTART_STATE")?;
+            .context("restart-once requires ZEC_FIXTURE_LSP_RESTART_STATE")?;
         let previous = fs::read_to_string(&state_path)
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())

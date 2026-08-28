@@ -6,6 +6,6 @@ mod project_panel;
 mod repository;
 
 #[test]
-fn alpha_3_project_panel_contract_module_is_linked_into_the_gate() {
+fn project_panel_contract_module_is_linked_into_the_gate() {
     assert!(std::mem::size_of::<project_panel::ProjectPanelState>() > 0);
 }

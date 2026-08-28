@@ -83,7 +83,7 @@ impl ProbeEnvironment {
             ("XDG_STATE_HOME", xdg_state.into_os_string()),
             ("RUSTUP_HOME", rustup_home.into_os_string()),
             ("CARGO_HOME", cargo_home.into_os_string()),
-            ("ZEC_ALPHA2_LSP_LOG", log.clone().into_os_string()),
+            ("ZEC_FIXTURE_LSP_LOG", log.clone().into_os_string()),
         ];
 
         Self {
@@ -138,7 +138,7 @@ impl ProbeEnvironment {
             .expect("write invalid rust-analyzer image");
     }
 
-    /// Runs one `zec --alpha-2-probe` invocation and returns its JSON report.
+    /// Runs one `zec probe` invocation and returns its JSON report.
     pub fn run_probe(
         &self,
         zec: &Path,
@@ -150,7 +150,7 @@ impl ProbeEnvironment {
     ) -> Value {
         let mut command = Command::new(zec);
         command.args([
-            "--alpha-2-probe",
+            "probe",
             probe,
             self.root.to_str().expect("UTF-8 fixture root"),
             source.to_str().expect("UTF-8 fixture source"),

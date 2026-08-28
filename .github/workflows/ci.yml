@@ -115,8 +115,8 @@ jobs:
         timeout-minutes: 60
         run: >-
           cargo build --locked
-          --bin zec --bin zec-remote-server --bin alpha_2_fixture_lsp
-          --bin alpha_2_acceptance --bin alpha_2_bench
+          --bin zec --bin zec-remote-server --bin fixture_lsp
+          --bin e2e_language --bin e2e_language_bench
 
       - name: Run unit and headless tests
         timeout-minutes: 30
@@ -129,8 +129,8 @@ jobs:
           ZEC_REQUIRE_REMOTE_SSH: "1"
         run: >-
           cargo test --locked
-          --test parity_contract --test pty_acceptance --test update_cli
-          --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures
+          --test parity_contract --test e2e_tui --test update_cli
+          --test language_service --test settings_reload --test lsp_failures
           -- --test-threads=1
 
       - name: Run headless smoke
@@ -201,10 +201,10 @@ jobs:
         run: |
           cargo test --locked --bin zec -- --test-threads=1
           cargo test --locked --test repository --test parity_contract `
-            --test alpha_3_workspace --test alpha_3_session `
-            --test alpha_3_search --test alpha_3_project_panel -- --test-threads=1
-          cargo test --locked --test update_cli --test alpha_2_settings `
-            --test alpha_2_lsp --test alpha_2_failures -- --test-threads=1
+            --test workspace_layout --test workspace_sessions `
+            --test workspace_search --test project_panel -- --test-threads=1
+          cargo test --locked --test update_cli --test settings_reload `
+            --test language_service --test lsp_failures -- --test-threads=1
 
       - name: Run Windows GPUI smoke
         timeout-minutes: 5

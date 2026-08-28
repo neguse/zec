@@ -1,4 +1,4 @@
-#[path = "support/alpha_2.rs"]
+#[path = "support/probe.rs"]
 mod support;
 
 use std::{
@@ -37,7 +37,7 @@ fn lsp_failure_matrix_preserves_editor_and_reaps_processes() {
 }
 
 fn run_scenario(scenario: &str) {
-    let mut probe_env = ProbeEnvironment::new("alpha-2-failure");
+    let mut probe_env = ProbeEnvironment::new("lsp-failure-fixture");
     let source = probe_env.source_dir.join("main.rs");
     fs::write(&source, "fn main() { let _value = alpha_; }\n")
         .expect("write failure fixture source");
@@ -66,7 +66,7 @@ fn run_scenario(scenario: &str) {
         .expect("write isolated global settings");
     fs::write(probe_env.user_config.join("keymap.json"), "[]").expect("write isolated keymap");
 
-    let fixture_server = Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp"));
+    let fixture_server = Path::new(env!("CARGO_BIN_EXE_fixture_lsp"));
     match scenario {
         "server-not-found" => {}
         "spawn-failure" => probe_env.install_unspawnable_server(),
@@ -79,8 +79,8 @@ fn run_scenario(scenario: &str) {
         "server-not-found" | "spawn-failure" => "normal",
         scenario => scenario,
     };
-    probe_env.push_env("ZEC_ALPHA2_LSP_SCENARIO", fixture_scenario);
-    probe_env.push_env("ZEC_ALPHA2_RESTART_STATE", restart_state.as_os_str());
+    probe_env.push_env("ZEC_FIXTURE_LSP_SCENARIO", fixture_scenario);
+    probe_env.push_env("ZEC_FIXTURE_LSP_RESTART_STATE", restart_state.as_os_str());
     let report = probe_env.run_probe(
         Path::new(env!("CARGO_BIN_EXE_zec")),
         "lsp-failure",

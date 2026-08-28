@@ -1,4 +1,4 @@
-#[path = "support/alpha_2.rs"]
+#[path = "support/probe.rs"]
 mod support;
 
 use std::{fs, path::Path, time::Duration};
@@ -8,7 +8,7 @@ use support::ProbeEnvironment;
 
 #[test]
 fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
-    let probe_env = ProbeEnvironment::new("alpha-2-test");
+    let probe_env = ProbeEnvironment::new("language-service-fixture");
     fs::write(
         probe_env.user_config.join("settings.json"),
         r#"{"session":{"trust_all_worktrees":true},"edit_predictions":{"provider":"none"}}"#,
@@ -35,7 +35,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
         "pub fn fixture_peer() {\n    let _peer = alpha_;\n}  \n",
     )
     .expect("write fixture peer source");
-    probe_env.install_fixture_server(Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp")));
+    probe_env.install_fixture_server(Path::new(env!("CARGO_BIN_EXE_fixture_lsp")));
 
     let log = probe_env.log.clone();
     let report = probe_env.run_probe(

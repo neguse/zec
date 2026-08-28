@@ -108,7 +108,7 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --format-version 1 --no-deps >/dev/null
           cargo fmt --all -- --check
-          rustc --edition=2024 src/bin/alpha_1_fixture.rs -o /tmp/zec-alpha-1-fixture-verifier
+          rustc --edition=2024 src/bin/fixture_repository.rs -o /tmp/zec-alpha-1-fixture-verifier
           /tmp/zec-alpha-1-fixture-verifier verify-oracles --repo .
 
       - name: Build all release gate binaries
@@ -116,21 +116,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release --features alpha-1-linux \
+          cargo build --locked --release --features e2e-linux \
             --bin zec \
-            --bin alpha_1_acceptance --bin alpha_1_bench \
-            --bin alpha_2_fixture_lsp --bin alpha_2_acceptance --bin alpha_2_bench
+            --bin e2e_repository --bin e2e_repository_bench \
+            --bin fixture_lsp --bin e2e_language --bin e2e_language_bench
 
       - name: Run regression and Alpha 2 integration tests
         timeout-minutes: 40
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --features alpha-1-linux \
+          cargo test --locked --release --features e2e-linux \
             --bin zec -- --test-threads=1
-          cargo test --locked --release --features alpha-1-linux \
-            --test parity_contract --test pty_acceptance \
-            --test alpha_2_lsp --test alpha_2_settings --test alpha_2_failures \
+          cargo test --locked --release --features e2e-linux \
+            --test parity_contract --test e2e_tui \
+            --test language_service --test settings_reload --test lsp_failures \
             -- --test-threads=1
 
       - name: Run headless smoke
@@ -151,14 +151,14 @@ jobs:
           set -euo pipefail
           mkdir -p target/alpha-2/alpha-1
           timeout --signal=TERM --kill-after=5s 45m \
-            ./target/release/alpha_1_acceptance --zec ./target/release/zec \
+            ./target/release/e2e_repository --zec ./target/release/zec \
             --repo . --assert --report target/alpha-2/alpha-1/acceptance.json
-          ./target/release/alpha_1_acceptance \
+          ./target/release/e2e_repository \
             --verify-report target/alpha-2/alpha-1/acceptance.json
           timeout --signal=TERM --kill-after=5s 20m \
-            ./target/release/alpha_1_bench --zec ./target/release/zec \
+            ./target/release/e2e_repository_bench --zec ./target/release/zec \
             --assert --report target/alpha-2/alpha-1/benchmark.json
-          ./target/release/alpha_1_bench \
+          ./target/release/e2e_repository_bench \
             --verify-report target/alpha-2/alpha-1/benchmark.json
 
       - name: Run Alpha 2 acceptance
@@ -167,10 +167,10 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=5s 45m \
-            ./target/release/alpha_2_acceptance --zec ./target/release/zec \
-            --lsp ./target/release/alpha_2_fixture_lsp --assert \
+            ./target/release/e2e_language --zec ./target/release/zec \
+            --lsp ./target/release/fixture_lsp --assert \
             --report target/alpha-2/acceptance.json
-          ./target/release/alpha_2_acceptance \
+          ./target/release/e2e_language \
             --verify-report target/alpha-2/acceptance.json
 
       - name: Run Alpha 2 benchmark
@@ -179,10 +179,10 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=5s 20m \
-            ./target/release/alpha_2_bench --zec ./target/release/zec \
-            --lsp ./target/release/alpha_2_fixture_lsp --assert \
+            ./target/release/e2e_language_bench --zec ./target/release/zec \
+            --lsp ./target/release/fixture_lsp --assert \
             --report target/alpha-2/benchmark.json
-          ./target/release/alpha_2_bench \
+          ./target/release/e2e_language_bench \
             --verify-report target/alpha-2/benchmark.json
 
       - name: Record artifact checksums

@@ -1,4 +1,4 @@
-#[path = "support/alpha_2.rs"]
+#[path = "support/probe.rs"]
 mod support;
 
 use std::{fs, path::Path, time::Duration};
@@ -8,7 +8,7 @@ use support::ProbeEnvironment;
 
 #[test]
 fn settings_keymap_and_format_on_save_reload_through_zed() {
-    let probe_env = ProbeEnvironment::new("alpha-2-settings");
+    let probe_env = ProbeEnvironment::new("settings-reload-fixture");
     let config_dir = probe_env.user_config.clone();
 
     let source = probe_env.source_dir.join("main.rs");
@@ -66,7 +66,7 @@ fn settings_keymap_and_format_on_save_reload_through_zed() {
     )
     .expect("write user keymap");
 
-    probe_env.install_fixture_server(Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp")));
+    probe_env.install_fixture_server(Path::new(env!("CARGO_BIN_EXE_fixture_lsp")));
 
     let log = probe_env.log.clone();
     let report = probe_env.run_probe(

@@ -1,7 +1,7 @@
-#[path = "alpha_1_support/mod.rs"]
-mod alpha_1_support;
-mod alpha_2_support;
-mod alpha_3_support;
+#[path = "e2e_support/mod.rs"]
+mod e2e_support;
+mod language_support;
+mod workspace_support;
 
 use std::{
     cell::Cell,
@@ -12,19 +12,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alpha_1_support::{
-    CTRL_Q, CTRL_W, DOWN, ENTER, ESC, MetricReport, PtySession, TerminalBaseline,
-};
-use alpha_2_support::{CorrelationTrace, EvidenceFile};
-use alpha_3_support::{
-    CONTRACT_VERSION, Fixture, GateBinary, Invocation, READY_SENTINEL, REPORT_SCHEMA_VERSION,
+use anyhow::{Context as _, Result, ensure};
+use e2e_support::{CTRL_Q, CTRL_W, DOWN, ENTER, ESC, MetricReport, PtySession, TerminalBaseline};
+use language_support::{CorrelationTrace, EvidenceFile};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use workspace_support::{
+    CONTRACT_VERSION, Fixture, Invocation, READY_SENTINEL, REPORT_SCHEMA_VERSION, SuiteBinary,
     VM_HWM_LIMIT_BYTES, artifacts_directory, canonical_environment, json_bytes, metric,
     parse_invocation, persist_bytes, read_json_report, verify_canonical_environment, verify_metric,
     write_json_report,
 };
-use anyhow::{Context as _, Result, ensure};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
 const REDRAW_WARMUPS: usize = 10;
 const REDRAW_SAMPLES: usize = 100;
@@ -109,8 +107,8 @@ struct BenchmarkReport {
     schema_version: u32,
     contract_version: u32,
     report_kind: String,
-    environment: alpha_1_support::EnvironmentReport,
-    binary: GateBinary,
+    environment: e2e_support::EnvironmentReport,
+    binary: SuiteBinary,
     workload: WorkloadReport,
     four_pane_redraw: MetricReport,
     project_panel_initial_ready: MetricReport,
@@ -139,15 +137,15 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(arguments: alpha_3_support::RunArguments) -> Result<()> {
+fn run(arguments: workspace_support::RunArguments) -> Result<()> {
     let zec = fs::canonicalize(&arguments.zec).context("canonicalize --zec")?;
     let artifacts = artifacts_directory(&arguments.report, "benchmark")?;
-    let development_samples = std::env::var("ZEC_ALPHA3_DEV_SAMPLES")
+    let development_samples = std::env::var("ZEC_E2E_DEV_SAMPLES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|samples| *samples > 0);
     let development_canonical_workload = development_samples.is_some()
-        && std::env::var_os("ZEC_ALPHA3_DEV_CANONICAL_WORKLOAD").is_some();
+        && std::env::var_os("ZEC_E2E_DEV_CANONICAL_WORKLOAD").is_some();
     let workload = if development_samples.is_some() && !development_canonical_workload {
         WorkloadReport::development()
     } else {
@@ -398,9 +396,9 @@ fn run(arguments: alpha_3_support::RunArguments) -> Result<()> {
     let report = BenchmarkReport {
         schema_version: REPORT_SCHEMA_VERSION,
         contract_version: CONTRACT_VERSION,
-        report_kind: "alpha_3_benchmark".to_owned(),
+        report_kind: "e2e_workspace_benchmark".to_owned(),
         environment: canonical_environment()?,
-        binary: GateBinary::collect(&zec)?,
+        binary: SuiteBinary::collect(&zec)?,
         workload,
         four_pane_redraw,
         project_panel_initial_ready,
@@ -520,7 +518,7 @@ fn observe_memory(
     label: impl Into<String>,
     session: &PtySession,
 ) -> Result<()> {
-    memory.insert(label.into(), alpha_1_support::vm_hwm_bytes(session.pid()?)?);
+    memory.insert(label.into(), e2e_support::vm_hwm_bytes(session.pid()?)?);
     Ok(())
 }
 
@@ -553,9 +551,9 @@ fn benchmark_redraw(
         let elapsed = session.wait_after(
             "four-pane focus redraw",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
-                screen.size() == (alpha_1_support::ROWS, alpha_1_support::COLS)
+                screen.size() == (e2e_support::ROWS, e2e_support::COLS)
                     && screen.cursor_position() != previous_cursor
             },
         )?;
@@ -631,7 +629,7 @@ fn benchmark_outline(
         let elapsed = session.wait_after(
             "10,000-symbol outline update",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("┌ Outline ")
@@ -685,7 +683,7 @@ fn benchmark_regex_search(
         let elapsed = session.wait_after(
             "regex first visible result",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains(REGEX_FIRST_RESULT) && !contents.contains("searching…")
@@ -727,7 +725,7 @@ fn benchmark_replace_preview(
         session.wait_after(
             "replace benchmark search ready",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains(&ready_count) && !contents.contains("searching…")
@@ -739,7 +737,7 @@ fn benchmark_replace_preview(
         session.wait_after(
             "replace benchmark field refresh",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 if contents.contains(REPLACEMENT) && contents.contains("searching…") {
@@ -903,7 +901,7 @@ fn exercise_large_memory(
         session.wait_after(
             "large-memory outline",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("Outline main.rs") && contents.contains("symbol_00000")
@@ -969,7 +967,7 @@ fn verify_report(report: &BenchmarkReport) -> Result<()> {
         "contract differs"
     );
     ensure!(
-        report.report_kind == "alpha_3_benchmark",
+        report.report_kind == "e2e_workspace_benchmark",
         "report kind differs"
     );
     verify_canonical_environment(&report.environment)?;

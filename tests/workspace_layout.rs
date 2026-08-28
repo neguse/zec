@@ -10,7 +10,7 @@ mod workspace_model;
 mod workspace_render;
 
 #[test]
-fn alpha_3_workspace_contract_modules_are_linked_into_the_gate() {
+fn workspace_layout_contract_modules_are_linked_into_the_gate() {
     let workspace = workspace_model::WorkspaceModel::new(workspace_model::ItemId(1));
     let plan = workspace_render::render_plan(&workspace, ratatui::layout::Rect::new(0, 0, 120, 40));
 

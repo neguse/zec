@@ -1,6 +1,6 @@
-#[path = "alpha_1_support/mod.rs"]
-mod alpha_1_support;
-mod alpha_2_support;
+#[path = "e2e_support/mod.rs"]
+mod e2e_support;
+mod language_support;
 
 use std::{
     cell::Cell,
@@ -11,15 +11,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alpha_1_support::{CTRL_Q, CTRL_S, CTRL_W, CTRL_Z, END, ENTER, ESC, MetricReport, PtySession};
-use alpha_2_support::{
-    CONTRACT_VERSION, CorrelationTrace, EvidenceFile, Fixture, FixtureMode, GateBinaries,
-    Invocation, REPORT_SCHEMA_VERSION, VM_HWM_LIMIT_BYTES, artifacts_directory, assert_lsp_trace,
-    canonical_environment, manifest_evidence_json, metric, parse_invocation, persist_bytes,
-    read_report, trace_request_response_ids, verify_canonical_environment, verify_metric,
-    write_report,
-};
 use anyhow::{Context as _, Result, ensure};
+use e2e_support::{CTRL_Q, CTRL_S, CTRL_W, CTRL_Z, END, ENTER, ESC, MetricReport, PtySession};
+use language_support::{
+    CONTRACT_VERSION, CorrelationTrace, EvidenceFile, Fixture, FixtureMode, Invocation,
+    REPORT_SCHEMA_VERSION, SuiteBinaries, VM_HWM_LIMIT_BYTES, artifacts_directory,
+    assert_lsp_trace, canonical_environment, manifest_evidence_json, metric, parse_invocation,
+    persist_bytes, read_report, trace_request_response_ids, verify_canonical_environment,
+    verify_metric, write_report,
+};
 use serde::{Deserialize, Serialize};
 
 const STARTUP_WARMUPS: usize = 2;
@@ -51,8 +51,8 @@ struct BenchmarkReport {
     schema_version: u32,
     contract_version: u32,
     report_kind: String,
-    environment: alpha_1_support::EnvironmentReport,
-    binaries: GateBinaries,
+    environment: e2e_support::EnvironmentReport,
+    binaries: SuiteBinaries,
     startup: MetricReport,
     language_ready: MetricReport,
     completion: MetricReport,
@@ -80,12 +80,12 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
+fn run(arguments: language_support::RunArguments) -> Result<()> {
     let zec = fs::canonicalize(&arguments.zec).context("canonicalize --zec")?;
     let lsp = fs::canonicalize(&arguments.lsp).context("canonicalize --lsp")?;
     let artifacts = artifacts_directory(&arguments.report, "benchmark")?;
     let mut evidence = Vec::new();
-    let development_samples = std::env::var("ZEC_ALPHA2_DEV_SAMPLES")
+    let development_samples = std::env::var("ZEC_E2E_DEV_SAMPLES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|samples| *samples > 0);
@@ -118,7 +118,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
             &fixture.xdg_config,
             &environment,
         )?;
-        let startup_us = session.wait_ready("zec project", "Alpha 2 gate fixture")?;
+        let startup_us = session.wait_ready("zec project", "language e2e fixture")?;
         let language_us = wait_for_lsp_initialized(&fixture.log, spawned)?;
         if index >= startup_warmups {
             startup_samples.push(startup_us);
@@ -158,7 +158,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         &fixture.xdg_config,
         &environment,
     )?;
-    session.wait_ready("zec project", "Alpha 2 gate fixture")?;
+    session.wait_ready("zec project", "language e2e fixture")?;
     wait_for_lsp_initialized(&fixture.log, Instant::now())?;
     let tab = session.send_marked(CTRL_PAGE_DOWN)?;
     session.wait_contains("benchmark Rust tab", tab, "2/2 README.md [main.rs]")?;
@@ -172,7 +172,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         let elapsed = session.wait_after(
             "completed completion popup",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("Completions") && contents.contains("alpha_completion")
@@ -194,7 +194,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         let elapsed = session.wait_after(
             "completed diagnostics popup",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("Diagnostics")
@@ -224,7 +224,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         let elapsed = session.wait_after(
             "completed definition navigation",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 if contents.contains("Requesting definitions") {
@@ -251,7 +251,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         let elapsed = session.wait_after(
             "completed references MultiBuffer",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 if contents.contains("Requesting references") {
@@ -272,7 +272,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
             reference_samples.push(elapsed);
         }
     }
-    let interactive_vm_hwm = alpha_1_support::vm_hwm_bytes(session.pid()?)?;
+    let interactive_vm_hwm = e2e_support::vm_hwm_bytes(session.pid()?)?;
     session.send(CTRL_Q)?;
     ensure!(
         session.wait_exit()?.success(),
@@ -293,7 +293,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         &mut evidence,
         &artifacts,
         "interactive-manifest.json",
-        &alpha_2_support::json_bytes(&manifest_evidence_json(&before, &after))?,
+        &language_support::json_bytes(&manifest_evidence_json(&before, &after))?,
     )?;
 
     let completion = metric(
@@ -338,7 +338,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
             &fixture.xdg_config,
             &environment,
         )?;
-        session.wait_ready("zec project", "Alpha 2 gate fixture")?;
+        session.wait_ready("zec project", "language e2e fixture")?;
         wait_for_lsp_initialized(&fixture.log, Instant::now())?;
         let tab = session.send_marked(CTRL_PAGE_DOWN)?;
         session.wait_contains("rename Rust tab", tab, "2/2 README.md [main.rs]")?;
@@ -347,7 +347,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         session.wait_after(
             "ready rename prompt",
             mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("Rename Symbol") && contents.contains("Enter preview")
@@ -397,7 +397,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
                 &mut evidence,
                 &artifacts,
                 "rename-manifest.json",
-                &alpha_2_support::json_bytes(&manifest_evidence_json(&before, &after))?,
+                &language_support::json_bytes(&manifest_evidence_json(&before, &after))?,
             )?;
         }
     }
@@ -422,27 +422,27 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         &large_fixture.xdg_config,
         &environment,
     )?;
-    large_session.wait_ready("zec project", "Alpha 2 gate fixture")?;
+    large_session.wait_ready("zec project", "language e2e fixture")?;
     wait_for_lsp_initialized(&large_fixture.log, Instant::now())?;
     let tab = large_session.send_marked(CTRL_PAGE_DOWN)?;
     large_session.wait_contains("large payload Rust tab", tab, "2/2 README.md [main.rs]")?;
     large_session.send(END)?;
     let completion_mark = large_session.send_marked(ALT_SLASH)?;
     large_session.wait_contains("large completion popup", completion_mark, "Completions")?;
-    let completion_vm = alpha_1_support::vm_hwm_bytes(large_session.pid()?)?;
+    let completion_vm = e2e_support::vm_hwm_bytes(large_session.pid()?)?;
     let dismiss_completion = large_session.send_marked(ESC)?;
     large_session.wait_absent(
         "large completion dismissal",
         dismiss_completion,
         "Completions",
     )?;
-    let diagnostics_deadline = Instant::now() + alpha_1_support::SCREEN_TIMEOUT;
+    let diagnostics_deadline = Instant::now() + e2e_support::SCREEN_TIMEOUT;
     loop {
         let diagnostics_mark = large_session.send_marked(F8)?;
         large_session.wait_after(
             "large diagnostics collection attempt",
             diagnostics_mark,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("bounded diagnostic")
@@ -470,7 +470,7 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
         large_session.wait_absent("empty diagnostics dismissal", dismiss, "Diagnostics")?;
         thread::sleep(Duration::from_millis(25));
     }
-    let diagnostics_vm = alpha_1_support::vm_hwm_bytes(large_session.pid()?)?;
+    let diagnostics_vm = e2e_support::vm_hwm_bytes(large_session.pid()?)?;
     let return_to_editor = large_session.send_marked(ESC)?;
     large_session.wait_contains(
         "large diagnostics focus return",
@@ -535,9 +535,9 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
     let report = BenchmarkReport {
         schema_version: REPORT_SCHEMA_VERSION,
         contract_version: CONTRACT_VERSION,
-        report_kind: "alpha_2_benchmark".to_owned(),
+        report_kind: "e2e_language_benchmark".to_owned(),
         environment: canonical_environment()?,
-        binaries: GateBinaries::collect(&zec, &lsp)?,
+        binaries: SuiteBinaries::collect(&zec, &lsp)?,
         startup,
         language_ready,
         completion,
@@ -573,7 +573,7 @@ fn wait_for_lsp_initialized(log: &Path, started: Instant) -> Result<u64> {
     let deadline = started + Duration::from_secs(15);
     loop {
         if fs::read_to_string(log).is_ok_and(|trace| trace.contains("\"method\":\"initialized\"")) {
-            return Ok(alpha_2_support::duration_us(started.elapsed()));
+            return Ok(language_support::duration_us(started.elapsed()));
         }
         ensure!(
             Instant::now() < deadline,
@@ -593,7 +593,7 @@ fn verify_report(report: &BenchmarkReport) -> Result<()> {
         "contract mismatch"
     );
     ensure!(
-        report.report_kind == "alpha_2_benchmark",
+        report.report_kind == "e2e_language_benchmark",
         "report kind mismatch"
     );
     verify_canonical_environment(&report.environment)?;

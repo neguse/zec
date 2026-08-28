@@ -12,14 +12,14 @@ test -z "$(find "$artifact_root" -type l -print -quit)"
 acceptance="$artifact_root/acceptance.json"
 benchmark="$artifact_root/benchmark.json"
 regression="$artifact_root/regression/alpha-2"
-alpha_2_acceptance="$regression/acceptance.json"
-alpha_2_benchmark="$regression/benchmark.json"
-alpha_1_acceptance="$regression/alpha-1/acceptance.json"
-alpha_1_benchmark="$regression/alpha-1/benchmark.json"
+e2e_language="$regression/acceptance.json"
+e2e_language_benchmark="$regression/benchmark.json"
+e2e_repository="$regression/alpha-1/acceptance.json"
+e2e_repository_benchmark="$regression/alpha-1/benchmark.json"
 for report_path in \
   "$acceptance" "$benchmark" \
-  "$alpha_2_acceptance" "$alpha_2_benchmark" \
-  "$alpha_1_acceptance" "$alpha_1_benchmark"; do
+  "$e2e_language" "$e2e_language_benchmark" \
+  "$e2e_repository" "$e2e_repository_benchmark"; do
   test -f "$report_path"
 done
 test "$(find "$artifact_root" -path "$regression" -prune -o -type f -print | wc -l)" = 10
@@ -28,8 +28,8 @@ test "$(find "$artifact_root" -path "$regression" -prune -o -type f -print | wc 
 if [[ -n "$promoted_evidence" ]]; then
   test -f "$promoted_evidence"
   for report_name in \
-    acceptance benchmark alpha_2_acceptance alpha_2_benchmark \
-    alpha_1_acceptance alpha_1_benchmark; do
+    acceptance benchmark e2e_language e2e_language_benchmark \
+    e2e_repository e2e_repository_benchmark; do
     report_path="${!report_name}"
     digest_key="${report_name}_sha256"
     expected_digest="$(jq -er --arg key "$digest_key" '.reports[$key]' "$promoted_evidence")"
@@ -67,7 +67,7 @@ cmp "$expected_ids" "$actual_ids"
 jq -e '
   .schema_version == 1
   and .contract_version == 3
-  and .report_kind == "alpha_3_acceptance"
+  and .report_kind == "e2e_workspace"
   and .binary.zec.release_profile == true
   and (.binary.zec.content_sha256 | test("^[0-9a-f]{64}$"))
   and .fresh_process_runs == 20
@@ -115,7 +115,7 @@ jq -e '
     and $value.assertion_passed == true;
   .schema_version == 1
   and .contract_version == 3
-  and .report_kind == "alpha_3_benchmark"
+  and .report_kind == "e2e_workspace_benchmark"
   and .binary.zec.release_profile == true
   and (.binary.zec.content_sha256 | test("^[0-9a-f]{64}$"))
   and .workload == {
@@ -184,9 +184,9 @@ verify_embedded_evidence "$benchmark" benchmark-artifacts 4
 
 zec_digest="$(jq -r .binary.zec.content_sha256 "$acceptance")"
 test "$(jq -r .binary.zec.content_sha256 "$benchmark")" = "$zec_digest"
-test "$(jq -r .binaries.zec.content_sha256 "$alpha_2_acceptance")" = "$zec_digest"
-test "$(jq -r .binaries.zec.content_sha256 "$alpha_2_benchmark")" = "$zec_digest"
-test "$(jq -r .binary.content_sha256 "$alpha_1_acceptance")" = "$zec_digest"
-test "$(jq -r .binary.content_sha256 "$alpha_1_benchmark")" = "$zec_digest"
+test "$(jq -r .binaries.zec.content_sha256 "$e2e_language")" = "$zec_digest"
+test "$(jq -r .binaries.zec.content_sha256 "$e2e_language_benchmark")" = "$zec_digest"
+test "$(jq -r .binary.content_sha256 "$e2e_repository")" = "$zec_digest"
+test "$(jq -r .binary.content_sha256 "$e2e_repository_benchmark")" = "$zec_digest"
 
 echo "Alpha 3 artifact verified: $artifact_root"

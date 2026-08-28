@@ -5,7 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 fn usage() -> &'static str {
-    "usage:\n  alpha_1_fixture write-oracles [--repo PATH]\n  alpha_1_fixture verify-oracles [--repo PATH]\n  alpha_1_fixture generate --root PATH\n  alpha_1_fixture verify --root PATH [--after-run 1..20]\n  alpha_1_fixture print-hashes [--repo PATH]"
+    "usage:\n  fixture_repository write-oracles [--repo PATH]\n  fixture_repository verify-oracles [--repo PATH]\n  fixture_repository generate --root PATH\n  fixture_repository verify --root PATH [--after-run 1..20]\n  fixture_repository print-hashes [--repo PATH]"
 }
 
 fn take_value(args: &mut Vec<String>, name: &str) -> Result<Option<String>, String> {
@@ -87,7 +87,7 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("alpha_1_fixture: {error}");
+        eprintln!("fixture_repository: {error}");
         std::process::exit(2);
     }
 }

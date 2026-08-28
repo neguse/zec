@@ -13,7 +13,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-use crate::alpha_1_support::{
+use crate::e2e_support::{
     BinaryReport, EnvironmentReport, MetricReport, binary_report, command_output_with_timeout,
     environment_report, statistics,
 };
@@ -83,7 +83,7 @@ pub fn parse_invocation() -> Result<Invocation> {
             Some("--help" | "-h") => {
                 let program = std::env::args()
                     .next()
-                    .unwrap_or_else(|| "alpha_2_gate".to_owned());
+                    .unwrap_or_else(|| "language_e2e".to_owned());
                 println!(
                     "Usage: {program} --zec PATH --lsp PATH --assert --report PATH\n       {program} --verify-report PATH"
                 );
@@ -115,24 +115,24 @@ fn value(arguments: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<O
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateBinaries {
+pub struct SuiteBinaries {
     pub zec: BinaryReport,
-    pub fixture_lsp: GateBinary,
+    pub fixture_lsp: SuiteBinary,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateBinary {
+pub struct SuiteBinary {
     pub path: String,
     pub content_sha256: String,
     pub release_profile: bool,
 }
 
-impl GateBinaries {
+impl SuiteBinaries {
     pub fn collect(zec: &Path, lsp: &Path) -> Result<Self> {
         Ok(Self {
             zec: binary_report(zec)?,
-            fixture_lsp: GateBinary::collect(lsp, "alpha_2_fixture_lsp")?,
+            fixture_lsp: SuiteBinary::collect(lsp, "fixture_lsp")?,
         })
     }
 
@@ -145,11 +145,11 @@ impl GateBinaries {
             binary_report(Path::new(&self.zec.path))?.content_sha256 == self.zec.content_sha256,
             "zec binary digest differs from report"
         );
-        self.fixture_lsp.verify("alpha_2_fixture_lsp")
+        self.fixture_lsp.verify("fixture_lsp")
     }
 }
 
-impl GateBinary {
+impl SuiteBinary {
     fn collect(path: &Path, expected_name: &str) -> Result<Self> {
         let path = fs::canonicalize(path)
             .with_context(|| format!("canonicalize binary {}", path.display()))?;
@@ -300,15 +300,15 @@ pub fn canonical_environment() -> Result<EnvironmentReport> {
 }
 
 pub fn verify_canonical_environment(environment: &EnvironmentReport) -> Result<()> {
-    crate::alpha_1_support::verify_environment(environment)
+    crate::e2e_support::verify_environment(environment)
 }
 
 pub fn write_report(path: &Path, report: &impl Serialize) -> Result<()> {
-    crate::alpha_1_support::write_report(path, report)
+    crate::e2e_support::write_report(path, report)
 }
 
 pub fn read_report<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    crate::alpha_1_support::read_report(path)
+    crate::e2e_support::read_report(path)
 }
 
 pub fn artifacts_directory(report: &Path, kind: &str) -> Result<PathBuf> {
@@ -385,9 +385,9 @@ impl Fixture {
 
         fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname = \"alpha-2-gate\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            "[package]\nname = \"language-e2e\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
         )?;
-        fs::write(root.join("README.md"), "# Alpha 2 gate fixture\n")?;
+        fs::write(root.join("README.md"), "# language e2e fixture\n")?;
         fs::write(root.join(".gitignore"), "src/ignored.rs\n")?;
         let source = source_dir.join("main.rs");
         let peer = source_dir.join("lib.rs");
@@ -503,18 +503,18 @@ impl Fixture {
             (OsString::from("RUSTUP_HOME"), rustup_home.into_os_string()),
             (OsString::from("CARGO_HOME"), cargo_home.into_os_string()),
             (
-                OsString::from("ZEC_ALPHA2_LSP_LOG"),
+                OsString::from("ZEC_FIXTURE_LSP_LOG"),
                 log.clone().into_os_string(),
             ),
             (
-                OsString::from("ZEC_ALPHA2_LSP_SCENARIO"),
+                OsString::from("ZEC_FIXTURE_LSP_SCENARIO"),
                 OsString::from(match mode {
                     FixtureMode::Failure("server-not-found" | "spawn-failure") => "normal",
                     _ => scenario,
                 }),
             ),
             (
-                OsString::from("ZEC_ALPHA2_RESTART_STATE"),
+                OsString::from("ZEC_FIXTURE_LSP_RESTART_STATE"),
                 restart_state.clone().into_os_string(),
             ),
         ];
@@ -643,7 +643,7 @@ pub fn run_probe(
 ) -> Result<Value> {
     let mut command = Command::new(zec);
     command.args([
-        OsStr::new("--alpha-2-probe"),
+        OsStr::new("probe"),
         OsStr::new(probe),
         fixture.root.as_os_str(),
         fixture.source.as_os_str(),

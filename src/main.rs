@@ -384,18 +384,18 @@ const TERMINAL_DEFAULT_KEYMAP: &str = r#"
 enum Command {
     Edit(Vec<PathBuf>),
     Remote(remote_session::RemoteRequest),
-    Alpha1Probe(Alpha1Probe),
-    Alpha2Probe(Alpha2Probe),
+    RepositoryProbe(RepositoryProbe),
+    LanguageProbe(LanguageProbe),
     Update(update::UpdateCommand),
     Smoke,
     Version,
     Help,
 }
 #[derive(Debug, Eq, PartialEq)]
-enum Alpha1Probe {
+enum RepositoryProbe {
     RootIdentity {
         root: PathBuf,
-        inputs: Vec<Alpha1RootInput>,
+        inputs: Vec<RepositoryRootInput>,
     },
     OutsideTrace(PathBuf),
     ProjectSearch {
@@ -407,7 +407,7 @@ enum Alpha1Probe {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum Alpha2Probe {
+enum LanguageProbe {
     LanguageService {
         root: PathBuf,
         file: PathBuf,
@@ -425,7 +425,7 @@ enum Alpha2Probe {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Alpha1RootInput {
+struct RepositoryRootInput {
     id: String,
     cwd: PathBuf,
     argument: Option<PathBuf>,
@@ -3097,8 +3097,8 @@ fn main() -> Result<()> {
     match parse_command(env::args_os().skip(1))? {
         Command::Edit(paths) => run_interactive(paths),
         Command::Remote(request) => run_remote_interactive(request),
-        Command::Alpha1Probe(probe) => run_alpha_1_probe(probe),
-        Command::Alpha2Probe(probe) => run_alpha_2_probe(probe),
+        Command::RepositoryProbe(probe) => run_repository_probe(probe),
+        Command::LanguageProbe(probe) => run_language_probe(probe),
         Command::Update(command) => run_update_command(command),
         Command::Smoke => {
             run_smoke();
@@ -3163,98 +3163,93 @@ fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
         }
         return Ok(Command::Smoke);
     }
-    if first == "--alpha-1-probe" {
+    if first == "probe" {
         let case = arguments
             .get(1)
             .and_then(|case| case.to_str())
-            .context("--alpha-1-probe requires a UTF-8 case name")?;
+            .context("probe requires a UTF-8 case name")?;
         let one_path = |name: &str| -> Result<PathBuf> {
             ensure!(
                 arguments.len() == 3,
-                "--alpha-1-probe {name} requires exactly one path"
+                "probe {name} requires exactly one path"
             );
             Ok(arguments[2].clone().into())
         };
-        let probe = match case {
+        return Ok(match case {
             "root-identity" => {
                 ensure!(
                     arguments.len() == 4,
-                    "--alpha-1-probe root-identity requires ROOT INPUTS_JSON"
+                    "probe root-identity requires ROOT INPUTS_JSON"
                 );
                 let encoded = arguments[3]
                     .to_str()
                     .context("root-identity inputs must be UTF-8 JSON")?;
                 let inputs =
                     serde_json::from_str(encoded).context("parse root-identity inputs JSON")?;
-                Alpha1Probe::RootIdentity {
+                Command::RepositoryProbe(RepositoryProbe::RootIdentity {
                     root: arguments[2].clone().into(),
                     inputs,
-                }
+                })
             }
-            "outside-trace" => Alpha1Probe::OutsideTrace(one_path(case)?),
-            "stale-result" => Alpha1Probe::StaleResult(one_path(case)?),
-            "search-failure" => Alpha1Probe::SearchFailure(one_path(case)?),
+            "outside-trace" => {
+                Command::RepositoryProbe(RepositoryProbe::OutsideTrace(one_path(case)?))
+            }
+            "stale-result" => {
+                Command::RepositoryProbe(RepositoryProbe::StaleResult(one_path(case)?))
+            }
+            "search-failure" => {
+                Command::RepositoryProbe(RepositoryProbe::SearchFailure(one_path(case)?))
+            }
             "project-search" => {
                 ensure!(
                     arguments.len() == 4,
-                    "--alpha-1-probe project-search requires ROOT QUERY"
+                    "probe project-search requires ROOT QUERY"
                 );
                 let query = arguments[3]
                     .clone()
                     .into_string()
                     .map_err(|_| anyhow::anyhow!("project-search query must be UTF-8"))?;
-                Alpha1Probe::ProjectSearch {
+                Command::RepositoryProbe(RepositoryProbe::ProjectSearch {
                     root: arguments[2].clone().into(),
                     query,
-                }
+                })
             }
-            _ => bail!("unknown --alpha-1-probe case: {case}"),
-        };
-        return Ok(Command::Alpha1Probe(probe));
-    }
-    if first == "--alpha-2-probe" {
-        let case = arguments
-            .get(1)
-            .and_then(|case| case.to_str())
-            .context("--alpha-2-probe requires a UTF-8 case name")?;
-        let probe = match case {
             "language-service" => {
                 ensure!(
                     arguments.len() == 4,
-                    "--alpha-2-probe language-service requires ROOT FILE"
+                    "probe language-service requires ROOT FILE"
                 );
-                Alpha2Probe::LanguageService {
+                Command::LanguageProbe(LanguageProbe::LanguageService {
                     root: arguments[2].clone().into(),
                     file: arguments[3].clone().into(),
-                }
+                })
             }
             "settings-reload" => {
                 ensure!(
                     arguments.len() == 4,
-                    "--alpha-2-probe settings-reload requires ROOT FILE"
+                    "probe settings-reload requires ROOT FILE"
                 );
-                Alpha2Probe::SettingsReload {
+                Command::LanguageProbe(LanguageProbe::SettingsReload {
                     root: arguments[2].clone().into(),
                     file: arguments[3].clone().into(),
-                }
+                })
             }
             "lsp-failure" => {
                 ensure!(
                     arguments.len() == 5,
-                    "--alpha-2-probe lsp-failure requires ROOT FILE SCENARIO"
+                    "probe lsp-failure requires ROOT FILE SCENARIO"
                 );
-                Alpha2Probe::LspFailure {
+                Command::LanguageProbe(LanguageProbe::LspFailure {
                     root: arguments[2].clone().into(),
                     file: arguments[3].clone().into(),
                     scenario: arguments[4]
                         .clone()
                         .into_string()
                         .map_err(|_| anyhow::anyhow!("lsp-failure scenario must be UTF-8"))?,
-                }
+                })
             }
-            _ => bail!("unknown --alpha-2-probe case: {case}"),
-        };
-        return Ok(Command::Alpha2Probe(probe));
+            _ => bail!("unknown probe case: {case}"),
+        });
     }
 
     let mut paths = Vec::new();
@@ -22880,18 +22875,18 @@ fn run_update_command(command: update::UpdateCommand) -> Result<()> {
     Ok(())
 }
 
-fn run_alpha_1_probe(probe: Alpha1Probe) -> Result<()> {
+fn run_repository_probe(probe: RepositoryProbe) -> Result<()> {
     let (sender, receiver) = mpsc::sync_channel(1);
     editor_application().run(move |cx| {
         init_zed(cx);
         let services = file_services(cx);
         cx.spawn(async move |cx| {
-            let result = execute_alpha_1_probe(probe, &services, cx)
+            let result = execute_repository_probe(probe, &services, cx)
                 .await
                 .and_then(|value| {
-                    serde_json::to_string(&value).context("serialize Alpha 1 probe result")
+                    serde_json::to_string(&value).context("serialize repository probe result")
                 });
-            sender.send(result).expect("send Alpha 1 probe result");
+            sender.send(result).expect("send repository probe result");
             let _ = cx.update(|cx| cx.quit());
         })
         .detach();
@@ -22899,16 +22894,16 @@ fn run_alpha_1_probe(probe: Alpha1Probe) -> Result<()> {
 
     let json = receiver
         .recv()
-        .context("Alpha 1 probe runtime exited without a result")??;
+        .context("repository probe runtime exited without a result")??;
     println!("{json}");
     Ok(())
 }
 
-fn run_alpha_2_probe(probe: Alpha2Probe) -> Result<()> {
+fn run_language_probe(probe: LanguageProbe) -> Result<()> {
     let (sender, receiver) = mpsc::sync_channel(1);
     editor_application().run(move |cx| {
         init_zed(cx);
-        let watches_configuration = matches!(&probe, Alpha2Probe::SettingsReload { .. });
+        let watches_configuration = matches!(&probe, LanguageProbe::SettingsReload { .. });
         let (event_sender, event_receiver) = async_channel::bounded(64);
         let configuration_file_system = cx.global::<ProjectRuntime>().file_system.clone();
         start_configuration_watchers(configuration_file_system, event_sender.clone(), cx);
@@ -22922,12 +22917,12 @@ fn run_alpha_2_probe(probe: Alpha2Probe) -> Result<()> {
         let services = file_services(cx);
         start_project_configuration_notifications(&services.project, event_sender.clone(), cx);
         cx.spawn(async move |cx| {
-            let result = execute_alpha_2_probe(probe, &services, event_receiver, cx)
+            let result = execute_language_probe(probe, &services, event_receiver, cx)
                 .await
                 .and_then(|value| {
-                    serde_json::to_string(&value).context("serialize Alpha 2 probe result")
+                    serde_json::to_string(&value).context("serialize language probe result")
                 });
-            sender.send(result).expect("send Alpha 2 probe result");
+            sender.send(result).expect("send language probe result");
             let _ = cx.update(|cx| cx.quit());
         })
         .detach();
@@ -22935,32 +22930,29 @@ fn run_alpha_2_probe(probe: Alpha2Probe) -> Result<()> {
 
     let json = receiver
         .recv()
-        .context("Alpha 2 probe runtime exited without a result")??;
+        .context("language probe runtime exited without a result")??;
     println!("{json}");
     Ok(())
 }
 
-async fn execute_alpha_2_probe(
-    probe: Alpha2Probe,
+async fn execute_language_probe(
+    probe: LanguageProbe,
     services: &FileServices,
     configuration_events: async_channel::Receiver<TerminalEvent>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<Value> {
     match probe {
-        Alpha2Probe::LanguageService { root, file } => {
-            alpha_2_language_service_probe(&root, &file, services, cx).await
+        LanguageProbe::LanguageService { root, file } => {
+            language_service_probe(&root, &file, services, cx).await
         }
-        Alpha2Probe::SettingsReload { root, file } => {
-            alpha_2_settings_reload_probe(&root, &file, services, configuration_events, cx).await
+        LanguageProbe::SettingsReload { root, file } => {
+            settings_reload_probe(&root, &file, services, configuration_events, cx).await
         }
-        Alpha2Probe::LspFailure {
+        LanguageProbe::LspFailure {
             root,
             file,
             scenario,
-        } => {
-            alpha_2_lsp_failure_probe(&root, &file, &scenario, services, configuration_events, cx)
-                .await
-        }
+        } => lsp_failure_probe(&root, &file, &scenario, services, configuration_events, cx).await,
     }
 }
 
@@ -23217,7 +23209,7 @@ async fn bounded_completion_request(
     }
 }
 
-async fn alpha_2_lsp_failure_probe(
+async fn lsp_failure_probe(
     root_path: &Path,
     file_path: &Path,
     scenario: &str,
@@ -23545,7 +23537,7 @@ async fn alpha_2_lsp_failure_probe(
     }))
 }
 
-async fn alpha_2_settings_reload_probe(
+async fn settings_reload_probe(
     root_path: &Path,
     file_path: &Path,
     services: &FileServices,
@@ -23743,7 +23735,7 @@ async fn alpha_2_settings_reload_probe(
     }))
 }
 
-async fn alpha_2_language_service_probe(
+async fn language_service_probe(
     root_path: &Path,
     file_path: &Path,
     services: &FileServices,
@@ -23770,7 +23762,7 @@ async fn alpha_2_language_service_probe(
     let position = text
         .find(marker)
         .map(|offset| offset + marker.len())
-        .context("Alpha 2 language-service probe file must contain alpha_")?;
+        .context("language-service probe file must contain alpha_")?;
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -24846,24 +24838,24 @@ async fn alpha_2_language_service_probe(
     Ok(report)
 }
 
-async fn execute_alpha_1_probe(
-    probe: Alpha1Probe,
+async fn execute_repository_probe(
+    probe: RepositoryProbe,
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
 ) -> Result<Value> {
     match probe {
-        Alpha1Probe::RootIdentity { root, inputs } => {
-            alpha_1_root_identity_probe(&root, &inputs, services, cx).await
+        RepositoryProbe::RootIdentity { root, inputs } => {
+            root_identity_probe(&root, &inputs, services, cx).await
         }
-        Alpha1Probe::OutsideTrace(path) => alpha_1_outside_trace_probe(&path, cx).await,
-        Alpha1Probe::ProjectSearch { root, query } => {
+        RepositoryProbe::OutsideTrace(path) => outside_trace_probe(&path, cx).await,
+        RepositoryProbe::ProjectSearch { root, query } => {
             let repository = prepare_repository(&root, None, services, cx).await?;
             let output =
                 collect_project_search(&repository, query, services, Vec::new(), cx).await?;
             Ok(project_search_json(&output))
         }
-        Alpha1Probe::StaleResult(root) => alpha_1_stale_result_probe(&root, services, cx).await,
-        Alpha1Probe::SearchFailure(root) => alpha_1_search_failure_probe(&root, services, cx).await,
+        RepositoryProbe::StaleResult(root) => stale_result_probe(&root, services, cx).await,
+        RepositoryProbe::SearchFailure(root) => search_failure_probe(&root, services, cx).await,
     }
 }
 
@@ -24895,9 +24887,9 @@ async fn collect_project_search(
     Ok(output)
 }
 
-async fn alpha_1_root_identity_probe(
+async fn root_identity_probe(
     root_path: &Path,
-    root_inputs: &[Alpha1RootInput],
+    root_inputs: &[RepositoryRootInput],
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
 ) -> Result<Value> {
@@ -25054,7 +25046,7 @@ async fn alpha_1_root_identity_probe(
 
     let excluded_search = collect_project_search(
         &repository,
-        "ALPHA1_EXCLUDED_SENTINEL".to_owned(),
+        "PROBE_EXCLUDED_SENTINEL".to_owned(),
         services,
         project_searchable_buffers(&tabs),
         cx,
@@ -25084,7 +25076,7 @@ async fn alpha_1_root_identity_probe(
     }))
 }
 
-async fn alpha_1_outside_trace_probe(path: &Path, cx: &mut gpui::AsyncApp) -> Result<Value> {
+async fn outside_trace_probe(path: &Path, cx: &mut gpui::AsyncApp) -> Result<Value> {
     let absolute =
         std::path::absolute(path).with_context(|| format!("make {} absolute", path.display()))?;
     let canonical = std::fs::canonicalize(&absolute)
@@ -25181,7 +25173,7 @@ async fn alpha_1_outside_trace_probe(path: &Path, cx: &mut gpui::AsyncApp) -> Re
     }))
 }
 
-async fn alpha_1_stale_result_probe(
+async fn stale_result_probe(
     root: &Path,
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
@@ -25193,7 +25185,7 @@ async fn alpha_1_stale_result_probe(
 
     let request_a = scheduler
         .request(
-            prompt.request("ALPHA1_STALE_A".to_owned())?,
+            prompt.request("PROBE_STALE_A".to_owned())?,
             ProjectSearchChange::Paste,
         )?
         .next
@@ -25202,7 +25194,7 @@ async fn alpha_1_stale_result_probe(
         start_zed_project_search_command(request_a, &repository, services, Vec::new(), cx)?;
     let request_b = scheduler
         .request(
-            prompt.request("ALPHA1_STALE_B".to_owned())?,
+            prompt.request("PROBE_STALE_B".to_owned())?,
             ProjectSearchChange::Paste,
         )?
         .next
@@ -25246,7 +25238,7 @@ async fn alpha_1_stale_result_probe(
     }))
 }
 
-fn alpha_1_document_trace(document: &OpenDocument, tab_count: usize, cx: &gpui::AsyncApp) -> Value {
+fn probe_document_trace(document: &OpenDocument, tab_count: usize, cx: &gpui::AsyncApp) -> Value {
     let body = document
         .buffer
         .read_with(cx, |buffer, _| buffer.text().to_string());
@@ -25258,7 +25250,7 @@ fn alpha_1_document_trace(document: &OpenDocument, tab_count: usize, cx: &gpui::
     })
 }
 
-async fn alpha_1_search_failure_probe(
+async fn search_failure_probe(
     root: &Path,
     services: &FileServices,
     cx: &mut gpui::AsyncApp,
@@ -25276,7 +25268,7 @@ async fn alpha_1_search_failure_probe(
         load_project_document(project_path, control_file.canonical_path(), services, cx).await?;
     let (redraw_sender, _redraw_receiver) = async_channel::bounded(64);
     let tabs = vec![create_document_tab(document, services, redraw_sender, cx)?];
-    let before = alpha_1_document_trace(&tabs[0].document, tabs.len(), cx);
+    let before = probe_document_trace(&tabs[0].document, tabs.len(), cx);
 
     let mut scheduler = ProjectSearchScheduler::default();
     let session = scheduler.open_session()?;
@@ -25285,7 +25277,7 @@ async fn alpha_1_search_failure_probe(
         async_channel::bounded::<std::result::Result<ProjectSearchOutput, String>>(1);
     let request = scheduler
         .request(
-            prompt.request("ALPHA1_SEARCH_FAILURE".to_owned())?,
+            prompt.request("PROBE_SEARCH_FAILURE".to_owned())?,
             ProjectSearchChange::Paste,
         )?
         .next
@@ -25350,19 +25342,19 @@ async fn alpha_1_search_failure_probe(
         rendered_status.contains("search failed: EIO"),
         "controlled EIO was not rendered in project-search status"
     );
-    let after = alpha_1_document_trace(&tabs[0].document, tabs.len(), cx);
+    let after = probe_document_trace(&tabs[0].document, tabs.len(), cx);
     ensure!(before == after, "search failure mutated editor state");
 
     tabs[0].editor_window.update(cx, |editor, window, cx| {
         editor.select_all(&SelectAll, window, cx);
-        editor.insert("ALPHA1_SEARCH_FAILURE_CONTINUED", window, cx);
+        editor.insert("PROBE_SEARCH_FAILURE_CONTINUED", window, cx);
     })?;
     save_document(&tabs[0].document, services, cx).await?;
     let control_disk_token = services
         .file_system
         .load(control_file.canonical_path())
         .await?;
-    let continued_edit_saved = control_disk_token == "ALPHA1_SEARCH_FAILURE_CONTINUED"
+    let continued_edit_saved = control_disk_token == "PROBE_SEARCH_FAILURE_CONTINUED"
         && !document_state(&tabs[0].document, cx).dirty;
 
     Ok(serde_json::json!({
@@ -25451,19 +25443,16 @@ mod tests {
             std::fs::create_dir_all(root.join("aliases")).expect("create repository aliases");
             std::fs::create_dir_all(root.join("target")).expect("create ignored target");
             std::fs::create_dir_all(root.join(".git")).expect("create excluded git metadata");
-            std::fs::write(root.join("README.md"), "ALPHA1_READY_SENTINEL\n")
+            std::fs::write(root.join("README.md"), "PROBE_READY_SENTINEL\n")
                 .expect("write repository README");
             std::fs::write(
                 root.join("src/日本 語.rs"),
                 "pub const TOKEN: &str = \"inside\";\n",
             )
             .expect("write canonical repository file");
-            std::fs::write(
-                root.join("target/excluded.rs"),
-                "ALPHA1_EXCLUDED_SENTINEL\n",
-            )
-            .expect("write ignored repository file");
-            std::fs::write(root.join(".git/hidden"), "ALPHA1_EXCLUDED_SENTINEL\n")
+            std::fs::write(root.join("target/excluded.rs"), "PROBE_EXCLUDED_SENTINEL\n")
+                .expect("write ignored repository file");
+            std::fs::write(root.join(".git/hidden"), "PROBE_EXCLUDED_SENTINEL\n")
                 .expect("write git metadata fixture");
             std::fs::write(root.join(".gitignore"), "target/\n")
                 .expect("write repository ignore rules");
@@ -25541,7 +25530,7 @@ mod tests {
 
         let first = scheduler
             .request(
-                prompt.request("ALPHA1_STALE_A".to_owned()).unwrap(),
+                prompt.request("PROBE_STALE_A".to_owned()).unwrap(),
                 ProjectSearchChange::Paste,
             )
             .unwrap()
@@ -25564,7 +25553,7 @@ mod tests {
 
         let latest = scheduler
             .request(
-                prompt.request("ALPHA1_STALE_B".to_owned()).unwrap(),
+                prompt.request("PROBE_STALE_B".to_owned()).unwrap(),
                 ProjectSearchChange::Paste,
             )
             .unwrap()
@@ -25572,7 +25561,7 @@ mod tests {
             .expect("atomic replacement paste uses the reserved second slot");
         assert_eq!(
             [first.query.as_str(), latest.query.as_str()],
-            ["ALPHA1_STALE_A", "ALPHA1_STALE_B"]
+            ["PROBE_STALE_A", "PROBE_STALE_B"]
         );
         assert_eq!(scheduler.active_count(), 2);
 
@@ -26193,11 +26182,11 @@ mod tests {
                         .context("partial startup kept no control document")?;
                     let control_window = cx.update(|cx| open_editor(control.buffer.clone(), cx))?;
                     control_window.update(cx, |editor, window, cx| {
-                        editor.insert("ALPHA1_PARTIAL_STARTUP_EDIT ", window, cx);
+                        editor.insert("PROBE_PARTIAL_STARTUP_EDIT ", window, cx);
                     })?;
                     save_document(control, &services, cx).await?;
                     let continued_saved = std::fs::read_to_string(root.join("README.md"))?
-                        .starts_with("ALPHA1_PARTIAL_STARTUP_EDIT ");
+                        .starts_with("PROBE_PARTIAL_STARTUP_EDIT ");
 
                     Ok((
                         repository.root.label(),
@@ -26248,7 +26237,7 @@ mod tests {
 
         assert_eq!(root_label, "repo");
         assert_eq!(canonical_root, expected_root);
-        assert_eq!(initial_text, "ALPHA1_READY_SENTINEL\n");
+        assert_eq!(initial_text, "PROBE_READY_SENTINEL\n");
         assert!(indexed_paths.iter().any(|path| path == "README.md"));
         assert!(!indexed_paths.iter().any(|path| path.starts_with(".git/")));
         assert!(!indexed_paths.iter().any(|path| path.starts_with("target/")));

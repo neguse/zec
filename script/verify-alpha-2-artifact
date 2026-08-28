@@ -8,17 +8,17 @@ test "$(find "$artifact_root" -type f | wc -l)" = 44
 
 acceptance="$artifact_root/acceptance.json"
 benchmark="$artifact_root/benchmark.json"
-alpha_1_acceptance="$artifact_root/alpha-1/acceptance.json"
-alpha_1_benchmark="$artifact_root/alpha-1/benchmark.json"
+e2e_repository="$artifact_root/alpha-1/acceptance.json"
+e2e_repository_benchmark="$artifact_root/alpha-1/benchmark.json"
 for report_path in \
-  "$acceptance" "$benchmark" "$alpha_1_acceptance" "$alpha_1_benchmark"; do
+  "$acceptance" "$benchmark" "$e2e_repository" "$e2e_repository_benchmark"; do
   test -f "$report_path"
 done
 
 if [[ -n "$promoted_evidence" ]]; then
   test -f "$promoted_evidence"
   for report_name in \
-    acceptance benchmark alpha_1_acceptance alpha_1_benchmark; do
+    acceptance benchmark e2e_repository e2e_repository_benchmark; do
     report_path="${!report_name}"
     digest_key="${report_name}_sha256"
     expected_digest="$(jq -er --arg key "$digest_key" '.reports[$key]' "$promoted_evidence")"
@@ -53,7 +53,7 @@ cmp "$expected_ids" "$actual_ids"
 jq -e '
   .schema_version == 1
   and .contract_version == 2
-  and .report_kind == "alpha_2_acceptance"
+  and .report_kind == "e2e_language"
   and .binaries.zec.release_profile == true
   and .binaries.fixture_lsp.release_profile == true
   and (.binaries.zec.content_sha256 | test("^[0-9a-f]{64}$"))
@@ -100,7 +100,7 @@ jq -e '
     and $value.assertion_passed == true;
   .schema_version == 1
   and .contract_version == 2
-  and .report_kind == "alpha_2_benchmark"
+  and .report_kind == "e2e_language_benchmark"
   and .binaries.zec.release_profile == true
   and .binaries.fixture_lsp.release_profile == true
   and metric(.startup; 2; 20; 3000000; null)
@@ -132,7 +132,7 @@ jq -e '
 jq -e '
   .schema_version == 1
   and .contract_version == 1
-  and .report_kind == "alpha_1_acceptance"
+  and .report_kind == "e2e_repository"
   and .binary.release_profile == true
   and .poc_expected_count == 94
   and .poc_observed_count >= .poc_expected_count
@@ -144,20 +144,20 @@ jq -e '
   and .passed == 186
   and .failed == 0
   and .all_assertions_passed == true
-' "$alpha_1_acceptance" >/dev/null
+' "$e2e_repository" >/dev/null
 jq -e '
   .schema_version == 1
   and .contract_version == 1
-  and .report_kind == "alpha_1_benchmark"
+  and .report_kind == "e2e_repository_benchmark"
   and .binary.release_profile == true
   and ((.assertions | type) == "object" and (.assertions | length) > 0)
   and all(.assertions[]; . == true)
   and .all_assertions_passed == true
-' "$alpha_1_benchmark" >/dev/null
+' "$e2e_repository_benchmark" >/dev/null
 
-test "$(jq -c .oracles "$alpha_1_benchmark")" = "$(jq -c .oracles "$alpha_1_acceptance")"
-zec_digest="$(jq -r .binary.content_sha256 "$alpha_1_acceptance")"
-test "$(jq -r .binary.content_sha256 "$alpha_1_benchmark")" = "$zec_digest"
+test "$(jq -c .oracles "$e2e_repository_benchmark")" = "$(jq -c .oracles "$e2e_repository")"
+zec_digest="$(jq -r .binary.content_sha256 "$e2e_repository")"
+test "$(jq -r .binary.content_sha256 "$e2e_repository_benchmark")" = "$zec_digest"
 test "$(jq -r .binaries.zec.content_sha256 "$acceptance")" = "$zec_digest"
 test "$(jq -r .binaries.zec.content_sha256 "$benchmark")" = "$zec_digest"
 test "$(jq -r .binaries.fixture_lsp.content_sha256 "$acceptance")" = \

@@ -14,8 +14,8 @@ jq -e '
   and (.gate | keys == ["job_id", "job_url", "run_attempt", "run_id", "run_url"])
   and (.artifact | keys == ["digest", "id"])
   and (.reports | keys == [
-    "acceptance_sha256", "alpha_1_acceptance_sha256",
-    "alpha_1_benchmark_sha256", "benchmark_sha256"
+    "acceptance_sha256", "e2e_repository_sha256",
+    "e2e_repository_benchmark_sha256", "benchmark_sha256"
   ])
   and (.counts | keys == [
     "acceptance_case_count", "failure_scenario_count", "fresh_process_runs"

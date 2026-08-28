@@ -8,11 +8,11 @@ use std::{
 };
 
 use crate::{
-    alpha_1_support::{
+    e2e_support::{
         BinaryReport, EnvironmentReport, MetricReport, PtySession, TerminalBaseline, binary_report,
         environment_report, read_report, statistics, verify_environment, write_report,
     },
-    alpha_2_support::{CaseResult, CorrelationTrace, EvidenceFile},
+    language_support::{CaseResult, CorrelationTrace, EvidenceFile},
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -23,8 +23,8 @@ pub const CONTRACT_VERSION: u32 = 3;
 pub const FRESH_PROCESS_RUNS: usize = 20;
 pub const REQUIRED_CASE_COUNT: usize = 361;
 pub const VM_HWM_LIMIT_BYTES: u64 = 1_879_048_192;
-pub const READY_SENTINEL: &str = "ALPHA3_GATE_READY";
-pub const SEARCH_TOKEN: &str = "ALPHA3_GATE_SEARCH_TOKEN";
+pub const READY_SENTINEL: &str = "WORKSPACE_E2E_READY";
+pub const SEARCH_TOKEN: &str = "WORKSPACE_E2E_SEARCH_TOKEN";
 
 pub const CAPABILITY_PREFIXES: &[&str] = &[
     "C2_LAYOUT",
@@ -80,7 +80,7 @@ pub fn parse_invocation() -> Result<Invocation> {
             Some("--help" | "-h") => {
                 let program = std::env::args()
                     .next()
-                    .unwrap_or_else(|| "alpha_3_gate".to_owned());
+                    .unwrap_or_else(|| "workspace_e2e".to_owned());
                 println!(
                     "Usage: {program} --zec PATH --assert --report PATH\n       {program} --verify-report PATH"
                 );
@@ -111,11 +111,11 @@ fn value(arguments: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<O
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateBinary {
+pub struct SuiteBinary {
     pub zec: BinaryReport,
 }
 
-impl GateBinary {
+impl SuiteBinary {
     pub fn collect(zec: &Path) -> Result<Self> {
         Ok(Self {
             zec: binary_report(zec)?,
@@ -271,7 +271,7 @@ pub struct Fixture {
 impl Fixture {
     pub fn create(case_id: &str) -> Result<Self> {
         let temp = tempfile::Builder::new()
-            .prefix("zec-alpha-3-")
+            .prefix("zec-workspace-e2e-")
             .tempdir()
             .context("create Alpha 3 fixture")?;
         let root = temp.path().join("project");
@@ -294,7 +294,7 @@ impl Fixture {
 
         fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname = \"alpha-3-gate\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+            "[package]\nname = \"workspace-e2e\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
         )?;
         fs::write(
             root.join("README.md"),
@@ -306,7 +306,7 @@ impl Fixture {
         fs::write(
             &source,
             format!(
-                "// {READY_SENTINEL}\nfn folded_fixture() {{\n    let value = \"{SEARCH_TOKEN}\";\n    println!(\"{{value}}\");\n}}\n// {}ALPHA3_WRAP_TAIL\n",
+                "// {READY_SENTINEL}\nfn folded_fixture() {{\n    let value = \"{SEARCH_TOKEN}\";\n    println!(\"{{value}}\");\n}}\n// {}E2E_WRAP_TAIL\n",
                 "w".repeat(180)
             ),
         )?;
@@ -383,7 +383,7 @@ impl Fixture {
     }
 
     pub fn manifest(&self) -> Result<std::collections::BTreeMap<String, String>> {
-        crate::alpha_2_support::manifest(&self.root)
+        crate::language_support::manifest(&self.root)
     }
 
     pub fn session_files(&self) -> Result<Vec<PathBuf>> {

@@ -840,7 +840,7 @@ pub fn observe_poc_tests(repo: &Path) -> Result<(usize, Vec<String>)> {
             "--locked",
             "--release",
             "--test",
-            "pty_acceptance",
+            "e2e_tui",
             "--",
             "--list",
         ],
@@ -903,7 +903,7 @@ pub fn verify_acceptance_report(report: &AcceptanceReport) -> Result<()> {
         "contract mismatch"
     );
     ensure!(
-        report.report_kind == "alpha_1_acceptance",
+        report.report_kind == "e2e_repository",
         "report kind mismatch"
     );
     verify_environment(&report.environment)?;
@@ -997,7 +997,7 @@ pub fn verify_benchmark_report(report: &BenchmarkReport) -> Result<()> {
         "contract mismatch"
     );
     ensure!(
-        report.report_kind == "alpha_1_benchmark",
+        report.report_kind == "e2e_repository_benchmark",
         "report kind mismatch"
     );
     verify_environment(&report.environment)?;
@@ -1239,14 +1239,14 @@ pub fn fresh_config_dir(case_id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Writes the pinned Alpha settings using the `ZEC_DATA_DIR` layout
+/// Writes the pinned e2e settings using the `ZEC_DATA_DIR` layout
 /// (`<root>/config/settings.json`) that `PtySession` points zec at.
 pub fn write_pinned_settings(isolation_root: &Path) -> Result<()> {
     let config = isolation_root.join("config");
     fs::create_dir_all(&config)
         .with_context(|| format!("create fresh config {}", config.display()))?;
     fs::write(config.join("settings.json"), PINNED_SETTINGS)
-        .with_context(|| format!("write pinned Alpha settings under {}", config.display()))
+        .with_context(|| format!("write pinned e2e settings under {}", config.display()))
 }
 
 enum ReaderEvent {
@@ -1461,7 +1461,7 @@ impl PtySession {
 
     pub fn wait_ready(&mut self, root_label: &str, sentinel: &str) -> Result<u64> {
         let mark = self.spawn_mark;
-        self.wait_after("Alpha 1 Ready frame", mark, STARTUP_TIMEOUT, |screen| {
+        self.wait_after("ready frame", mark, STARTUP_TIMEOUT, |screen| {
             let (cursor_row, cursor_col) = screen.cursor_position();
             let (rows, cols) = screen.size();
             // ConPTY flattens the client's alternate-screen switch into plain

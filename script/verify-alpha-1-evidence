@@ -78,7 +78,7 @@ test "$existing_test_count" = "$(jq -er '.poc_observed_count | tostring' "$accep
 jq -e '
   .schema_version == 1
   and .contract_version == 1
-  and .report_kind == "alpha_1_acceptance"
+  and .report_kind == "e2e_repository"
   and .binary.release_profile == true
   and .poc_expected_count == 94
   and .poc_observed_count >= .poc_expected_count
@@ -94,7 +94,7 @@ jq -e '
 jq -e '
   .schema_version == 1
   and .contract_version == 1
-  and .report_kind == "alpha_1_benchmark"
+  and .report_kind == "e2e_repository_benchmark"
   and .binary.release_profile == true
   and ((.assertions | type) == "object" and (.assertions | length) > 0)
   and all(.assertions[]; . == true)

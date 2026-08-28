@@ -1,6 +1,6 @@
-#[path = "alpha_1_support/mod.rs"]
-mod alpha_1_support;
-mod alpha_2_support;
+#[path = "e2e_support/mod.rs"]
+mod e2e_support;
+mod language_support;
 
 use std::{
     fs,
@@ -8,16 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alpha_1_support::{CTRL_Q, CTRL_W, CTRL_Z, END, ENTER, ESC, PtySession};
-use alpha_2_support::{
+use anyhow::{Context as _, Result, ensure};
+use e2e_support::{CTRL_Q, CTRL_W, CTRL_Z, END, ENTER, ESC, PtySession};
+use language_support::{
     CONTRACT_VERSION, CaseResult, EvidenceFile, FAILURE_SCENARIOS, FRESH_PROCESS_RUNS, Fixture,
-    FixtureMode, GateBinaries, Invocation, REPORT_SCHEMA_VERSION, acceptance_case_ids,
+    FixtureMode, Invocation, REPORT_SCHEMA_VERSION, SuiteBinaries, acceptance_case_ids,
     artifacts_directory, assert_failure_report, assert_language_report, assert_lsp_trace,
     assert_settings_report, canonical_environment, duration_us, json_bytes, manifest_evidence_json,
     parse_invocation, persist_bytes, read_report, run_probe, verify_canonical_environment,
     verify_cases, wait_for_lsp_trace_method, write_report,
 };
-use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 const CTRL_PAGE_DOWN: &[u8] = b"\x1b[6;5~";
@@ -32,8 +32,8 @@ struct AcceptanceReport {
     schema_version: u32,
     contract_version: u32,
     report_kind: String,
-    environment: alpha_1_support::EnvironmentReport,
-    binaries: GateBinaries,
+    environment: e2e_support::EnvironmentReport,
+    binaries: SuiteBinaries,
     fresh_process_runs: usize,
     failure_scenario_count: usize,
     required_case_count: usize,
@@ -59,11 +59,11 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
+fn run(arguments: language_support::RunArguments) -> Result<()> {
     let zec = fs::canonicalize(&arguments.zec).context("canonicalize --zec")?;
     let lsp = fs::canonicalize(&arguments.lsp).context("canonicalize --lsp")?;
     let artifacts = artifacts_directory(&arguments.report, "acceptance")?;
-    let process_runs = std::env::var("ZEC_ALPHA2_DEV_RUNS")
+    let process_runs = std::env::var("ZEC_E2E_DEV_RUNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|runs| *runs > 0)
@@ -165,9 +165,9 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
     let report = AcceptanceReport {
         schema_version: REPORT_SCHEMA_VERSION,
         contract_version: CONTRACT_VERSION,
-        report_kind: "alpha_2_acceptance".to_owned(),
+        report_kind: "e2e_language".to_owned(),
         environment: canonical_environment()?,
-        binaries: GateBinaries::collect(&zec, &lsp)?,
+        binaries: SuiteBinaries::collect(&zec, &lsp)?,
         fresh_process_runs: process_runs,
         failure_scenario_count: FAILURE_SCENARIOS.len(),
         required_case_count: if process_runs == FRESH_PROCESS_RUNS {
@@ -247,7 +247,7 @@ fn pty_language_workflow(
         &fixture.xdg_config,
         &environment,
     )?;
-    session.wait_ready("zec project", "Alpha 2 gate fixture")?;
+    session.wait_ready("zec project", "language e2e fixture")?;
     session.assert_raw(&baseline)?;
 
     let trust_mark = session.mark();
@@ -267,7 +267,7 @@ fn pty_language_workflow(
     session.wait_after(
         "completed completion picker",
         completion_mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("Completions") && contents.contains("alpha_completion")
@@ -282,7 +282,7 @@ fn pty_language_workflow(
     session.wait_after(
         "completed hover overlay",
         hover_mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("Hover") && contents.contains("Fixture hover")
@@ -295,7 +295,7 @@ fn pty_language_workflow(
     session.wait_after(
         "completed diagnostics",
         diagnostics_mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("Diagnostics") && contents.contains("deterministic fixture warning")
@@ -305,7 +305,7 @@ fn pty_language_workflow(
     session.wait_after(
         "diagnostics focus return",
         return_to_editor,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("editor focused; diagnostics dock remains open")
@@ -319,7 +319,7 @@ fn pty_language_workflow(
     session.wait_after(
         "completed references MultiBuffer",
         references_mark,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("editable MultiBuffer (2 target(s))")
@@ -394,10 +394,7 @@ fn verify_report(report: &AcceptanceReport) -> Result<()> {
         report.contract_version == CONTRACT_VERSION,
         "contract mismatch"
     );
-    ensure!(
-        report.report_kind == "alpha_2_acceptance",
-        "report kind mismatch"
-    );
+    ensure!(report.report_kind == "e2e_language", "report kind mismatch");
     verify_canonical_environment(&report.environment)?;
     report.binaries.verify()?;
     ensure!(

@@ -1,4 +1,4 @@
-mod alpha_1_support;
+mod e2e_support;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,17 +14,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alpha_1_support::{
+use anyhow::{Context as _, Result, bail, ensure};
+use e2e_support::{
     ALT_F, BenchmarkReport, CTRL_G, CTRL_P, CTRL_Q, CTRL_S, DELETE, DOWN, ENTER, ESC, InputTrace,
     Invocation, MetricReport, PtySession, REPORT_SCHEMA_VERSION, TerminalBaseline,
     benchmark_oracle, binary_report, descendant_process_count, environment_report, fixture,
     oracle_hashes, parse_invocation, reset_fixed_fixture, verify_benchmark_oracle,
     verify_benchmark_report, vm_hwm_bytes_if_present, write_report,
 };
-use alpha_1_support::{
+use e2e_support::{
     SearchResultReport, expected_benchmark_quick_open_queries, expected_benchmark_search_rows,
 };
-use anyhow::{Context as _, Result, bail, ensure};
 use nix::libc;
 
 const STARTUP_WARMUPS: usize = 2;
@@ -56,7 +56,7 @@ static NEXT_CONTROL_SEQUENCE: AtomicU32 = AtomicU32::new(1);
 fn main() -> Result<()> {
     match parse_invocation(false)? {
         Invocation::Verify(path) => {
-            let report = alpha_1_support::read_report::<BenchmarkReport>(&path)?;
+            let report = e2e_support::read_report::<BenchmarkReport>(&path)?;
             verify_benchmark_report(&report)
                 .with_context(|| format!("verify {}", path.display()))?;
             println!("Alpha 1 benchmark report verified");
@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
+fn run(arguments: e2e_support::RunArguments) -> Result<()> {
     let benchmark_oracle = benchmark_oracle()?;
     verify_benchmark_oracle(&benchmark_oracle)?;
     let zec = fs::canonicalize(&arguments.zec).context("canonicalize --zec")?;
@@ -142,7 +142,7 @@ fn run(arguments: alpha_1_support::RunArguments) -> Result<()> {
     let report = BenchmarkReport {
         schema_version: REPORT_SCHEMA_VERSION,
         contract_version: fixture::CONTRACT_VERSION,
-        report_kind: "alpha_1_benchmark".to_owned(),
+        report_kind: "e2e_repository_benchmark".to_owned(),
         environment: environment_report()?,
         binary: binary_report(&zec)?,
         oracles: oracle_hashes(),
@@ -656,7 +656,7 @@ impl Drop for ResourceMonitor {
     fn drop(&mut self) {
         let _ = self.stop.send(());
         if let Some(handle) = self.handle.take() {
-            let deadline = std::time::Instant::now() + alpha_1_support::CHILD_TIMEOUT;
+            let deadline = std::time::Instant::now() + e2e_support::CHILD_TIMEOUT;
             while !handle.is_finished() && std::time::Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -670,7 +670,7 @@ impl Drop for ResourceMonitor {
 fn join_resource_monitor(
     handle: JoinHandle<Result<ResourceObservation>>,
 ) -> Result<ResourceObservation> {
-    let deadline = std::time::Instant::now() + alpha_1_support::CHILD_TIMEOUT;
+    let deadline = std::time::Instant::now() + e2e_support::CHILD_TIMEOUT;
     while !handle.is_finished() {
         let now = std::time::Instant::now();
         ensure!(
@@ -689,7 +689,7 @@ fn spawn_ready(
     root: &Path,
     config_name: &str,
 ) -> Result<(PtySession, TerminalBaseline, u64, ResourceMonitor)> {
-    let config = alpha_1_support::fresh_config_dir(config_name)?;
+    let config = e2e_support::fresh_config_dir(config_name)?;
     let armed_monitor = ResourceMonitor::arm()?;
     let (mut session, baseline) = PtySession::spawn(zec, root, &[root.as_os_str()], &config)?;
     let monitor = armed_monitor.start(session.pid()?)?;
@@ -919,7 +919,7 @@ fn parse_project_search_status(
         rendered_core.is_ascii(),
         "benchmark project-search status oracle must be ASCII"
     );
-    let remaining_columns = usize::from(alpha_1_support::COLS)
+    let remaining_columns = usize::from(e2e_support::COLS)
         .checked_sub(rendered_core.len())
         .context("project-search status core exceeded terminal width")?;
     // Every fixed benchmark row leaves at most six cells, so only the
@@ -1064,7 +1064,7 @@ fn editing_metric(
     session.wait_after(
         "100,000-line exact edit position",
         positioned,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| token_immediately_after_cursor(screen, marker),
     )?;
     let body_column = session.screen().cursor_position().1;
@@ -1092,7 +1092,7 @@ fn editing_metric(
         let elapsed = session.wait_after(
             "sequential edit at cursor-relative expected cells",
             operation,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 token_on_previous_editor_row(screen, &id, body_column)
                     && screen.contents().contains("large-100000-lines.txt+]")
@@ -1108,7 +1108,7 @@ fn editing_metric(
     session.wait_after(
         "editing buffer saved with dirty marker cleared",
         saved,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             contents.contains("saved")
@@ -1195,7 +1195,7 @@ fn save_metric(zec: &Path, root: &Path, resources: &mut ResourceTracker) -> Resu
         session.wait_after(
             "5 MiB buffer became dirty at the fixed cell",
             edited,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 token_immediately_before_cursor(screen, replacement)
                     && screen.contents().contains("save-5mib.txt+]")
@@ -1210,7 +1210,7 @@ fn save_metric(zec: &Path, root: &Path, resources: &mut ResourceTracker) -> Resu
         let ui_elapsed = session.wait_after(
             "5 MiB save completion with dirty marker cleared",
             operation,
-            alpha_1_support::SCREEN_TIMEOUT,
+            e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
                 contents.contains("saved")
@@ -1281,7 +1281,7 @@ fn quick_open(session: &mut PtySession, query: &str, expected_path: &str) -> Res
     session.wait_after(
         "benchmark quick-open target editor frame",
         opened,
-        alpha_1_support::SCREEN_TIMEOUT,
+        e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
             let (cursor_row, cursor_column) = screen.cursor_position();
@@ -1345,14 +1345,14 @@ mod tests {
             "Project search: ALPHA1_BENCH_SEARCH  100/1000  {}:{}:{}  ",
             expected.path, expected.line, expected.column
         );
-        let preview_width = usize::from(alpha_1_support::COLS)
+        let preview_width = usize::from(e2e_support::COLS)
             .checked_sub(header.len())
             .expect("status header fits the fixed terminal");
         expected.preview = "x".repeat(preview_width);
         let status = format!("{header}{}", expected.preview);
-        assert_eq!(status.len(), usize::from(alpha_1_support::COLS));
+        assert_eq!(status.len(), usize::from(e2e_support::COLS));
 
-        let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
+        let mut parser = vt100::Parser::new(e2e_support::ROWS, e2e_support::COLS, 0);
         parser.process(format!("\x1b[2J\x1b[40;1H{status}").as_bytes());
         let (position, total_hits, observed) =
             parse_project_search_status(parser.screen(), &expected)
@@ -1374,9 +1374,9 @@ mod tests {
         let status_with_clipped_options = format!("{core}  [li");
         assert_eq!(
             status_with_clipped_options.len(),
-            usize::from(alpha_1_support::COLS)
+            usize::from(e2e_support::COLS)
         );
-        let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
+        let mut parser = vt100::Parser::new(e2e_support::ROWS, e2e_support::COLS, 0);
         parser.process(format!("\x1b[2J\x1b[40;1H{status_with_clipped_options}").as_bytes());
         let (position, total_hits, observed) =
             parse_project_search_status(parser.screen(), &expected)
@@ -1385,7 +1385,7 @@ mod tests {
         assert_eq!(observed, expected);
 
         let status_with_bad_suffix = format!("{core}  [lX");
-        let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
+        let mut parser = vt100::Parser::new(e2e_support::ROWS, e2e_support::COLS, 0);
         parser.process(format!("\x1b[2J\x1b[40;1H{status_with_bad_suffix}").as_bytes());
         let error = parse_project_search_status(parser.screen(), &expected)
             .expect_err("unexpected rendered suffix must be rejected");
