@@ -215,14 +215,26 @@ fn main() -> Result<()> {
 fn auth_methods() -> Vec<acp::AuthMethod> {
     let auth_log = std::env::var("ZEC_ACP_FIXTURE_AUTH_LOG")
         .unwrap_or_else(|_| "/tmp/zec-acp-fixture-auth.log".to_owned());
+    // The terminal-auth side effect runs in the platform shell.
+    #[cfg(unix)]
+    let (shell, script) = (
+        "/bin/sh",
+        "printf 'E2E_TERMINAL_AUTH_READY\\n' | tee \"$ZEC_ACP_FIXTURE_AUTH_LOG\"",
+    );
+    #[cfg(windows)]
+    let (shell, script) = (
+        "pwsh",
+        "'E2E_TERMINAL_AUTH_READY' | tee $env:ZEC_ACP_FIXTURE_AUTH_LOG",
+    );
+    #[cfg(unix)]
+    let shell_args = ["-c", script];
+    #[cfg(windows)]
+    let shell_args = ["-NoProfile", "-Command", script];
     let terminal_meta: acp::Meta = serde_json::from_value(json!({
         "terminal-auth": {
             "label": "Fixture terminal login",
-            "command": "/bin/sh",
-            "args": [
-                "-c",
-                "printf 'E2E_TERMINAL_AUTH_READY\\n' | tee \"$ZEC_ACP_FIXTURE_AUTH_LOG\""
-            ],
+            "command": shell,
+            "args": shell_args,
             "env": {"ZEC_ACP_FIXTURE_AUTH_LOG": auth_log}
         }
     }))

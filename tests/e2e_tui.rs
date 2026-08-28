@@ -2,9 +2,8 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -25,6 +24,11 @@ use portable_pty::{
 };
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt as _, symlink};
+#[cfg(unix)]
+use std::{
+    net::{TcpListener, TcpStream},
+    process::Stdio,
+};
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Parser};
 
 const INITIAL_SIZE: PtySize = PtySize {
@@ -40,6 +44,7 @@ const RESIZED: PtySize = PtySize {
     pixel_height: 0,
 };
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
 const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -59,6 +64,7 @@ const CTRL_W: &[u8] = b"\x17";
 const CTRL_Z: &[u8] = b"\x1a";
 const CTRL_PAGE_DOWN: &[u8] = b"\x1b[6;5~";
 // Kitty's CSI-u encoding keeps Ctrl-: distinct from the legacy Ctrl-Z byte.
+#[cfg(unix)]
 const CTRL_COLON_KITTY: &[u8] = b"\x1b[58;5u";
 const F7: &[u8] = b"\x1b[18~";
 const F9: &[u8] = b"\x1b[20~";
@@ -71,6 +77,7 @@ const F2: &[u8] = b"\x1bOQ";
 const F1: &[u8] = b"\x1bOP";
 const F3: &[u8] = b"\x1bOR";
 const F4: &[u8] = b"\x1bOS";
+#[cfg(unix)]
 const F5: &[u8] = b"\x1b[15~";
 const F8: &[u8] = b"\x1b[19~";
 const DELETE: &[u8] = b"\x1b[3~";
@@ -331,9 +338,10 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     fs::create_dir_all(root.join(".zed")).context("create Beta 1 fixture")?;
     let readme = root.join("README.md");
     fs::write(&readme, format!("{READY}\n")).context("write Beta 1 README")?;
-    fs::write(
-        root.join(".zed/tasks.json"),
-        r#"[
+    // The task must print its sentinel and append it to a log file; each
+    // platform uses its native shell for that.
+    #[cfg(unix)]
+    let tasks = r#"[
           {
             "label": "Beta 1 Task",
             "command": "sh",
@@ -341,9 +349,18 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
             "reveal": "always",
             "hide": "never"
           }
-        ]"#,
-    )
-    .context("write Beta 1 tasks")?;
+        ]"#;
+    #[cfg(windows)]
+    let tasks = r#"[
+          {
+            "label": "Beta 1 Task",
+            "command": "pwsh",
+            "args": ["-NoProfile", "-Command", "'E2E_TASK_READY' | tee -Append beta1-task.log"],
+            "reveal": "always",
+            "hide": "never"
+          }
+        ]"#;
+    fs::write(root.join(".zed/tasks.json"), tasks).context("write Beta 1 tasks")?;
     git(&root, &["init"])?;
     git(&root, &["config", "user.email", "zec@example.invalid"])?;
     git(&root, &["config", "user.name", "zec acceptance"])?;
@@ -367,9 +384,12 @@ fn terminal_git_and_tasks_run_through_the_actual_binary() -> Result<()> {
     session.wait_for_screen("integrated Zed terminal", ACTION_TIMEOUT, |screen| {
         screen.contains("Terminal ·") && screen.contains("terminal 1 focused")
     })?;
+    #[cfg(unix)]
     session.paste(&format!(
         "printf '{TERMINAL_READY}\\n' | tee beta1-terminal.log"
     ))?;
+    #[cfg(windows)]
+    session.paste(&format!("'{TERMINAL_READY}' | tee beta1-terminal.log"))?;
     session.send(ENTER)?;
     session.wait_until(
         "terminal command output and side effect",
@@ -655,7 +675,7 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
     fs::write(&readme, &markdown).context("write rich Markdown fixture")?;
     fs::write(
         root.join("guide.md"),
-        format!("# Guide\n\nfiller\n\n## {HEADING}\n\nBETA2_LOCAL_LINK_TARGET\n"),
+        format!("# Guide\n\nfiller\n\n## {HEADING}\n\nE2E_LOCAL_LINK_TARGET\n"),
     )
     .context("write Markdown link target")?;
     let checker = image::DynamicImage::ImageRgba8(image::ImageBuffer::from_fn(2, 2, |x, y| {
@@ -780,47 +800,52 @@ fn markdown_and_images_run_through_zed_project_in_the_actual_binary() -> Result<
     );
     session.assert_terminal_restored(&termios_before)?;
 
-    let kitty_pair = open_pty()?;
-    let kitty_termios = capture_baseline(&kitty_pair)?;
-    let kitty_environment = [(OsStr::new("ZEC_IMAGE_PROTOCOL"), OsStr::new("kitty"))];
-    let mut kitty =
-        PtySession::spawn_with_env(kitty_pair, &[root.as_os_str()], &kitty_environment)?;
-    kitty.wait_for_screen(
-        "Kitty rich-content worktree trust",
-        STARTUP_TIMEOUT,
-        |screen| screen.contains("Worktree Trust") && screen.contains("rich-content-project"),
-    )?;
-    kitty.send(ENTER)?;
-    kitty.wait_for_screen(
-        "Kitty rich-content editor ready",
-        ACTION_TIMEOUT,
-        |screen| screen.contains(UPDATED) && !screen.contains("Worktree Trust"),
-    )?;
-    open_markdown_preview(&mut kitty)?;
-    kitty.send(b"\t\t")?;
-    kitty.send(ENTER)?;
-    kitty.wait_for_raw(
-        "Kitty graphics payload from actual zec binary",
-        b"\x1b_Ga=T,f=100,t=d,i=1",
-        ACTION_TIMEOUT,
-    )?;
-    kitty.send(b"\x1b")?;
-    kitty.wait_for_raw(
-        "Kitty image deletion on preview back",
-        b"\x1b_Ga=d,d=A,q=2\x1b\\",
-        ACTION_TIMEOUT,
-    )?;
-    kitty.send(b"\x1b")?;
-    kitty.wait_for_screen("Kitty Markdown preview closed", ACTION_TIMEOUT, |screen| {
-        screen.contains("Markdown preview closed; editor focused") && screen.contains(UPDATED)
-    })?;
-    kitty.send(CTRL_Q)?;
-    let kitty_status = kitty.wait_for_exit(EXIT_TIMEOUT)?;
-    ensure!(
-        kitty_status.success(),
-        "Kitty rich-content exit failed: {kitty_status}"
-    );
-    kitty.assert_terminal_restored(&kitty_termios)?;
+    // conhost strips APC sequences from ConPTY output, so the kitty
+    // graphics payload is only observable on Unix.
+    #[cfg(unix)]
+    {
+        let kitty_pair = open_pty()?;
+        let kitty_termios = capture_baseline(&kitty_pair)?;
+        let kitty_environment = [(OsStr::new("ZEC_IMAGE_PROTOCOL"), OsStr::new("kitty"))];
+        let mut kitty =
+            PtySession::spawn_with_env(kitty_pair, &[root.as_os_str()], &kitty_environment)?;
+        kitty.wait_for_screen(
+            "Kitty rich-content worktree trust",
+            STARTUP_TIMEOUT,
+            |screen| screen.contains("Worktree Trust") && screen.contains("rich-content-project"),
+        )?;
+        kitty.send(ENTER)?;
+        kitty.wait_for_screen(
+            "Kitty rich-content editor ready",
+            ACTION_TIMEOUT,
+            |screen| screen.contains(UPDATED) && !screen.contains("Worktree Trust"),
+        )?;
+        open_markdown_preview(&mut kitty)?;
+        kitty.send(b"\t\t")?;
+        kitty.send(ENTER)?;
+        kitty.wait_for_raw(
+            "Kitty graphics payload from actual zec binary",
+            b"\x1b_Ga=T,f=100,t=d,i=1",
+            ACTION_TIMEOUT,
+        )?;
+        kitty.send(b"\x1b")?;
+        kitty.wait_for_raw(
+            "Kitty image deletion on preview back",
+            b"\x1b_Ga=d,d=A,q=2\x1b\\",
+            ACTION_TIMEOUT,
+        )?;
+        kitty.send(b"\x1b")?;
+        kitty.wait_for_screen("Kitty Markdown preview closed", ACTION_TIMEOUT, |screen| {
+            screen.contains("Markdown preview closed; editor focused") && screen.contains(UPDATED)
+        })?;
+        kitty.send(CTRL_Q)?;
+        let kitty_status = kitty.wait_for_exit(EXIT_TIMEOUT)?;
+        ensure!(
+            kitty_status.success(),
+            "Kitty rich-content exit failed: {kitty_status}"
+        );
+        kitty.assert_terminal_restored(&kitty_termios)?;
+    }
 
     let session_directory = temp.path().join("rich-content-session-state");
     let session_environment = [
@@ -2136,7 +2161,7 @@ fn extensions_themes_settings_and_keymap_run_through_the_actual_binary() -> Resu
                 "url": "unused-zec",
                 "sha256": "0".repeat(64),
                 "size": 1,
-                "executable": "zec"
+                "executable": format!("zec{}", std::env::consts::EXE_SUFFIX)
             }]
         }))?,
     )
@@ -2455,6 +2480,7 @@ impl SshdFixture {
     }
 }
 
+#[cfg(unix)]
 fn sshd_executable() -> Option<PathBuf> {
     let mut candidates = vec![
         PathBuf::from("/usr/sbin/sshd"),
@@ -4481,15 +4507,6 @@ impl PtySession {
         }
     }
 
-    /// Sends one key as a win32-input-mode event with a control-key
-    /// state, expressing chords no legacy VT encoding can carry.
-    #[cfg(windows)]
-    fn send_win32_key(&mut self, virtual_key: u16, unit: u16, control_state: u32) -> Result<()> {
-        // Control-modified events are dropped by conhost unless they
-        // carry a real virtual-key code.
-        self.send(format!("\x1b[{virtual_key};0;{unit};1;{control_state};1_").as_bytes())
-    }
-
     /// Sends text the way it survives conhost's input cooking: BMP
     /// characters as plain bytes (LF normalized to CR, which cooks into a
     /// plain Enter), and astral characters as win32-input-mode key-down
@@ -4661,6 +4678,7 @@ impl PtySession {
         })
     }
 
+    #[cfg(unix)]
     fn wait_for_raw(&mut self, description: &str, needle: &[u8], timeout: Duration) -> Result<()> {
         self.wait_until(description, timeout, |session| {
             contains_bytes(&session.transcript, needle)

@@ -43,6 +43,33 @@ metrics stay Unix-only behind `#[cfg(unix)]`. Windows has no process-group
 or job-control convention for TUIs, so those cases are meaningful only as
 Unix evidence. The Windows counterpart of VmHWM is PeakWorkingSetSize.
 
+### ConPTY input semantics
+
+Bytes written to the ConPTY input pipe pass through conhost's input
+cooking before the client reads them, which changes what a test can send:
+
+- Bracketed paste does not exist: the `2004` markers are cooked away and
+  crossterm never sees a Paste event. Tests deliver text as keystrokes;
+  consequently the editor groups it per keystroke (undo granularity
+  differs from a Unix paste).
+- `\n` cooks into Enter with a CONTROL modifier; `\r` gives a plain
+  Enter. Text is normalized to `\r` before sending.
+- Non-BMP characters are dropped by the cooked path. They survive only as
+  win32-input-mode events (`ESC[Vk;Sc;Uc;Kd;Cs;Rc_`), sent as key-downs
+  only — interleaved key-ups break surrogate reassembly — and
+  control-modified events need a real virtual-key code (Vk 0 is dropped).
+- Kitty keyboard enhancement cannot cross the legacy console API, so
+  capability detection clamps to the legacy encoding on Windows; chords
+  that only kitty can carry route through the command palette instead.
+- Control- or alt-modified SGR mouse reports leak into the input stream
+  as literal characters; tests use unmodified mouse events.
+- Conhost strips APC sequences from ConPTY output, so kitty graphics
+  payloads are unobservable through a ConPTY transcript.
+- Crossterm on Windows reports key Release events (Unix only does under
+  kitty). Input handlers must ignore them explicitly; a
+  double-press-to-confirm flow that resets on "any other key" would
+  otherwise disarm itself on the first key's release.
+
 ## What runs on Windows
 
 - Every integration test in `cargo test --locked` (language_service,
@@ -50,9 +77,9 @@ Unix evidence. The Windows counterpart of VmHWM is PeakWorkingSetSize.
   workspace_layout, workspace_sessions, workspace_search, project_panel).
   No cargo feature is required.
 - `e2e_language` and `e2e_language_bench` build and run on ConPTY.
-- `e2e_tui` remains `#![cfg(target_os = "linux")]`. Enabling it per case on
-  Windows, after separating the termios/signal-dependent cases, is the next
-  step.
+- `e2e_tui` runs all nine scenarios on ConPTY. Signal, job-control,
+  symlink, sshd, gdb, jupyter, and media-bridge steps stay Unix-only
+  behind `#[cfg(unix)]`, as do the ConPTY-incapable steps listed above.
 - The `e2e_repository` and `e2e_workspace` binaries stay behind the
   `e2e-linux` feature: the repository fixture manifest encodes Unix modes
   and symlinks as contract, so they cannot be ported without redesigning
@@ -61,3 +88,7 @@ Unix evidence. The Windows counterpart of VmHWM is PeakWorkingSetSize.
 `zec update apply` refuses to replace the running executable on Windows with
 a documented error; tests/update_cli.rs verifies the behavior of both
 platforms.
+
+Known gap: toggling inlay hints on Windows flips the editor state but the
+`textDocument/inlayHint` request is never issued; the e2e_tui inlay step
+carries the TODO.

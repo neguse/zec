@@ -1436,10 +1436,11 @@ mod tests {
         for run in 1..=WORKFLOW_RUNS {
             let edit_a = expected_workflow_file(EDIT_A_PATH, run).expect("edit A");
             assert!(edit_a.starts_with(&[0xef, 0xbb, 0xbf]));
+            let edit_a_marker = format!("E2E_EDIT_A_{run:02}");
             assert!(
                 edit_a
-                    .windows(16)
-                    .any(|window| window == format!("E2E_EDIT_A_{run:02}").as_bytes())
+                    .windows(edit_a_marker.len())
+                    .any(|window| window == edit_a_marker.as_bytes())
             );
             let edit_b = expected_workflow_file(EDIT_B_PATH, run).expect("edit B");
             assert_eq!(edit_b.windows(2).filter(|pair| *pair == b"\r\n").count(), 2);

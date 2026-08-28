@@ -241,7 +241,7 @@ use repository::{
     RepositoryIndex, RepositoryRoot, RunningLiteralSearchCancellation, SearchGeneration,
     start_project_search_with_disk_prefilter as start_configured_project_search,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use settings::{MultiCursorModifier, Settings as _};
 use sha2::{Digest as _, Sha256};
@@ -5447,7 +5447,11 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                                     }
                                 }
                             } else {
-                                extension_uninstall_armed = None;
+                                // Windows delivers key Release events; only a
+                                // real press cancels the pending uninstall.
+                                if pressed {
+                                    extension_uninstall_armed = None;
+                                }
                                 match picker.prompt.handle_key(key) {
                                     PromptAction::Changed => picker.refresh(),
                                     PromptAction::Next => picker.step(TabDirection::Next),
