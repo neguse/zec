@@ -1018,7 +1018,7 @@ mod tests {
         assert_eq!(invalid_image.image_protocol, TerminalImageProtocol::None);
 
         let overridden = detect(&[("TERM", "dumb"), ("ZEC_KEYBOARD_PROTOCOL", "kitty")]);
-        assert_eq!(overridden.keyboard, KeyboardProtocol::Kitty);
+        assert_eq!(overridden.keyboard, expected_kitty);
         assert!(!overridden.mouse_motion_requested);
         assert!(!overridden.focus_requested);
         assert!(!overridden.osc52_attempted);
