@@ -2873,12 +2873,12 @@ fn mouse_drag_multi_click_and_additive_selection_use_zed_ranges(directory: &Path
         screen.contains(READY) && !screen.contains("Worktree Trust")
     })?;
 
-    let (alpha_column, alpha_row) = session
+    let (stub_column, stub_row) = session
         .find_screen_text("alpha")
         .context("find drag selection start")?;
-    session.mouse_down(alpha_column, alpha_row, 0)?;
-    session.mouse_drag(alpha_column + 5, alpha_row, 0)?;
-    session.mouse_up(alpha_column + 5, alpha_row, 0)?;
+    session.mouse_down(stub_column, stub_row, 0)?;
+    session.mouse_drag(stub_column + 5, stub_row, 0)?;
+    session.mouse_up(stub_column + 5, stub_row, 0)?;
     session.paste("DRAG")?;
     session.wait_for_screen("mouse drag replaces selection", ACTION_TIMEOUT, |screen| {
         screen.contains("drag DRAG omega")
@@ -4003,7 +4003,7 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
         "[package]\nname = \"pty-trust\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
     )
     .context("write trust fixture manifest")?;
-    fs::write(source_dir.join("main.rs"), "fn main() { alpha_ }\n")
+    fs::write(source_dir.join("main.rs"), "fn main() { stub_ }\n")
         .context("write trust fixture source")?;
     fs::write(
         zed_dir.join("settings.json"),
@@ -4108,7 +4108,7 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
     )?;
     session.send(CTRL_PAGE_DOWN)?;
     session.wait_for_screen("Rust tab after trust", ACTION_TIMEOUT, |screen| {
-        screen.contains("2/2 settings.json [main.rs]") && screen.contains("fn main() { alpha_ }")
+        screen.contains("2/2 settings.json [main.rs]") && screen.contains("fn main() { stub_ }")
     })?;
     session.wait_for_screen("fixture inline diagnostic", ACTION_TIMEOUT, |screen| {
         screen.contains("deterministic fixture warning")
@@ -4202,7 +4202,7 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
     session.wait_for_screen(
         "completion after worktree trust",
         ACTION_TIMEOUT,
-        |screen| screen.contains("Completions") && screen.contains("alpha_completion"),
+        |screen| screen.contains("Completions") && screen.contains("stub_completion"),
     )?;
     session.send(b"\x1b")?;
     session.wait_for_screen("completion dismissed", ACTION_TIMEOUT, |screen| {

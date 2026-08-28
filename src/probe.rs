@@ -362,8 +362,8 @@ async fn lsp_failure_probe(
         "failure fixture buffer did not start from disk"
     );
     let marker_position = original_buffer
-        .find("alpha_")
-        .map(|offset| offset + "alpha_".len())
+        .find("stub_")
+        .map(|offset| offset + "stub_".len())
         .unwrap_or(0);
 
     let initially_ready = wait_for_rust_analyzer_ready(
@@ -886,11 +886,11 @@ async fn language_service_probe(
     };
 
     let text = buffer.read_with(cx, |buffer, _| buffer.text());
-    let marker = "alpha_";
+    let marker = "stub_";
     let position = text
         .find(marker)
         .map(|offset| offset + marker.len())
-        .context("language-service probe file must contain alpha_")?;
+        .context("language-service probe file must contain stub_")?;
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -1228,7 +1228,7 @@ async fn language_service_probe(
         &services.project,
         symbol_buffer_id,
         symbol_generation,
-        "alpha".to_owned(),
+        "stub".to_owned(),
         Some(root_path.to_path_buf()),
         event_sender.clone(),
         cx,
@@ -1322,7 +1322,7 @@ async fn language_service_probe(
         .editor_window
         .update(cx, |editor, _window, cx| editor.text(cx))?;
     let multibuffer_marker = multibuffer_text
-        .find("alpha_")
+        .find("stub_")
         .context("reference MultiBuffer omitted the fixture symbol")?;
     let multibuffer_prefix = &multibuffer_text[..multibuffer_marker];
     let multibuffer_row = multibuffer_prefix
@@ -1911,7 +1911,7 @@ async fn language_service_probe(
                         == rename_pending.plan.signature,
                     "contains_main": rename_preview_text.contains("src/main.rs"),
                     "contains_peer": rename_preview_text.contains("src/lib.rs"),
-                    "contains_old_text": rename_preview_text.contains("alpha_"),
+                    "contains_old_text": rename_preview_text.contains("stub_"),
                     "contains_new_text": rename_preview_text.contains("renamed_fixture"),
                     "rejected_contains_new_text": rejected_preview_text.contains("renamed_fixture"),
                     "rejection_unchanged": rename_rejection_unchanged,

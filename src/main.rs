@@ -141,7 +141,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     io::{self, IsTerminal as _, Read as _, Write as _},
     ops::Range,
     path::{Path, PathBuf},
@@ -21652,6 +21652,7 @@ fn duplicate_tab_for_split(
     })
 }
 
+#[cfg(test)]
 fn tab_status(tabs: &[DocumentTab], active: usize, cx: &gpui::AsyncApp) -> String {
     let multiple = tabs.len() > 1;
     let labels = tabs
@@ -22695,6 +22696,7 @@ fn run_update_command(command: update::UpdateCommand) -> Result<()> {
 mod tests {
     use super::*;
     use editor::MultiBufferOffset;
+    use std::ffi::OsString;
 
     #[test]
     fn resize_invalidation_clears_backend_and_forces_a_full_redraw() {

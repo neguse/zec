@@ -270,13 +270,13 @@ fn pty_language_workflow(
         e2e_support::SCREEN_TIMEOUT,
         |screen| {
             let contents = screen.contents();
-            contents.contains("Completions") && contents.contains("alpha_completion")
+            contents.contains("Completions") && contents.contains("stub_completion")
         },
     )?;
     let commit_mark = session.send_marked(ENTER)?;
-    session.wait_contains("completion commit", commit_mark, "alpha_completion()")?;
+    session.wait_contains("completion commit", commit_mark, "stub_completion()")?;
     let undo_mark = session.send_marked(CTRL_Z)?;
-    session.wait_contains("completion undo", undo_mark, "alpha_")?;
+    session.wait_contains("completion undo", undo_mark, "stub_")?;
 
     let hover_mark = session.send_marked(F2)?;
     session.wait_after(

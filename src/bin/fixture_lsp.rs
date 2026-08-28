@@ -224,7 +224,7 @@ fn main() -> Result<()> {
                 let value = if scenario == "large-payloads" {
                     "H".repeat(64 * 1024)
                 } else {
-                    "`alpha_completion: fn()`\n\nFixture hover with [docs](https://example.invalid/hover)."
+                    "`stub_completion: fn()`\n\nFixture hover with [docs](https://example.invalid/hover)."
                         .to_owned()
                 };
                 respond(
@@ -266,7 +266,7 @@ fn main() -> Result<()> {
                         uri.ends_with("/lib.rs").then(|| {
                             json!({
                                 "uri": uri,
-                                "range": alpha_range(text).unwrap_or_else(fixture_range)
+                                "range": stub_range(text).unwrap_or_else(fixture_range)
                             })
                         })
                     })
@@ -294,8 +294,8 @@ fn main() -> Result<()> {
                 log_path.as_deref(),
                 id,
                 json!({
-                    "range": alpha_range_for_request(&params, &documents),
-                    "placeholder": "alpha_"
+                    "range": stub_range_for_request(&params, &documents),
+                    "placeholder": "stub_"
                 }),
             )?,
             Some("textDocument/rename") => {
@@ -306,7 +306,7 @@ fn main() -> Result<()> {
                 let changes = documents
                     .iter()
                     .filter_map(|(uri, text)| {
-                        alpha_range(text).map(|range| {
+                        stub_range(text).map(|range| {
                             (
                                 uri.clone(),
                                 json!([{
@@ -335,7 +335,7 @@ fn main() -> Result<()> {
                     "edit": {
                         "changes": {
                             request_uri(&params).unwrap_or_default(): [{
-                                "range": alpha_range_for_request(&params, &documents),
+                                "range": stub_range_for_request(&params, &documents),
                                 "newText": "fixture_fixed"
                             }]
                         }
@@ -385,7 +385,7 @@ fn main() -> Result<()> {
                     log_path.as_deref(),
                     id,
                     json!([{
-                        "name": "alpha_completion",
+                        "name": "stub_completion",
                         "kind": 12,
                         "location": {
                             "uri": uri,
@@ -450,7 +450,7 @@ fn initialize_result() -> Value {
             "workspaceSymbolProvider": true
         },
         "serverInfo": {
-            "name": "zec-alpha-2-fixture",
+            "name": "zec-fixture-lsp",
             "version": "1.0.0"
         }
     })
@@ -461,17 +461,17 @@ fn completion_result() -> Value {
         "isIncomplete": false,
         "items": [
             {
-                "label": "alpha_completion",
+                "label": "stub_completion",
                 "kind": 3,
-                "detail": "fn alpha_completion()",
+                "detail": "fn stub_completion()",
                 "documentation": {
                     "kind": "markdown",
                     "value": "Fixture **completion** documentation."
                 },
-                "insertText": "alpha_completion()",
+                "insertText": "stub_completion()",
                 "insertTextFormat": 1,
                 "sortText": "001",
-                "data": { "fixture": "alpha" }
+                "data": { "fixture": "stub" }
             },
             {
                 "label": "beta_completion",
@@ -637,16 +637,16 @@ fn request_range(params: &Value) -> Value {
     json!({ "start": position, "end": position })
 }
 
-fn alpha_range_for_request(params: &Value, documents: &BTreeMap<String, String>) -> Value {
+fn stub_range_for_request(params: &Value, documents: &BTreeMap<String, String>) -> Value {
     request_uri(params)
         .and_then(|uri| documents.get(&uri))
-        .and_then(|text| alpha_range(text))
+        .and_then(|text| stub_range(text))
         .unwrap_or_else(|| request_range(params))
 }
 
-fn alpha_range(text: &str) -> Option<Value> {
-    let start = text.find("alpha_")?;
-    let end = start + "alpha_".len();
+fn stub_range(text: &str) -> Option<Value> {
+    let start = text.find("stub_")?;
+    let end = start + "stub_".len();
     let point = |offset: usize| {
         let prefix = &text[..offset];
         let line = prefix.bytes().filter(|byte| *byte == b'\n').count();

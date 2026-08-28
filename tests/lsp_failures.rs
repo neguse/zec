@@ -39,7 +39,7 @@ fn lsp_failure_matrix_preserves_editor_and_reaps_processes() {
 fn run_scenario(scenario: &str) {
     let mut probe_env = ProbeEnvironment::new("lsp-failure-fixture");
     let source = probe_env.source_dir.join("main.rs");
-    fs::write(&source, "fn main() { let _value = alpha_; }\n")
+    fs::write(&source, "fn main() { let _value = stub_; }\n")
         .expect("write failure fixture source");
     let (format_on_save, formatter) = if scenario == "formatter-error" {
         ("on", ",\n              \"formatter\": \"language_server\"")
@@ -190,7 +190,7 @@ fn run_scenario(scenario: &str) {
             );
             assert_eq!(
                 report["formatter_failure"]["disk"],
-                "fn main() { let _value = alpha_; }\n"
+                "fn main() { let _value = stub_; }\n"
             );
         }
         "huge-stderr" => {

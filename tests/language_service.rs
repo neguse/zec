@@ -28,11 +28,11 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     )
     .expect("write language fixture project settings");
     let source = probe_env.source_dir.join("main.rs");
-    fs::write(&source, "fn main() {\n    let _value = alpha_;\n}   \n")
+    fs::write(&source, "fn main() {\n    let _value = stub_;\n}   \n")
         .expect("write fixture Rust source");
     fs::write(
         probe_env.source_dir.join("lib.rs"),
-        "pub fn fixture_peer() {\n    let _peer = alpha_;\n}  \n",
+        "pub fn fixture_peer() {\n    let _peer = stub_;\n}  \n",
     )
     .expect("write fixture peer source");
     probe_env.install_fixture_server(Path::new(env!("CARGO_BIN_EXE_fixture_lsp")));
@@ -49,7 +49,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     assert_eq!(report["language"], "Rust");
     assert_eq!(report["servers"][0]["name"], "rust-analyzer");
     assert!(report["servers"][0]["process_id"].is_number());
-    assert_eq!(report["completions"][0]["new_text"], "alpha_completion()");
+    assert_eq!(report["completions"][0]["new_text"], "stub_completion()");
     assert_eq!(report["completions"][1]["new_text"], "beta_completion");
     assert_eq!(report["hover"][0]["kind"], "Markdown");
     assert!(
@@ -66,11 +66,11 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     );
     assert_eq!(
         report["terminal_completion"]["text_after_apply"],
-        "fn main() {\n    let _value = alpha_completion();\n}   \n"
+        "fn main() {\n    let _value = stub_completion();\n}   \n"
     );
     assert_eq!(
         report["terminal_completion"]["text_after_undo"],
-        "fn main() {\n    let _value = alpha_;\n}   \n"
+        "fn main() {\n    let _value = stub_;\n}   \n"
     );
     assert_eq!(report["terminal_hover"]["items"][0]["kind"], "Markdown");
     assert!(
@@ -134,7 +134,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
         report["terminal_locations"]["project_symbols"]["items"][0]["snippet"]
             .as_str()
             .expect("project symbol snippet")
-            .contains("alpha_completion")
+            .contains("stub_completion")
     );
     assert_eq!(report["semantic_navigation"]["cursor"]["row"], 0);
     assert_eq!(report["semantic_navigation"]["cursor"]["column"], 3);
@@ -168,7 +168,7 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     );
     assert_eq!(
         report["terminal_edits"]["rename"]["preparation"]["placeholder"],
-        "alpha_"
+        "stub_"
     );
     assert_eq!(
         report["terminal_edits"]["rename"]["preview"]["read_only"],
@@ -217,11 +217,11 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     );
     assert_eq!(
         report["terminal_edits"]["rename"]["main_after_undo"],
-        "fn main() {\n    let _value = alpha_;\n}   \n"
+        "fn main() {\n    let _value = stub_;\n}   \n"
     );
     assert_eq!(
         report["terminal_edits"]["rename"]["peer_after_undo"],
-        "pub fn fixture_peer() {\n    let _peer = alpha_;\n}  \n"
+        "pub fn fixture_peer() {\n    let _peer = stub_;\n}  \n"
     );
     assert_eq!(
         report["terminal_edits"]["rename"]["main_after_redo"],
@@ -239,16 +239,16 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
     );
     assert_eq!(
         report["terminal_edits"]["code_action"]["main_after_undo"],
-        "fn main() {\n    let _value = alpha_;\n}   \n"
+        "fn main() {\n    let _value = stub_;\n}   \n"
     );
     for format_scope in ["format_document", "format_range"] {
         assert_eq!(
             report["terminal_edits"][format_scope]["after"],
-            "fn main() {\n    let _value = alpha_;\n}\n"
+            "fn main() {\n    let _value = stub_;\n}\n"
         );
         assert_eq!(
             report["terminal_edits"][format_scope]["after_undo"],
-            "fn main() {\n    let _value = alpha_;\n}   \n"
+            "fn main() {\n    let _value = stub_;\n}   \n"
         );
         assert_eq!(
             report["terminal_edits"][format_scope]["undo_buffer_count"],

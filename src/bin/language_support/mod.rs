@@ -391,10 +391,10 @@ impl Fixture {
         fs::write(root.join(".gitignore"), "src/ignored.rs\n")?;
         let source = source_dir.join("main.rs");
         let peer = source_dir.join("lib.rs");
-        fs::write(&source, "fn main() {\n    let _value = alpha_;\n}   \n")?;
+        fs::write(&source, "fn main() {\n    let _value = stub_;\n}   \n")?;
         fs::write(
             &peer,
-            "pub fn fixture_peer() {\n    let _peer = alpha_;\n}  \n",
+            "pub fn fixture_peer() {\n    let _peer = stub_;\n}  \n",
         )?;
         fs::write(source_dir.join("unicode.rs"), "pub fn 日本語_🧪() {}\n")?;
         fs::write(source_dir.join("crlf.rs"), b"pub fn crlf() {}\r\n")?;
@@ -687,17 +687,17 @@ pub fn assert_language_report(report: &Value) -> Result<()> {
         "fixture language server is absent"
     );
     ensure!(
-        report["completions"][0]["new_text"] == "alpha_completion()"
+        report["completions"][0]["new_text"] == "stub_completion()"
             && report["completions"][1]["new_text"] == "beta_completion",
         "completion oracle differs"
     );
     ensure!(
         report["terminal_completion"]["text_after_apply"]
             .as_str()
-            .is_some_and(|text| text.contains("alpha_completion()"))
+            .is_some_and(|text| text.contains("stub_completion()"))
             && report["terminal_completion"]["text_after_undo"]
                 .as_str()
-                .is_some_and(|text| text.contains("alpha_")),
+                .is_some_and(|text| text.contains("stub_")),
         "completion transaction/undo oracle differs"
     );
     ensure!(
@@ -759,7 +759,7 @@ pub fn assert_language_report(report: &Value) -> Result<()> {
                 .is_some_and(|text| text.contains("fixture_fixed"))
             && report["terminal_edits"]["code_action"]["main_after_undo"]
                 .as_str()
-                .is_some_and(|text| text.contains("alpha_")),
+                .is_some_and(|text| text.contains("stub_")),
         "code action oracle differs"
     );
     for scope in ["format_document", "format_range"] {

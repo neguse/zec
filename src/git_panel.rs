@@ -143,13 +143,6 @@ impl GitPanelState {
         self.snapshot.entries.get(self.selected)
     }
 
-    pub(crate) fn has_unstaged(&self) -> bool {
-        self.snapshot
-            .entries
-            .iter()
-            .any(|entry| entry.section != GitSection::Staged)
-    }
-
     fn visible_window(&self, row_budget: usize) -> (usize, usize) {
         if self.snapshot.entries.is_empty() || row_budget == 0 {
             return (0, 0);

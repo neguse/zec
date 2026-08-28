@@ -175,7 +175,7 @@ fn run(arguments: language_support::RunArguments) -> Result<()> {
             e2e_support::SCREEN_TIMEOUT,
             |screen| {
                 let contents = screen.contents();
-                contents.contains("Completions") && contents.contains("alpha_completion")
+                contents.contains("Completions") && contents.contains("stub_completion")
             },
         )?;
         let dismiss = session.send_marked(ESC)?;
@@ -353,7 +353,7 @@ fn run(arguments: language_support::RunArguments) -> Result<()> {
                 contents.contains("Rename Symbol") && contents.contains("Enter preview")
             },
         )?;
-        for _ in 0.."alpha_".len() {
+        for _ in 0.."stub_".len() {
             session.send(BACKSPACE)?;
         }
         let new_name = format!("renamed_bench_{index:02}");

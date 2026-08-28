@@ -12,7 +12,7 @@ fn settings_keymap_and_format_on_save_reload_through_zed() {
     let config_dir = probe_env.user_config.clone();
 
     let source = probe_env.source_dir.join("main.rs");
-    fs::write(&source, "fn main() { let _value = alpha_; }   \n")
+    fs::write(&source, "fn main() { let _value = stub_; }   \n")
         .expect("write fixture Rust source");
     fs::write(
         probe_env.zed_dir.join("settings.json"),
