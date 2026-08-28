@@ -432,7 +432,7 @@ identity, all checksums, and target uniqueness, and only that file set goes
 to GitHub attestation and the release. OS signing/notarization is a
 separate boundary requiring private keys, and the absence of credentials is
 never treated as signed. The normative safety conditions live in
-[`beta-2.md`](beta-2.md).
+[`distribution.md`](distribution.md).
 
 ## Rich content and large files
 

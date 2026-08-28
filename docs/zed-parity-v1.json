@@ -1,198 +1,213 @@
 {
   "schema_version": 1,
   "zed_revision": "cef06d351bec10d0fb6176018ce8624e97baeb40",
-  "status_values": ["planned", "candidate", "verified"],
-  "delivery_modes": ["faithful", "terminal-adapted", "external-bridge"],
-  "milestones": ["alpha-1", "alpha-2", "alpha-3", "beta-1", "beta-2", "parity-1"],
+  "status_values": [
+    "planned",
+    "candidate",
+    "verified"
+  ],
+  "delivery_modes": [
+    "faithful",
+    "terminal-adapted",
+    "external-bridge"
+  ],
+  "areas": [
+    "repository",
+    "language",
+    "workspace",
+    "development-loop",
+    "distribution",
+    "ai-collaboration-media"
+  ],
   "capabilities": [
     {
       "id": "CORE_EDITING",
-      "milestone": "alpha-1",
+      "area": "repository",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-1.md"
+      "evidence": "docs/e2e-repository.md"
     },
     {
       "id": "FILE_LIFECYCLE",
-      "milestone": "alpha-1",
+      "area": "repository",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-1.md"
+      "evidence": "docs/e2e-repository.md"
     },
     {
       "id": "PROJECT_DISCOVERY_BASIC_SEARCH",
-      "milestone": "alpha-1",
+      "area": "repository",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-1.md"
+      "evidence": "docs/e2e-repository.md"
     },
     {
       "id": "TERMINAL_LIFECYCLE",
-      "milestone": "alpha-1",
+      "area": "repository",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-1.md"
+      "evidence": "docs/e2e-repository.md"
     },
     {
       "id": "PROJECT_SERVICE_GRAPH",
-      "milestone": "alpha-2",
+      "area": "language",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-2.md"
+      "evidence": "docs/e2e-language.md"
     },
     {
       "id": "COMMAND_PALETTE",
-      "milestone": "alpha-2",
+      "area": "language",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-2.md"
+      "evidence": "docs/e2e-language.md"
     },
     {
       "id": "LANGUAGE_INTELLIGENCE",
-      "milestone": "alpha-2",
+      "area": "language",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-2.md"
+      "evidence": "docs/e2e-language.md"
     },
     {
       "id": "LANGUAGE_MULTIBUFFER",
-      "milestone": "alpha-2",
+      "area": "language",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-2.md"
+      "evidence": "docs/e2e-language.md"
     },
     {
       "id": "SETTINGS_KEYMAP",
-      "milestone": "alpha-2",
+      "area": "language",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/beta-2.md"
+      "evidence": "docs/distribution.md"
     },
     {
       "id": "WORKSPACE_LAYOUT",
-      "milestone": "alpha-3",
+      "area": "workspace",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-3.md"
+      "evidence": "docs/e2e-workspace.md"
     },
     {
       "id": "PROJECT_PANEL_FILE_OPERATIONS",
-      "milestone": "alpha-3",
+      "area": "workspace",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-3.md"
+      "evidence": "docs/e2e-workspace.md"
     },
     {
       "id": "SEARCH_REPLACE_COMPLETE",
-      "milestone": "alpha-3",
+      "area": "workspace",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-3.md"
+      "evidence": "docs/e2e-workspace.md"
     },
     {
       "id": "ADVANCED_EDITOR_PRESENTATION",
-      "milestone": "alpha-3",
+      "area": "workspace",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-3.md"
+      "evidence": "docs/e2e-workspace.md"
     },
     {
       "id": "NAVIGATION_OUTLINE",
-      "milestone": "alpha-3",
+      "area": "workspace",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/alpha-3.md"
+      "evidence": "docs/e2e-workspace.md"
     },
     {
       "id": "GIT_WORKFLOW",
-      "milestone": "beta-1",
+      "area": "development-loop",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/beta-1.md"
+      "evidence": "docs/development-loop.md"
     },
     {
       "id": "TERMINAL_TASK_TEST",
-      "milestone": "beta-1",
+      "area": "development-loop",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/beta-1.md"
+      "evidence": "docs/development-loop.md"
     },
     {
       "id": "DEBUGGER_REPL",
-      "milestone": "beta-1",
+      "area": "development-loop",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/beta-1.md"
+      "evidence": "docs/development-loop.md"
     },
     {
       "id": "NOTEBOOK_INTERACTIVE",
-      "milestone": "beta-1",
+      "area": "development-loop",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/beta-1.md"
+      "evidence": "docs/development-loop.md"
     },
     {
       "id": "SESSION_CRASH_RECOVERY",
-      "milestone": "beta-1",
+      "area": "development-loop",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/alpha-3.md"
+      "evidence": "docs/e2e-workspace.md"
     },
     {
       "id": "EXTENSION_ECOSYSTEM",
-      "milestone": "beta-2",
+      "area": "distribution",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/beta-2.md"
+      "evidence": "docs/distribution.md"
     },
     {
       "id": "RICH_CONTENT",
-      "milestone": "beta-2",
+      "area": "distribution",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/beta-2.md"
+      "evidence": "docs/distribution.md"
     },
     {
       "id": "LARGE_FILE_PATH",
-      "milestone": "beta-2",
+      "area": "distribution",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/beta-2.md"
+      "evidence": "docs/distribution.md"
     },
     {
       "id": "PACKAGE_UPDATE_PLATFORM",
-      "milestone": "beta-2",
+      "area": "distribution",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/beta-2.md"
+      "evidence": "docs/distribution.md"
     },
     {
       "id": "REMOTE_DEVELOPMENT",
-      "milestone": "beta-2",
+      "area": "distribution",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/beta-2.md"
+      "evidence": "docs/distribution.md"
     },
     {
       "id": "AI_AGENT_ASSISTANCE",
-      "milestone": "parity-1",
+      "area": "ai-collaboration-media",
       "delivery": "terminal-adapted",
       "status": "candidate",
-      "evidence": "docs/parity-1.md"
+      "evidence": "docs/ai-collaboration-media.md"
     },
     {
       "id": "COLLABORATIVE_EDITING",
-      "milestone": "parity-1",
+      "area": "ai-collaboration-media",
       "delivery": "faithful",
       "status": "candidate",
-      "evidence": "docs/parity-1.md"
+      "evidence": "docs/ai-collaboration-media.md"
     },
     {
       "id": "COLLABORATION_MEDIA",
-      "milestone": "parity-1",
+      "area": "ai-collaboration-media",
       "delivery": "external-bridge",
       "status": "candidate",
-      "evidence": "docs/parity-1.md"
+      "evidence": "docs/ai-collaboration-media.md"
     }
   ]
 }

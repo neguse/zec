@@ -8,7 +8,7 @@ PoC graduation does not mean the editor gained features. It means the
 foundation of a TUI built on Zed's editing core reached the state of "does
 not destroy data, scales by design with document size, and can be verified
 and reproduced automatically". From that point on, the work is treated as
-alpha editor development rather than a feature PoC.
+sustained editor development rather than a feature PoC.
 
 The initial target is single-process execution on supported Linux
 terminals. Feature completeness — LSP, plugins, advanced mouse selection,
@@ -188,5 +188,5 @@ Measurements at graduation:
 5. Pass every gate in one verification and change the status to
    `Graduated` (done 2026-08-23).
 
-After graduation, feature development proceeds as the alpha editor while
+After graduation, feature development proceeds as the sustained editor while
 the graduation gates are maintained.

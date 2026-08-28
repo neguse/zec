@@ -1,28 +1,19 @@
-# Alpha 1 contract: repository editing loop
+# Repository e2e suite: the repository editing loop
 
-Contract status: Accepted (2026-08-23)
-
-Gate status is never stored; it derives from A6's candidate/promotion rules
-and the evidence checks. Only when a promotion `P` is an evidence-only
-direct child does `P` inherit the Single decision rule result of its parent
-candidate `C`.
-
-## Outcome
-
-Alpha 1 is the state where, on Linux, starting from `zec DIRECTORY` and
-without enumerating target files as CLI arguments in advance, one can
-complete file discovery inside the repository, project-wide search, editing
-multiple files, creating a new file, saving, exiting, restarting, and
-reopening.
+This contract defines what the repository editing loop promises: on Linux,
+starting from `zec DIRECTORY` and without enumerating target files as CLI
+arguments in advance, one can complete file discovery inside the
+repository, project-wide search, editing multiple files, creating a new
+file, saving, exiting, restarting, and reopening.
 
 Feature counts and human dogfooding hours play no part in the judgment.
 Only actual-binary PTY tests against a fixed fixture, an exact filesystem
-manifest, latency/RSS assertions, and GitHub-hosted CI exit status decide.
+manifest, latency/RSS assertions, and CI exit status decide.
 
-## Single decision rule
+## Verification commands
 
-Only a candidate commit where the following, run in order on a clean
-checkout, all exit 0 on the first attempt is eligible for promotion.
+The suite passes when the following, run in order on a clean checkout,
+all exit 0.
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
@@ -35,22 +26,21 @@ cargo test --locked --release --bin zec -- --test-threads=1
 cargo test --locked --release --test e2e_tui -- --test-threads=1
 timeout --signal=TERM --kill-after=5s 45m \
   ./target/release/e2e_repository --zec ./target/release/zec \
-  --repo . --assert --report target/alpha-1/acceptance.json
+  --repo . --assert --report target/e2e-repository/acceptance.json
 ./target/release/e2e_repository \
-  --verify-report target/alpha-1/acceptance.json
+  --verify-report target/e2e-repository/acceptance.json
 timeout --signal=TERM --kill-after=5s 20m \
   ./target/release/e2e_repository_bench --zec ./target/release/zec \
-  --assert --report target/alpha-1/benchmark.json
+  --assert --report target/e2e-repository/benchmark.json
 ./target/release/e2e_repository_bench \
-  --verify-report target/alpha-1/benchmark.json
+  --verify-report target/e2e-repository/benchmark.json
 ```
 
-The `Alpha 1 gate` job running the same commands on a GitHub-hosted
-`ubuntu-24.04` runner must also be `success`. The job timeout is 90 minutes
-with 0 retries. Command timeouts, test retries, manual checks, and reruns
-of known flakes do not count as Pass. The run linked from the graduation
-record must be a single uncancelled attempt, and any result other than
-`success` is Fail. A fix commit uses a new run.
+The `Repository acceptance` job of `.github/workflows/e2e.yml` runs the
+same acceptance and benchmark on a GitHub-hosted `ubuntu-24.04` runner on
+every push to main and uploads the verified reports. Command timeouts,
+test retries, manual checks, and reruns of known flakes do not count as
+Pass.
 
 ## Fixed test environment
 
@@ -60,7 +50,8 @@ record must be a single uncancelled attempt, and any result other than
 - locale / terminal: `C.UTF-8`, `TERM=xterm-256color`, 120x40 cells.
 - binary: the same commit's `zec` built with `--release`.
 - clock: `CLOCK_MONOTONIC` equivalent. Times are kept as integer
-  microseconds, and sample and warm-up counts are fixed per A4 metric.
+  microseconds, and sample and warm-up counts are fixed per benchmark
+  metric.
 - PTY parser: `vt100 0.16.2`, pinned by `Cargo.lock`.
 - repository fixture: generated from seed `0x5a45435f414c5048`. Excluding
   the root and `.git` internals: 10,000 entries (9,900 regular files, 96
@@ -69,16 +60,16 @@ record must be a single uncancelled attempt, and any result other than
 - The fixture includes space/Unicode paths, `.gitignore`d entries, binaries
   containing NUL, a control file outside the root, symlink aliases, and
   edit targets with UTF-8 BOM, CRLF, and no final newline.
-- Regular files edited in Alpha 1 are at most 10 MiB, and one display line
-  at most 64 KiB.
+- Regular files edited in this suite are at most 10 MiB, and one display
+  line at most 64 KiB.
 
 The fixture's normative inputs, queries, and expected results live in
-`tests/repository_fixture/spec-v1.json`. The manifest is JSONL ordered by relative
-path in UTF-8 bytes, each record fixed to `path`, `kind`, 4-digit octal
-`mode`, `size`, lowercase `content_sha256`, and `symlink_target`. mtime and
-inode are excluded, and each record and the file end with LF. The generator
-source SHA-256, spec SHA-256, and the before and expected-after manifest
-SHA-256 values are recorded in the report.
+`tests/repository_fixture/spec-v1.json`. The manifest is JSONL ordered by
+relative path in UTF-8 bytes, each record fixed to `path`, `kind`, 4-digit
+octal `mode`, `size`, lowercase `content_sha256`, and `symlink_target`.
+mtime and inode are excluded, and each record and the file end with LF.
+The generator source SHA-256, spec SHA-256, and the before and
+expected-after manifest SHA-256 values are recorded in the report.
 
 ## Normative oracles and timing
 
@@ -104,17 +95,16 @@ SHA-256 values are recorded in the report.
   exits non-zero.
 - An initial state missing a required binary/report/spec is Fail.
 
-## Gates
+## Required capabilities
 
-### A0. PoC regression
+### A0. Baseline regression
 
-The two release-profile test commands pass all 93 unit/headless tests and
-the 1 actual-binary PTY test of the existing PoC graduation.
-`tests/repository_fixture/poc-test-ids-v1.txt` pins the 94 baseline test ids, and the
-acceptance verifier confirms the current
-`cargo test --release -- --list` contains every id. Additional tests are
-allowed; losing an existing case to deletion, ignore, or filtering is
-Fail.
+The two release-profile test commands pass every unit/headless test and
+the actual-binary PTY tests. `tests/repository_fixture/poc-test-ids-v1.txt`
+pins the 94 baseline test ids, and the acceptance verifier confirms the
+current `cargo test --release -- --list` contains every id. Additional
+tests are allowed; losing an existing case to deletion, ignore, or
+filtering is Fail.
 
 ### A1. Directory root and file identity
 
@@ -283,37 +273,7 @@ TSTP/CONT scenarios run 20 times each. The report's required ids are the
 and `A5_{INT,QUIT,TERM,HUP,TSTP_CONT}_01..20`. Every id runs exactly once;
 a single missing, duplicated, or failed id fails report verification.
 
-### A6. CI evidence
-
-Pass judgment uses two commits — candidate and promotion — and creates no
-self-reference.
-
-1. On candidate commit `C`, complete the push-event `Alpha 1 gate` run `R`
-   with 0 retries. `R` uploads the acceptance/benchmark reports as
-   artifacts and its job conclusion is `success`.
-2. Promotion commit `P`, a direct child of `C`, adds only
-   `docs/alpha-1-evidence.json`, recording `C`'s full SHA, `R`'s run/job
-   URLs and ids, the run attempt, generator/spec/before/after manifest
-   SHA-256 values, report SHA-256 values, the existing test count, and
-   the acceptance case count 186.
-3. `P`'s `Alpha 1 evidence` job confirms via the GitHub API that
-   `R.head_sha == C`, `R.event == push`, `R.run_attempt == 1`, the gate
-   job conclusion is `success`, and artifact digests match. It also
-   confirms that the set of run ids with the same `workflow_id`,
-   `event == push`, and `head_sha == C` is exactly `[R.id]`, rejecting
-   redo runs under different ids.
-4. The same evidence job confirms `P^ == C`, that the changed paths in
-   `C..P` are only the evidence JSON, that acceptance is 186/186, and
-   that every benchmark assertion is true. It further confirms its own
-   `GITHUB_RUN_ATTEMPT == 1` and that the set of run ids with the same
-   `workflow_id`, `event == push`, and `head_sha == P` is only its own
-   id.
-
-Only a `success` `Alpha 1 evidence` job on the default branch is the
-canonical Pass. Document status, issue checklists, field dogfood reports,
-and in-progress workflow URLs play no part.
-
-## Explicit exclusions from the gate
+## Explicit exclusions from the suite
 
 - LSP, completion, diagnostics, go-to-definition, rename
 - file tree sidebar, Git UI, integrated terminal/task runner
@@ -327,30 +287,18 @@ and in-progress workflow URLs play no part.
 - files over 10 MiB, single display lines over 64 KiB, extreme
   all-matching queries
 
-This list defines the scope Alpha 1 does not measure; it is not an
+This list defines the scope the suite does not measure; it is not an
 additional subjective judgment.
 
 The non-atomic save path of the pinned Zed revision remains a known
-constraint. Save success in Alpha 1 extends to the point where Zed's save
-task completes write/close, dirty becomes false, and the expected disk
-bytes can be read. `fsync`, atomic rename, and power-loss durability are
-not required. Fixtures and dogfood targets are limited to clean
-Git-managed source trees.
+constraint. Save success extends to the point where Zed's save task
+completes write/close, dirty becomes false, and the expected disk bytes
+can be read. `fsync`, atomic rename, and power-loss durability are not
+required. Fixtures and dogfood targets are limited to clean Git-managed
+source trees.
 
 ## Non-normative implementation notes
 
 zec does not bypass Zed with its own text model or `std::fs` saves. The A0
-PoC regression gate maintains the existing editing authority boundary, but
+baseline regression maintains the existing editing authority boundary, but
 this implementation note itself is not a human Pass condition.
-
-1. Before implementing features, add the fixture generator, expected
-   manifests, and a failing `e2e_repository`.
-2. Unify directory root/file identity.
-3. Land quick-open, then project search on the same root model.
-4. Turn the exact multi-file/reopen scenario green.
-5. Close async cancellation, performance, and signal/job control.
-6. Turn the hosted `Alpha 1 gate` green in one attempt, then the
-   promotion evidence job green.
-
-The implementation order and the policy of not building other features
-first do not affect Pass/Fail.

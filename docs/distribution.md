@@ -1,16 +1,11 @@
-# Beta 2 contract: Ecosystem and Distribution
+# Ecosystem and distribution
 
-Contract status: Implemented candidate for extensions, themes, settings/keymaps, package assembly,
-updates, SSH remote development, rich content, and the large-file path; WSL/container still require
-native-platform evidence (2026-08-26)
-
-Beta 2 connects the console workspace to Zed's extension and configuration infrastructure and adds
+Ecosystem and distribution connect the console workspace to Zed's extension and configuration infrastructure and adds
 a reproducible, manifest-driven distribution path. Zed `ExtensionStore`, extension host,
 `ThemeRegistry`, `SettingsStore`, keymap loader, language-extension adapters, and Node runtime remain
 authoritative. zec owns the bounded terminal pickers, update CLI, and release-asset validation.
 
-These capabilities remain `candidate` until the default branch and a tagged release produce hosted
-evidence on all target platforms. A local fixture is not evidence that the public extension registry,
+A local fixture is not evidence that the public extension registry,
 codesigning, notarization, or an Internet update has succeeded.
 
 ## Outcome
@@ -95,7 +90,7 @@ codesigning, notarization, or an Internet update has succeeded.
 14. Image inputs are capped at 32 MiB and 100 million decoded pixels. Protocol payloads are bounded;
     Kitty images use explicit delete commands, while iTerm2/Sixel removal clears and fully redraws
     the alternate screen. Rich content never hides an authoritative trust or command overlay.
-15. The large-file gate observes the actual debug binary through a PTY, verifies first-frame
+15. The large-file case observes the actual debug binary through a PTY, verifies first-frame
     latency, navigation, rendering, disk persistence, process high-water memory, exit status, and
     exact terminal-mode restoration. A screen-only marker is not sufficient evidence of saving.
 
@@ -151,7 +146,7 @@ those require repository-held signing identities and a separate secret-backed si
 
 ## Machine evidence
 
-The local deterministic gate is:
+The local deterministic verification commands are:
 
 ```sh
 cargo fmt --all -- --check
@@ -172,7 +167,7 @@ ZEC_REQUIRE_REMOTE_SSH=1 cargo test --locked --test e2e_tui \
 python3 script/release-manifest self-test
 ```
 
-On 2026-08-26 the 245-test binary unit target, all three actual-binary update CLI cases, the Beta 2
+The binary unit target, all three actual-binary update CLI cases, the
 ecosystem, rich-content, large-file, and SSH PTY cases, and the release-manifest self-test passed
 locally. The ecosystem PTY case indexes a real installed theme
 extension, installs/rebuilds/uninstalls a development extension, applies and persists its theme,
@@ -187,7 +182,7 @@ fallback, Kitty graphics/deletion, direct image tabs, session restore, overlay p
 standalone image startup. The large-file case covers 100,000 lines, a 64 KiB line, edit/save, the
 1 GiB Linux `VmHWM` ceiling, and terminal restoration.
 
-## Remaining Beta 2 work
+## Remaining work
 
 - public-registry install/update and HTTPS update evidence in a controlled hosted environment;
 - Apple Developer ID signing/notarization and Windows Authenticode signing, if credentials are made
@@ -195,5 +190,4 @@ standalone image startup. The large-file case covers 100,000 lines, a 64 KiB lin
 - browser/media launch acceptance on every supported desktop platform;
 - WSL and Docker/Podman native-platform acceptance, reconnect/fault-injection coverage, and hosted
   exact-version remote-server download evidence;
-- memory-pressure and latency evidence on release builds, plus promotion of candidate capabilities
-  from immutable hosted artifacts.
+- memory-pressure and latency evidence on release builds.

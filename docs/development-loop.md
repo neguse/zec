@@ -1,14 +1,10 @@
-# Beta 1 contract: Local Development Loop
+# Local development loop
 
-Contract status: Implemented candidate for Git, integrated terminal, tasks, DAP debugger,
-debug console, and native Notebook (2026-08-28)
+The local development loop runs on the shared Terminal Workspace without creating parallel Git,
+process, task, or debugger models. Zed `GitStore`, `zed_terminal::Terminal`, `TaskInventory`,
+`DapStore`, and `DebugSession` remain authoritative. zec owns only terminal projection, focus
+routing, capability reporting, and bounded presentation history.
 
-Beta 1 brings the local development loop onto the shared Terminal Workspace without creating
-parallel Git, process, task, or debugger models. Zed `GitStore`, `zed_terminal::Terminal`,
-`TaskInventory`, `DapStore`, and `DebugSession` remain authoritative. zec owns only terminal
-projection, focus routing, capability reporting, and bounded presentation history.
-
-The parity ledger remains `candidate` until a default-branch hosted run records canonical evidence.
 Notebook has its own native-editor and kernel evidence; it is not inferred from the debug REPL.
 
 ## Outcome
@@ -84,7 +80,7 @@ opens the debug console, and `Esc` returns to the editor.
 
 ## Machine evidence
 
-The normal deterministic gate is:
+The deterministic verification commands are:
 
 ```sh
 cargo fmt --all -- --check
@@ -92,7 +88,7 @@ cargo test --locked --bin zec -- --test-threads=1
 cargo test --locked --test e2e_tui -- --test-threads=1
 ```
 
-`e2e_tui` contains three Beta 1 actual-binary scenarios:
+`e2e_tui` contains three development-loop actual-binary scenarios:
 
 - `terminal_git_and_tasks_run_through_the_actual_binary` exercises a real repository, Zed Git
   staging, an interactive integrated shell, task discovery/execution, task completion, and rerun.
@@ -105,15 +101,12 @@ cargo test --locked --test e2e_tui -- --test-threads=1
   restores the PTY.
 
 The GDB case first probes whether the environment permits tracing an inferior. A sandbox that
-denies `ptrace` reports a capability skip; it must not be counted as real-DAP evidence. On
-2026-08-28 the complete locked PTY target and binary unit target pass locally. Canonical CI installs
-GDB and sets
-`ZEC_REQUIRE_GDB_DAP=1`, which turns an unavailable adapter or denied `ptrace` capability into a hard
-failure instead of a skip.
+denies `ptrace` reports a capability skip; it must not be counted as real-DAP evidence. Canonical CI
+installs GDB and sets `ZEC_REQUIRE_GDB_DAP=1`, which turns an unavailable adapter or denied `ptrace`
+capability into a hard failure instead of a skip.
 
-## Remaining Beta 1 verification
+## Remaining verification
 
-- hosted artifact and evidence-only promotion for the candidate capabilities;
 - real kernels that produce new image/HTML/JSON display data, plus missing/crashing/remote and
   Windows kernel lifecycle cases;
 - broader adapter matrix and deterministic failure cases for missing binaries, malformed debug

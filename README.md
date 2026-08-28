@@ -25,18 +25,20 @@ verification records, and known constraints in
 parity is tracked in [docs/zed-parity.md](docs/zed-parity.md) and
 [docs/zed-parity-v1.json](docs/zed-parity-v1.json). The repository editing
 loop is governed by the machine-checked contract in
-[docs/alpha-1.md](docs/alpha-1.md), the project-backed language editing loop
-by [docs/alpha-2.md](docs/alpha-2.md), the terminal workspace by
-[docs/alpha-3.md](docs/alpha-3.md), the local development loop by
-[docs/beta-1.md](docs/beta-1.md), ecosystem and distribution by
-[docs/beta-2.md](docs/beta-2.md), and AI/collaboration/media by
-[docs/parity-1.md](docs/parity-1.md). Windows build requirements and
+[docs/e2e-repository.md](docs/e2e-repository.md), the project-backed
+language editing loop by [docs/e2e-language.md](docs/e2e-language.md), the
+terminal workspace by [docs/e2e-workspace.md](docs/e2e-workspace.md), the
+local development loop by
+[docs/development-loop.md](docs/development-loop.md), ecosystem and
+distribution by [docs/distribution.md](docs/distribution.md), and
+AI/collaboration/media by
+[docs/ai-collaboration-media.md](docs/ai-collaboration-media.md). Windows build requirements and
 verification coverage are recorded in [docs/windows.md](docs/windows.md).
 
 The everyday regression run, on top of unit and PTY tests, is this
-actual-binary integration set; see [docs/alpha-2.md](docs/alpha-2.md) for
-the full judgment procedure including the canonical 20-process acceptance
-run and the benchmark. Every push to main also runs the three e2e suites
+actual-binary integration set; see [docs/e2e-language.md](docs/e2e-language.md)
+for the full judgment procedure including the canonical 20-process
+acceptance run and the benchmark. Every push to main also runs the three e2e suites
 (repository, language, workspace) from one release build via
 `.github/workflows/e2e.yml`; `script/run-e2e-suites` reproduces that run
 locally.
@@ -188,7 +190,7 @@ Debugger panel, `Ctrl-F9` toggles a source breakpoint, `Ctrl-F5` /
 `Alt-Shift-F11` step over / in / out. The debug console on `Ctrl-Shift-R`
 (`:` while the panel is focused) evaluates adapter-native REPL commands.
 Ended sessions leave the operable set, but the last adapter output remains
-for post-mortems. See [docs/beta-1.md](docs/beta-1.md) for details and the
+for post-mortems. See [docs/development-loop.md](docs/development-loop.md) for details and the
 real-GDB acceptance run.
 
 `Ctrl-Shift-X` is the Zed ExtensionStore's all/installed/updates view.
@@ -197,7 +199,7 @@ development extension with an `extension.toml`, and `Enter` afterwards
 rebuilds it from source. `Ctrl-Alt-T` / `Ctrl-Alt-I` pick theme and icon
 theme including extension-provided ones; `Ctrl-,` / `Ctrl-Alt-,` open the
 real Zed settings and keymap files. `Ctrl-Alt-U` checks the update
-manifest. See [docs/beta-2.md](docs/beta-2.md) for CLI verification,
+manifest. See [docs/distribution.md](docs/distribution.md) for CLI verification,
 download, apply, and the release format.
 
 In a Markdown tab `Ctrl-Shift-V` opens the preview using Zed-compatible
@@ -265,7 +267,7 @@ Stream/error/Markdown outputs and metadata fallbacks of existing rich
 outputs are projected, and nbformat JSON saves through a normal Project
 Buffer. Splits share one Notebook authority, and no local Jupyter process
 group is left behind during restarts or at the final close. See
-[docs/parity-1.md](docs/parity-1.md) for details, constraints, and
+[docs/ai-collaboration-media.md](docs/ai-collaboration-media.md) for details, constraints, and
 actual-binary evidence.
 
 A headless smoke that checks insertion and undo against the Zed Editor

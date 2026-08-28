@@ -1,14 +1,9 @@
-# Parity 1 contract: AI, collaboration, media, and Notebook
+# AI, collaboration, media, and Notebook
 
-Contract status: Implemented candidate (2026-08-28)
-
-Parity 1 brings Zed's Agent/ACP/MCP, edit prediction, inline assistant, channels, channel notes,
+This area brings Zed's Agent/ACP/MCP, edit prediction, inline assistant, channels, channel notes,
 following, invitations, external voice/screen bridges, and native Notebook editor into the shared
 Terminal Workspace. The pinned Zed revision remains the domain authority; zec owns bounded terminal
 input, projection, focus routing, explicit permission prompts, and process cleanup.
-
-All four capabilities covered here are `candidate`, not `verified`. Promotion still requires a
-retry-free default-branch hosted run and the live-service/platform evidence described below.
 
 ## Outcome
 
@@ -98,7 +93,7 @@ after a desktop bridge is actually available; the capability flag alone does not
 
 ## Machine evidence
 
-The deterministic local gate is:
+The deterministic local verification commands are:
 
 ```sh
 cargo fmt --all -- --check
@@ -121,9 +116,8 @@ The Notebook scenario additionally proves trust gating, native kernelspec launch
 and image fallback projection, split authority sharing, nbformat persistence, failed-kernel output,
 clear-output persistence, restart cleanup, final process cleanup, raw mode, and terminal restoration.
 
-## Evidence still required for `verified`
+## Evidence still required
 
-- retry-free canonical hosted artifacts for the complete locked gate;
 - a live Zed account/channel round trip with two independently connected clients and concurrent
   channel-note edits/following, without the deterministic fixture;
 - real provider runs for each supported edit-prediction family and at least one native and one

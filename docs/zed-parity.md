@@ -1,9 +1,8 @@
 # Zed experience parity contract
 
-Status: Accepted (2026-08-26)
-
-Implementation coverage: all 27 registered capabilities are implemented candidates (2026-08-28).
-No capability is `verified` until the completion rule below is satisfied.
+Implementation coverage: all 27 registered capabilities are implemented
+candidates. No capability is `verified` until the completion rule below is
+satisfied.
 
 ## Goal
 
@@ -55,9 +54,8 @@ shown as successful.
 6. Network, process execution, extensions, agents, collaboration, and
    remote connections have permission boundaries with no silent
    elevation.
-7. Each milestone fully re-runs every earlier canonical suite.
-   Regressions caused by later features are never bypassed as known
-   constraints.
+7. Every push re-runs every canonical suite. Regressions caused by later
+   features are never bypassed as known constraints.
 
 ## Terminal Workspace primitives
 
@@ -74,44 +72,44 @@ The presentation types shared by later features are fixed as:
   hyperlink, focus events
 
 Existing single-purpose UIs — Quick Open, search, Save As — move onto the
-same reducer at the milestone that introduces the corresponding shared
-primitive. During migration, text and Zed state are still never
+same reducer together with the area that introduces the corresponding
+shared primitive. During migration, text and Zed state are still never
 duplicated into the primitives.
 
-## Milestones
+## Capability areas
 
-### Alpha 1: repository editing loop
+### Repository: the repository editing loop
 
 Guarantees file discovery, basic project search, multi-file editing,
-saving, and terminal lifecycle. The existing [`alpha-1.md`](alpha-1.md)
+saving, and terminal lifecycle. [`e2e-repository.md`](e2e-repository.md)
 is the normative contract.
 
-### Alpha 2: Project-backed language editing loop
+### Language: the project-backed language editing loop
 
 Completes the Zed Project, settings, command palette, LSP, completion,
 diagnostics, navigation, code actions, rename, formatting, and
 language-oriented MultiBuffers from the console. The normative contract
-is [`alpha-2.md`](alpha-2.md).
+is [`e2e-language.md`](e2e-language.md).
 
-### Alpha 3: terminal workspace
+### Workspace: the Terminal Workspace
 
 Integrates panes/docks, the project panel, outline, breadcrumbs, complete
 project search/replace, navigation history, advanced editing, and session
 restore onto the shared Terminal Workspace. The normative contract is
-[`alpha-3.md`](alpha-3.md). Implementation and the local shortened
-actual-binary suite are complete; fixed-scale hosted evidence is pending.
+[`e2e-workspace.md`](e2e-workspace.md).
 
-### Beta 1: local development loop
+### Development loop
 
 Guarantees Git, the integrated terminal, tasks/tests, the DAP debugger,
 REPL/notebook, and crash recovery. Git, terminal, tasks, the DAP
-debugger, the debug console, the native Zed Notebook, and the
-session/crash recovery inherited from Alpha 3 are implemented candidates;
-[`beta-1.md`](beta-1.md) defines the contract and local machine evidence.
+debugger, the debug console, the native Zed Notebook, and workspace
+session/crash recovery are implemented candidates;
+[`development-loop.md`](development-loop.md) defines the contract and
+local machine evidence.
 Notebook has independent actual-binary kernel evidence and is not
 inferred from the completion of the debug console.
 
-### Beta 2: ecosystem and remote
+### Distribution: ecosystem and remote
 
 Guarantees extensions, themes, the full keymap, package/update, the
 large-file path, rich content, SSH/WSL/dev-container, and
@@ -121,13 +119,13 @@ settings/keymap, manifest-verified updates, 6-target release assembly,
 and the SSH remote workspace over Zed's remote protocol are implemented
 candidates; Markdown preview, image protocols/fallbacks,
 image tabs/sessions, and the 100k-line / 64 KiB-line large-file path are
-implemented candidates as well. [`beta-2.md`](beta-2.md) defines the
-contract and local machine evidence. Hosted proof against the public
+implemented candidates as well. [`distribution.md`](distribution.md)
+defines the contract and local machine evidence. Hosted proof against the public
 registry, OS signing, and native-platform proof for WSL/containers remain
 incomplete and must not be inferred from the mere existence of the
 distribution workflow or the SSH proof.
 
-### Parity 1: AI and collaboration
+### AI, collaboration, and media
 
 Zed Agent, external ACP agents, MCP, skills/instructions, edit
 prediction, the inline assistant, channels, following, and channel notes
@@ -135,7 +133,8 @@ are integrated. Voice and screen share are `external-bridge`: explicit
 confirmation, capability detection, start/stop/error, and process
 collection are operated from zec. Implementation, authority, safety
 conditions, and actual-binary evidence take
-[`parity-1.md`](parity-1.md) as the normative contract.
+[`ai-collaboration-media.md`](ai-collaboration-media.md) as the normative
+contract.
 
 AI, co-editing, and media are implemented candidates. Two-client
 simultaneous editing on a live Zed channel, each provider,

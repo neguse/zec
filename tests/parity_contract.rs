@@ -38,14 +38,14 @@ struct Contract {
     zed_revision: String,
     status_values: Vec<String>,
     delivery_modes: Vec<String>,
-    milestones: Vec<String>,
+    areas: Vec<String>,
     capabilities: Vec<Capability>,
 }
 
 #[derive(Deserialize)]
 struct Capability {
     id: String,
-    milestone: String,
+    area: String,
     delivery: String,
     status: String,
     evidence: String,
@@ -66,9 +66,14 @@ fn parity_contract_is_complete_consistent_and_pinned() {
         ["faithful", "terminal-adapted", "external-bridge"]
     );
     assert_eq!(
-        contract.milestones,
+        contract.areas,
         [
-            "alpha-1", "alpha-2", "alpha-3", "beta-1", "beta-2", "parity-1"
+            "repository",
+            "language",
+            "workspace",
+            "development-loop",
+            "distribution",
+            "ai-collaboration-media"
         ]
     );
 
@@ -93,8 +98,8 @@ fn parity_contract_is_complete_consistent_and_pinned() {
 
     for capability in &contract.capabilities {
         assert!(
-            contract.milestones.contains(&capability.milestone),
-            "unknown milestone for {}",
+            contract.areas.contains(&capability.area),
+            "unknown area for {}",
             capability.id
         );
         assert!(
@@ -128,11 +133,11 @@ fn parity_contract_is_complete_consistent_and_pinned() {
             .capabilities
             .iter()
             .find(|capability| capability.id == id)
-            .unwrap_or_else(|| panic!("missing Beta 2 capability {id}"));
-        assert_eq!(capability.status, "candidate", "{id} lost Beta 2 status");
+            .unwrap_or_else(|| panic!("missing distribution capability {id}"));
+        assert_eq!(capability.status, "candidate", "{id} lost candidate status");
         assert_eq!(
-            capability.evidence, "docs/beta-2.md",
-            "{id} must use the normative Beta 2 evidence"
+            capability.evidence, "docs/distribution.md",
+            "{id} must use the normative distribution evidence"
         );
     }
 
@@ -142,7 +147,7 @@ fn parity_contract_is_complete_consistent_and_pinned() {
         .find(|capability| capability.id == "NOTEBOOK_INTERACTIVE")
         .expect("missing Notebook capability");
     assert_eq!(notebook.status, "candidate");
-    assert_eq!(notebook.evidence, "docs/beta-1.md");
+    assert_eq!(notebook.evidence, "docs/development-loop.md");
 
     for id in [
         "AI_AGENT_ASSISTANCE",
@@ -153,14 +158,14 @@ fn parity_contract_is_complete_consistent_and_pinned() {
             .capabilities
             .iter()
             .find(|capability| capability.id == id)
-            .unwrap_or_else(|| panic!("missing Parity 1 capability {id}"));
+            .unwrap_or_else(|| panic!("missing AI/collaboration capability {id}"));
         assert_eq!(
             capability.status, "candidate",
-            "{id} lost its implemented Parity 1 status"
+            "{id} lost its implemented candidate status"
         );
         assert_eq!(
-            capability.evidence, "docs/parity-1.md",
-            "{id} must use the normative Parity 1 evidence"
+            capability.evidence, "docs/ai-collaboration-media.md",
+            "{id} must use the normative AI/collaboration evidence"
         );
     }
     assert!(

@@ -1,32 +1,13 @@
-# Alpha 3 contract: Terminal Workspace
+# Workspace e2e suite: the Terminal Workspace
 
-Contract status: Implemented candidate; hosted evidence pending (2026-08-26)
+This contract defines what the Terminal Workspace promises: the
+single-pane event loop grew into a Terminal Workspace that centrally
+manages panes, tabs, docks, panels, overlays, focus, and navigation
+history. Zed's Buffer, Editor, Project, and MultiBuffer remain the
+authorities; the terminal side owns only layout and presentation.
 
-Alpha 3 migrates the single-pane event loop of Alpha 2 into a Terminal
-Workspace that centrally manages panes, tabs, docks, panels, overlays,
-focus, and navigation history. Zed's Buffer, Editor, Project, and
-MultiBuffer remain the authorities; the terminal side owns only layout and
-presentation.
-
-Until a hosted candidate and its evidence-only direct child satisfy the
-case ids, sample counts, limits, and artifact rules in this document, the
-Alpha 3 capabilities in the parity ledger stay at `candidate`.
-
-The implemented candidate includes `e2e_workspace`, `e2e_workspace_bench`,
-the four named integration targets, the prior-stage regression runner, the
-artifact/evidence verifiers, and the `Alpha 3` workflow. The development
-1-run actual-binary PTY matrix passes 19/19 and the reduced performance
-matrix completes all 7 metrics. Reports produced with
-`ZEC_E2E_DEV_RUNS` / `ZEC_E2E_DEV_SAMPLES`, however, are rejected by the
-verifier as canonical evidence. Promotion from `candidate` to `verified`
-requires running the 361 cases and the fixed-scale benchmark exactly as
-this document specifies — with no environment-variable shortening — on a
-hosted runner, and verifying the promotion commit.
-
-## Outcome
-
-Alpha 3 is the state where a fresh repository opened with `zec DIRECTORY`
-can complete, from the console alone:
+A fresh repository opened with `zec DIRECTORY` can complete, from the
+console alone:
 
 - horizontal/vertical pane splits, directional focus, item movement, ratio
   changes, and tab preview/pin/reorder
@@ -44,12 +25,11 @@ can complete, from the console alone:
 - terminal capability detection with explicit fallbacks for
   indistinguishable key/mouse/focus events
 
-## Single decision rule
+## Verification commands
 
-The candidate must run the following once, in order, on a clean checkout
-of a GitHub-hosted Ubuntu 24.04 x86_64 runner, with everything exiting 0.
-Retries, case filters, sample exclusion, and manual-inspection substitutes
-for Pass are not recognized.
+The suite passes when the following, run in order on a clean checkout,
+all exit 0. Retries, case filters, sample exclusion, and
+manual-inspection substitutes for Pass are not recognized.
 
 ```sh
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TERM=xterm-256color
@@ -63,39 +43,35 @@ cargo test --locked --release --features e2e-linux \
   --test workspace_layout --test project_panel \
   --test workspace_search --test workspace_sessions -- --test-threads=1
 cargo build --locked --release --features e2e-linux \
-  --bin zec --bin e2e_repository --bin e2e_repository_bench \
-  --bin fixture_lsp --bin e2e_language --bin e2e_language_bench \
-  --bin e2e_workspace --bin e2e_workspace_bench
-./script/run-alpha-1-and-2-gates target/alpha-3/regression
+  --bin zec --bin e2e_workspace --bin e2e_workspace_bench
 timeout --signal=TERM --kill-after=5s 60m \
   ./target/release/e2e_workspace --zec ./target/release/zec \
-  --assert --report target/alpha-3/acceptance.json
+  --assert --report target/e2e-workspace/acceptance.json
 ./target/release/e2e_workspace \
-  --verify-report target/alpha-3/acceptance.json
+  --verify-report target/e2e-workspace/acceptance.json
 timeout --signal=TERM --kill-after=5s 20m \
   ./target/release/e2e_workspace_bench --zec ./target/release/zec \
-  --assert --report target/alpha-3/benchmark.json
+  --assert --report target/e2e-workspace/benchmark.json
 ./target/release/e2e_workspace_bench \
-  --verify-report target/alpha-3/benchmark.json
-(cd target/alpha-3 && find . -type f ! -name SHA256SUMS -print0 \
-  | sort -z | xargs -0 sha256sum > SHA256SUMS)
-./script/verify-alpha-3-artifact target/alpha-3
+  --verify-report target/e2e-workspace/benchmark.json
 ```
 
-If even one binary, script, report, case, or artifact is missing, the
-result is Fail. This block must not be replaced with shortened
-work-in-progress commands.
+The `Workspace acceptance` job of `.github/workflows/e2e.yml` runs the
+same acceptance and benchmark on a GitHub-hosted `ubuntu-24.04` runner on
+every push to main and uploads the verified reports;
+`script/run-e2e-suites` reproduces the full three-suite run locally. If
+even one binary, script, report, or case is missing, the result is Fail.
+This block must not be replaced with shortened work-in-progress commands.
+Reports produced with `ZEC_E2E_DEV_RUNS` / `ZEC_E2E_DEV_SAMPLES` are
+rejected by the verifier as canonical evidence.
 
-## C0. Prior milestone regression and ledger
+## C0. Cross-suite regression and ledger
 
-- Re-run Alpha 1's 186 acceptance cases, its benchmark, and the 94 PoC
-  ids with the same zec binary.
-- Re-run Alpha 2's 341 acceptance cases, its benchmark, and the 34+5
-  embedded evidence files with the same zec binary.
-- Verify the Alpha 1/2 canonical evidence files and advance the earlier
-  capabilities to `verified` in the ledger.
-- Pin the Zed revision, capability ids, delivery modes, milestones, and
-  evidence paths with the parity test.
+- Run the repository and language e2e suites' acceptance and benchmarks
+  with the same zec binary (the `e2e` workflow does this in its sibling
+  jobs from the same build).
+- Pin the Zed revision, capability ids, delivery modes, and evidence
+  paths with the parity test.
 
 ## C1. One Terminal Workspace authority
 
@@ -160,8 +136,7 @@ as authority.
 
 ## C4. Complete project search and replace
 
-The existing literal/case-sensitive search extends to Zed search query
-semantics.
+The literal/case-sensitive search extends to Zed search query semantics.
 
 - Literal/regex, case-sensitive, whole-word, include glob, exclude glob,
   and open-buffer-only toggle freely.
@@ -304,45 +279,10 @@ measured with a regex that scans 10,000 files and matches exactly one;
 the capacity scenario verifies, in a separate actual-binary process, the
 completion of `1/10000` and the MultiBuffer built from all its results.
 
-## C10. Hosted evidence
+## Explicit exclusions from the suite
 
-The same candidate `C` / promotion `P` rules as Alpha 1/2.
-
-1. The `Alpha 3 gate` on `C` pushed to the default branch succeeds at run
-   attempt 1 with 0 retries.
-2. The 4 regression reports, Alpha 3 acceptance/benchmark, and the
-   PTY/event/session/manifests are stored in one artifact.
-3. `P` is a direct child of `C` adding only `docs/alpha-3-evidence.json`.
-4. The evidence job reads back run/job/artifact uniqueness, SHA, event,
-   attempt, conclusion, and digests from the GitHub API.
-5. The downloaded artifact is re-verified with `verify-alpha-3-artifact`,
-   and only the evidence job's success on the default branch is Pass.
-
-The artifact has this self-contained layout:
-
-```text
-alpha-3/
-  acceptance.json
-  acceptance-artifacts/{event-trace,manifest,session-trace}.json
-  benchmark.json
-  benchmark-artifacts/{latency-trace,memory-observations,session-generation,workload-manifest}.json
-  regression/alpha-2/
-    acceptance.json
-    benchmark.json
-    alpha-1/{acceptance,benchmark}.json
-    ... Alpha 1/2 embedded evidence and SHA256SUMS
-  SHA256SUMS
-```
-
-The root verifier recomputes size/SHA-256 of every embedded file, the
-order of the 361 cases, the 860 benchmark correlation ids, nearest-rank
-statistics, and agreement of every binary digest, and has the nested
-Alpha 2 verifier re-verify the prior-stage artifact.
-
-## Explicit exclusions from Alpha 3 gate
-
-The following are not excluded from parity scope; they move to later
-milestones.
+The following are not excluded from parity scope; they are measured by
+the other suites and the TUI acceptance scenarios.
 
 - Git staging/commit/branch/remote UI, integrated terminal, tasks/tests
 - DAP debugger, REPL/notebook, process/session recovery
