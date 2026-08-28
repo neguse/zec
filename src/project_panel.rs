@@ -657,14 +657,6 @@ pub(crate) fn plan_mutation(
     }
     if let Some(target_relative) = target_relative {
         let target_path = canonical_root.join(target_relative);
-        match fs::symlink_metadata(&target_path) {
-            Ok(_) => bail!("project mutation target already exists"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("inspect mutation target {}", target_path.display()));
-            }
-        }
         let parent = target_path
             .parent()
             .context("project mutation target has no parent")?;
@@ -678,16 +670,26 @@ pub(crate) fn plan_mutation(
             .file_name()
             .context("project mutation target has no filename")?;
         let folded_target = target_name.to_string_lossy().to_lowercase();
+        // The parent listing distinguishes an exact-name hit from a
+        // case-folded one; a plain lstat cannot on case-insensitive
+        // filesystems, where a folded match also resolves.
+        let mut case_fold_collision = false;
         for entry in fs::read_dir(parent)
             .with_context(|| format!("read mutation target parent {}", parent.display()))?
         {
             let entry = entry.context("read mutation target sibling")?;
             let name = entry.file_name();
-            ensure!(
-                name.to_string_lossy().to_lowercase() != folded_target,
-                "project mutation target has a case-fold collision"
-            );
+            if name == target_name {
+                bail!("project mutation target already exists");
+            }
+            if name.to_string_lossy().to_lowercase() == folded_target {
+                case_fold_collision = true;
+            }
         }
+        ensure!(
+            !case_fold_collision,
+            "project mutation target has a case-fold collision"
+        );
     }
     validate_mutation_shape(kind, source_relative, target_relative)?;
     Ok(MutationPlan {

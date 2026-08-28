@@ -22,6 +22,7 @@ PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](doc
 local development loopは[docs/beta-1.md](docs/beta-1.md)、ecosystemと配布は
 [docs/beta-2.md](docs/beta-2.md)、AI/collaboration/mediaは
 [docs/parity-1.md](docs/parity-1.md)の機械判定contractで管理します。
+Windowsのビルド要件と検証範囲は[docs/windows.md](docs/windows.md)に記録します。
 
 Alpha 2の通常回帰は、unit/PTYに加えて次のactual-binary integration testで確認できます。
 canonicalな20-process acceptanceとbenchmark、Alpha 1再検証、evidence-only promotionを含む完全な

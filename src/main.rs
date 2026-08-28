@@ -3093,6 +3093,7 @@ impl ActiveSearch {
 }
 
 fn main() -> Result<()> {
+    apply_data_dir_override()?;
     match parse_command(env::args_os().skip(1))? {
         Command::Edit(paths) => run_interactive(paths),
         Command::Remote(request) => run_remote_interactive(request),
@@ -3112,6 +3113,20 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Redirects every Zed-side user directory (config, data, logs, databases)
+/// under `$ZEC_DATA_DIR` before anything resolves them. This is the one
+/// isolation mechanism that behaves identically on every platform; the XDG
+/// variables only cover Unix.
+fn apply_data_dir_override() -> Result<()> {
+    if let Some(directory) = env::var_os("ZEC_DATA_DIR") {
+        let directory = directory
+            .to_str()
+            .context("ZEC_DATA_DIR must be valid UTF-8")?;
+        paths::set_custom_data_dir(directory);
+    }
+    Ok(())
 }
 
 fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Command> {
@@ -7902,13 +7917,21 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                             let handled = active_terminal.update(cx, |terminal, _cx| {
                                 terminal.try_keystroke(&keystroke, false)
                             });
-                            if !handled {
+                            if handled {
+                                message = None;
+                            } else if let Some(text) = keystroke.key_char.as_deref() {
+                                // to_esc_str only covers special keys; Zed
+                                // delivers printable input through the editor
+                                // InputHandler, which this path stands in for.
+                                let bytes = text.as_bytes().to_vec();
+                                active_terminal
+                                    .update(cx, |terminal, _cx| terminal.input(bytes));
+                                message = None;
+                            } else {
                                 message = Some(format!(
                                     "terminal did not map key {}",
                                     keystroke.key
                                 ));
-                            } else {
-                                message = None;
                             }
                         }
                     }
@@ -8686,7 +8709,7 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                                     Some(relative) => match panel.reveal_path(relative) {
                                         Ok(_) => message = Some(format!(
                                             "revealed {}",
-                                            relative.display()
+                                            worktree_path_label(relative)
                                         )),
                                         Err(error) => message = Some(format!(
                                             "reveal active file failed: {error:#}"
@@ -13027,6 +13050,28 @@ struct RestoredWorkspace {
     notices: Vec<String>,
 }
 
+#[cfg(unix)]
+fn default_state_home() -> Result<PathBuf> {
+    env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join(".local/state"))
+        })
+        .context("workspace sessions require XDG_STATE_HOME or HOME")
+}
+
+#[cfg(windows)]
+fn default_state_home() -> Result<PathBuf> {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .context("workspace sessions require LOCALAPPDATA")
+}
+
 fn workspace_session_store_and_key(
     repository: Option<&RepositorySession>,
 ) -> Result<Option<(SessionStore, String)>> {
@@ -13043,18 +13088,13 @@ fn workspace_session_store_and_key(
     };
     let directory = if let Some(directory) = env::var_os("ZEC_SESSION_DIR") {
         std::path::absolute(PathBuf::from(directory)).context("make ZEC_SESSION_DIR absolute")?
+    } else if let Some(data_dir) = env::var_os("ZEC_DATA_DIR") {
+        std::path::absolute(PathBuf::from(data_dir))
+            .context("make ZEC_DATA_DIR absolute")?
+            .join("state")
+            .join("workspaces")
     } else {
-        let state_home = env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| {
-                env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .map(|home| home.join(".local/state"))
-            })
-            .context("workspace sessions require XDG_STATE_HOME or HOME")?;
-        state_home.join("zec/workspaces")
+        default_state_home()?.join("zec").join("workspaces")
     };
     let encoded_repository = serde_json::to_vec(&(
         repository.remote_identity.as_deref(),
@@ -16217,11 +16257,17 @@ fn diagnostic_severity_rank(severity: &str) -> u8 {
     }
 }
 
+/// Worktree-relative paths render with forward slashes on every platform,
+/// matching how Zed presents them.
+fn worktree_path_label(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn diagnostic_label(path: &Path, root: Option<&Path>) -> String {
-    root.and_then(|root| path.strip_prefix(root).ok())
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    match root.and_then(|root| path.strip_prefix(root).ok()) {
+        Some(relative) => worktree_path_label(relative),
+        None => path.display().to_string(),
+    }
 }
 
 fn diagnostic_presentations(
@@ -16878,12 +16924,7 @@ async fn create_rename_preview_tab(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let path_label = |path: &Path| {
-        path.strip_prefix(&workspace_root)
-            .unwrap_or(path)
-            .display()
-            .to_string()
-    };
+    let path_label = |path: &Path| diagnostic_label(path, Some(&workspace_root));
     let mut preview_documents = Vec::with_capacity(plan.operations.len());
     for operation in &plan.operations {
         let preview = match operation {
@@ -24284,11 +24325,11 @@ async fn alpha_2_language_service_probe(
                 changed_multibuffer_path.display()
             )
         })?;
-    let multibuffer_changed_label = changed_multibuffer_path
-        .strip_prefix(root_path)
-        .unwrap_or(&changed_multibuffer_path)
-        .to_string_lossy()
-        .into_owned();
+    let multibuffer_changed_label = worktree_path_label(
+        changed_multibuffer_path
+            .strip_prefix(root_path)
+            .unwrap_or(&changed_multibuffer_path),
+    );
     probe_tabs.push(multibuffer_tab);
     cx.background_executor()
         .timer(Duration::from_millis(25))

@@ -16540,6 +16540,7 @@ dependencies = [
  "util",
  "vt100",
  "watch",
+ "windows-sys 0.60.2",
  "workspace",
  "worktree",
  "zed_actions",

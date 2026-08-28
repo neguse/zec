@@ -13,7 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alpha_1_support::{CTRL_N, CTRL_Q, CTRL_W, DELETE, END, ENTER, ESC, PtySession};
+use alpha_1_support::{
+    CTRL_N, CTRL_Q, CTRL_W, DELETE, END, ENTER, ESC, PtySession, TerminalBaseline,
+};
 use alpha_2_support::{CaseResult, CorrelationTrace, EvidenceFile};
 use alpha_3_support::{
     CAPABILITY_PREFIXES, CONTRACT_VERSION, FAILURE_SCENARIOS, FRESH_PROCESS_RUNS, Fixture,
@@ -207,7 +209,7 @@ fn record_case(cases: &mut Vec<CaseResult>, id: &str, function: impl FnOnce() ->
     });
 }
 
-fn ready(fixture: &Fixture, zec: &Path) -> Result<(PtySession, nix::sys::termios::Termios)> {
+fn ready(fixture: &Fixture, zec: &Path) -> Result<(PtySession, TerminalBaseline)> {
     let (mut session, baseline) = fixture.spawn(zec)?;
     session.wait_ready("zec project", READY_SENTINEL)?;
     session.assert_raw(&baseline)?;
@@ -216,11 +218,7 @@ fn ready(fixture: &Fixture, zec: &Path) -> Result<(PtySession, nix::sys::termios
     Ok((session, baseline))
 }
 
-fn finish(
-    mut session: PtySession,
-    baseline: &nix::sys::termios::Termios,
-    dirty: bool,
-) -> Result<()> {
+fn finish(mut session: PtySession, baseline: &TerminalBaseline, dirty: bool) -> Result<()> {
     let mark = session.send_marked(CTRL_Q)?;
     if dirty {
         session.wait_contains("dirty quit guard", mark, "unsaved or deleted tab")?;

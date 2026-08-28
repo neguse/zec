@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     alpha_1_support::{
-        BinaryReport, EnvironmentReport, MetricReport, PtySession, binary_report,
+        BinaryReport, EnvironmentReport, MetricReport, PtySession, TerminalBaseline, binary_report,
         environment_report, read_report, statistics, verify_environment, write_report,
     },
     alpha_2_support::{CaseResult, CorrelationTrace, EvidenceFile},
@@ -284,7 +284,7 @@ impl Fixture {
             &source_directory,
             &locked,
             &outside,
-            &config.join("zed"),
+            &config.join("config"),
             &session,
             &temp.path().join("home"),
         ] {
@@ -325,7 +325,7 @@ impl Fixture {
         }
 
         fs::write(
-            config.join("zed/settings.json"),
+            config.join("config/settings.json"),
             r#"{
               "session": { "trust_all_worktrees": true },
               "format_on_save": "off",
@@ -334,8 +334,8 @@ impl Fixture {
               "show_completions_on_input": false
             }"#,
         )?;
-        fs::write(config.join("zed/global_settings.json"), "{}")?;
-        fs::write(config.join("zed/keymap.json"), "[]")?;
+        fs::write(config.join("config/global_settings.json"), "{}")?;
+        fs::write(config.join("config/keymap.json"), "[]")?;
 
         let environment = vec![
             (OsString::from("ZEC_DISABLE_SESSIONS"), OsString::from("0")),
@@ -367,7 +367,7 @@ impl Fixture {
             .collect()
     }
 
-    pub fn spawn(&self, zec: &Path) -> Result<(PtySession, nix::sys::termios::Termios)> {
+    pub fn spawn(&self, zec: &Path) -> Result<(PtySession, TerminalBaseline)> {
         self.spawn_with_extra(zec, &[])
     }
 
@@ -375,7 +375,7 @@ impl Fixture {
         &self,
         zec: &Path,
         extra: &[(&OsStr, &OsStr)],
-    ) -> Result<(PtySession, nix::sys::termios::Termios)> {
+    ) -> Result<(PtySession, TerminalBaseline)> {
         let arguments = [self.root.as_os_str(), self.source.as_os_str()];
         let mut environment = self.env_pairs();
         environment.extend_from_slice(extra);

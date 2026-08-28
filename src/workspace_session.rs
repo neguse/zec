@@ -1082,11 +1082,20 @@ fn create_private_new_file(path: &Path) -> Result<File> {
         .with_context(|| format!("create private temporary file {}", path.display()))
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("open directory {} for sync", path.display()))?
         .sync_all()
         .with_context(|| format!("sync directory {}", path.display()))
+}
+
+/// Windows cannot fsync a directory handle opened through `File::open`, and
+/// NTFS already journals the rename; file-level `sync_all` on the payload is
+/// the strongest durability available here.
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

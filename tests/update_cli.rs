@@ -1,8 +1,5 @@
-#![cfg(unix)]
-
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::{Command, Output},
 };
@@ -41,7 +38,7 @@ fn write_manifest_for_version(
                 "url": asset,
                 "sha256": sha256,
                 "size": size,
-                "executable": "zec"
+                "executable": format!("zec{}", std::env::consts::EXE_SUFFIX)
             }]
         }))?,
     )
@@ -59,21 +56,22 @@ fn write_manifest(directory: &Path, sha256: &str, size: usize) -> Result<std::pa
     )
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[test]
 fn actual_binary_checks_verifies_and_downloads_a_local_release() -> Result<()> {
     let temp = tempfile::tempdir().context("create update CLI fixture")?;
     let asset = temp.path().join("zec-asset");
-    let asset_bytes = format!(
-        "#!/bin/sh\nprintf '%s\\n' 'zec {}'\n",
-        env!("CARGO_PKG_VERSION")
-    );
-    fs::write(&asset, asset_bytes.as_bytes()).context("write fixture executable")?;
-    fs::set_permissions(&asset, fs::Permissions::from_mode(0o755))
-        .context("make fixture executable")?;
-    let digest = Sha256::digest(asset_bytes.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    // The asset must execute `--version` on every platform during download
+    // verification, so the actual zec binary is the release payload.
+    let asset_bytes = fs::read(env!("CARGO_BIN_EXE_zec")).context("read actual zec binary")?;
+    fs::write(&asset, &asset_bytes).context("write fixture executable")?;
+    let digest = sha256_hex(&asset_bytes);
     let manifest = write_manifest(temp.path(), &digest, asset_bytes.len())?;
 
     let version = run(&["--version".as_ref()])?;
@@ -131,7 +129,7 @@ fn actual_binary_checks_verifies_and_downloads_a_local_release() -> Result<()> {
     ensure!(
         serde_json::from_slice::<serde_json::Value>(&download.stdout)?["status"] == "downloaded"
     );
-    ensure!(fs::read(&downloaded)? == asset_bytes.as_bytes());
+    ensure!(fs::read(&downloaded)? == asset_bytes);
     ensure!(Command::new(&downloaded).arg("--version").output()?.stdout == expected_version_output);
 
     Ok(())
@@ -160,6 +158,8 @@ fn checksum_failure_never_materializes_an_output() -> Result<()> {
     Ok(())
 }
 
+/// Unix replaces the running executable atomically; Windows refuses by
+/// contract and leaves the installed binary untouched.
 #[test]
 fn actual_binary_atomically_applies_an_update_to_a_disposable_copy() -> Result<()> {
     let actual_binary = Path::new(env!("CARGO_BIN_EXE_zec"));
@@ -175,13 +175,14 @@ fn actual_binary_atomically_applies_an_update_to_a_disposable_copy() -> Result<(
 
     let candidate_name = "zec-next";
     let candidate = temp.path().join(candidate_name);
-    let candidate_bytes = format!("#!/bin/sh\nprintf '%s\\n' 'zec {next}'\n");
-    fs::write(&candidate, candidate_bytes.as_bytes()).context("write update candidate")?;
-    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))?;
-    let digest = Sha256::digest(candidate_bytes.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let candidate_bytes = candidate_payload(&next);
+    fs::write(&candidate, &candidate_bytes).context("write update candidate")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))?;
+    }
+    let digest = sha256_hex(&candidate_bytes);
     let manifest = write_manifest_for_version(
         temp.path(),
         &next.to_string(),
@@ -190,24 +191,60 @@ fn actual_binary_atomically_applies_an_update_to_a_disposable_copy() -> Result<(
         candidate_bytes.len(),
     )?;
 
-    let installed = temp.path().join("zec-under-test");
+    let installed = temp
+        .path()
+        .join(format!("zec-under-test{}", std::env::consts::EXE_SUFFIX));
     fs::copy(actual_binary, &installed).context("copy actual zec binary")?;
-    fs::set_permissions(&installed, fs::Permissions::from_mode(0o755))?;
+    let installed_bytes = fs::read(&installed)?;
     let applied = Command::new(&installed)
         .args(["update", "apply", "--manifest"])
         .arg(&manifest)
         .output()
         .context("apply update through disposable actual binary")?;
-    ensure!(
-        applied.status.success(),
-        "update apply failed: {}",
-        String::from_utf8_lossy(&applied.stderr)
-    );
-    ensure!(serde_json::from_slice::<serde_json::Value>(&applied.stdout)?["status"] == "updated");
-    ensure!(fs::read(&installed)? == candidate_bytes.as_bytes());
-    ensure!(
-        String::from_utf8(Command::new(&installed).arg("--version").output()?.stdout)?.trim()
-            == format!("zec {next}")
-    );
+    #[cfg(unix)]
+    {
+        ensure!(
+            applied.status.success(),
+            "update apply failed: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        ensure!(
+            serde_json::from_slice::<serde_json::Value>(&applied.stdout)?["status"] == "updated"
+        );
+        ensure!(fs::read(&installed)? == candidate_bytes);
+        ensure!(
+            String::from_utf8(Command::new(&installed).arg("--version").output()?.stdout)?.trim()
+                == format!("zec {next}")
+        );
+    }
+    #[cfg(windows)]
+    {
+        ensure!(
+            !applied.status.success(),
+            "Windows must refuse to replace a running executable"
+        );
+        ensure!(
+            String::from_utf8_lossy(&applied.stderr)
+                .contains("Windows cannot replace a running executable safely"),
+            "unexpected apply error: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        ensure!(fs::read(&installed)? == installed_bytes);
+    }
+    #[cfg(unix)]
+    let _ = installed_bytes;
     Ok(())
+}
+
+/// A candidate that prints `zec <version>` when executed. Windows never
+/// executes it (apply refuses first), so arbitrary bytes suffice there.
+fn candidate_payload(next: &semver::Version) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        format!("#!/bin/sh\nprintf '%s\\n' 'zec {next}'\n").into_bytes()
+    }
+    #[cfg(windows)]
+    {
+        format!("placeholder update candidate for zec {next}").into_bytes()
+    }
 }

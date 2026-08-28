@@ -4,12 +4,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs,
-    os::unix::fs::{PermissionsExt as _, symlink},
     path::{Path, PathBuf},
     process::{Command, Output},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 use crate::alpha_1_support::{
     BinaryReport, EnvironmentReport, MetricReport, binary_report, command_output_with_timeout,
@@ -151,9 +153,10 @@ impl GateBinary {
     fn collect(path: &Path, expected_name: &str) -> Result<Self> {
         let path = fs::canonicalize(path)
             .with_context(|| format!("canonicalize binary {}", path.display()))?;
+        let expected_file = format!("{expected_name}{}", std::env::consts::EXE_SUFFIX);
         ensure!(
-            path.file_name() == Some(OsStr::new(expected_name)),
-            "expected {expected_name}, found {}",
+            path.file_name() == Some(OsStr::new(&expected_file)),
+            "expected {expected_file}, found {}",
             path.display()
         );
         let bytes = fs::read(&path).with_context(|| format!("read binary {}", path.display()))?;
@@ -369,7 +372,7 @@ impl Fixture {
             &zed_dir,
             &bin_dir,
             &home,
-            &xdg_config.join("zed"),
+            &xdg_config.join("config"),
             &xdg_data,
             &xdg_cache,
             &xdg_state,
@@ -452,9 +455,9 @@ impl Fixture {
             ),
         };
         fs::write(zed_dir.join("settings.json"), project_settings)?;
-        fs::write(xdg_config.join("zed/settings.json"), user_settings)?;
+        fs::write(xdg_config.join("config/settings.json"), user_settings)?;
         fs::write(
-            xdg_config.join("zed/global_settings.json"),
+            xdg_config.join("config/global_settings.json"),
             if mode == FixtureMode::Settings {
                 r#"{
                   "tab_size": 2,
@@ -466,7 +469,7 @@ impl Fixture {
                 "{}"
             },
         )?;
-        fs::write(xdg_config.join("zed/keymap.json"), keymap)?;
+        fs::write(xdg_config.join("config/keymap.json"), keymap)?;
 
         let scenario = match mode {
             FixtureMode::Failure(scenario) => scenario,
@@ -475,27 +478,21 @@ impl Fixture {
         };
         match mode {
             FixtureMode::Failure("server-not-found") => {}
-            FixtureMode::Failure("spawn-failure") => {
-                let wrapper = bin_dir.join("rust-analyzer");
-                fs::write(
-                    &wrapper,
-                    "#!/bin/sh\nif [ \"${1:-}\" = \"--help\" ]; then\n  echo fixture\n  chmod 000 \"$0\"\n  exit 0\nfi\nexit 99\n",
-                )?;
-                make_executable(&wrapper)?;
-            }
-            _ => symlink(lsp, bin_dir.join("rust-analyzer"))
-                .context("link fixture language server as rust-analyzer")?,
+            FixtureMode::Failure("spawn-failure") => install_unspawnable_server(&bin_dir)?,
+            _ => install_fixture_server(lsp, &bin_dir)
+                .context("install fixture language server as rust-analyzer")?,
         }
-        let fake_rustup = bin_dir.join("rustup");
-        fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n")?;
-        make_executable(&fake_rustup)?;
+        install_failing_rustup(&bin_dir)?;
 
         let log = workspace.join("lsp.jsonl");
         let restart_state = workspace.join("restart-state");
-        let path = format!("{}:/usr/local/bin:/usr/bin:/bin", bin_dir.display());
         let environment = vec![
-            (OsString::from("PATH"), OsString::from(path)),
+            (OsString::from("PATH"), restricted_path(&bin_dir)?),
             (OsString::from("HOME"), home.into_os_string()),
+            (
+                OsString::from("ZEC_DATA_DIR"),
+                xdg_config.clone().into_os_string(),
+            ),
             (
                 OsString::from("XDG_CONFIG_HOME"),
                 xdg_config.clone().into_os_string(),
@@ -552,11 +549,90 @@ impl Fixture {
     }
 }
 
+#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions)?;
     Ok(())
+}
+
+/// Puts the fixture server on the restricted PATH under the name the Rust
+/// language adapter discovers.
+fn install_fixture_server(lsp: &Path, bin_dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        symlink(lsp, bin_dir.join("rust-analyzer"))?;
+    }
+    #[cfg(windows)]
+    {
+        // PATH discovery on Windows resolves rust-analyzer.exe; hard-link the
+        // fixture binary (copy across volumes) instead of symlinking, which
+        // needs privileges.
+        let target = bin_dir.join("rust-analyzer.exe");
+        if fs::hard_link(lsp, &target).is_err() {
+            fs::copy(lsp, &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Installs a rust-analyzer that passes discovery but cannot be spawned.
+fn install_unspawnable_server(bin_dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let wrapper = bin_dir.join("rust-analyzer");
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"--help\" ]; then\n  echo fixture\n  chmod 000 \"$0\"\n  exit 0\nfi\nexit 99\n",
+        )?;
+        make_executable(&wrapper)?;
+    }
+    #[cfg(windows)]
+    {
+        // An empty file is found by PATH discovery but CreateProcess rejects
+        // it as an invalid executable image.
+        fs::write(bin_dir.join("rust-analyzer.exe"), b"")?;
+    }
+    Ok(())
+}
+
+/// Masks any real rustup so toolchain discovery falls back to PATH lookup.
+fn install_failing_rustup(bin_dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let fake_rustup = bin_dir.join("rustup");
+        fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n")?;
+        make_executable(&fake_rustup)?;
+    }
+    #[cfg(windows)]
+    {
+        // The restricted PATH below simply omits rustup; discovery fails the
+        // same way the always-failing Unix stub does.
+        let _ = bin_dir;
+    }
+    Ok(())
+}
+
+/// PATH that exposes only the fixture bin directory plus the system
+/// directories needed for processes to start at all.
+fn restricted_path(bin_dir: &Path) -> Result<OsString> {
+    #[cfg(unix)]
+    {
+        Ok(OsString::from(format!(
+            "{}:/usr/local/bin:/usr/bin:/bin",
+            bin_dir.display()
+        )))
+    }
+    #[cfg(windows)]
+    {
+        let mut entries = vec![bin_dir.to_path_buf()];
+        if let Some(system_root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+            entries.push(system_root.join("System32"));
+            entries.push(system_root);
+        }
+        std::env::join_paths(entries).context("join restricted PATH entries")
+    }
 }
 
 pub fn run_probe(
@@ -923,16 +999,33 @@ fn read_complete_lsp_trace(log: &Path, deadline: Instant) -> Result<Vec<Value>> 
 pub fn assert_processes_reaped(pids: &[u64]) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     for pid in pids {
-        let process = PathBuf::from(format!("/proc/{pid}"));
-        while process.exists() && Instant::now() < deadline {
+        while process_exists(*pid) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         ensure!(
-            !process.exists(),
+            !process_exists(*pid),
             "fixture process {pid} survived zec shutdown"
         );
     }
     Ok(())
+}
+
+fn process_exists(pid: u64) -> bool {
+    #[cfg(unix)]
+    {
+        PathBuf::from(format!("/proc/{pid}")).exists()
+    }
+    #[cfg(windows)]
+    {
+        let Ok(pid) = u32::try_from(pid) else {
+            return false;
+        };
+        let pid = sysinfo::Pid::from_u32(pid);
+        let refresh = sysinfo::ProcessRefreshKind::nothing();
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
+        system.process(pid).is_some()
+    }
 }
 
 pub fn trace_request_response_ids(log: &Path) -> Result<(Vec<String>, Vec<String>)> {

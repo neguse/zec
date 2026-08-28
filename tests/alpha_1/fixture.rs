@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
@@ -1078,9 +1079,39 @@ pub fn generate(root: &Path) -> Result<GeneratedFixture, String> {
     })
 }
 
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .map_err(|error| format!("chmod {:04o} {}: {error}", mode, path.display()))
+}
+
+/// The Alpha 1 manifest oracle encodes Unix modes and symlinks, so fixture
+/// generation is meaningful only on Unix; this stub keeps the module
+/// compiling on Windows for the harness code that shares it.
+#[cfg(not(unix))]
+fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+    let _ = (path, mode);
+    Err("Alpha 1 fixture generation requires Unix file modes".to_owned())
+}
+
+#[cfg(not(unix))]
+fn symlink(target: impl AsRef<Path>, path: impl AsRef<Path>) -> std::io::Result<()> {
+    let _ = (target.as_ref(), path.as_ref());
+    Err(std::io::Error::other(
+        "Alpha 1 fixture symlinks require Unix",
+    ))
+}
+
+fn entry_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
 }
 
 #[derive(Debug)]
@@ -1158,7 +1189,7 @@ fn collect_actual_records(
             .to_str()
             .ok_or_else(|| format!("non-UTF-8 relative path: {}", child_relative.display()))?
             .replace('\\', "/");
-        let mode = metadata.mode() & 0o7777;
+        let mode = entry_mode(&metadata);
         if metadata.file_type().is_symlink() {
             let target = fs::read_link(&path)
                 .map_err(|error| format!("read symlink {}: {error}", path.display()))?;

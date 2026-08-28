@@ -10,7 +10,7 @@ use std::{
 
 use alpha_1_support::{
     ALT_F, AcceptanceReport, CTRL_A, CTRL_N, CTRL_P, CTRL_Q, CTRL_S, CTRL_W, END, ENTER, ESC,
-    InputTrace, Invocation, PtySession, REPORT_SCHEMA_VERSION, binary_report,
+    InputTrace, Invocation, PtySession, REPORT_SCHEMA_VERSION, TerminalBaseline, binary_report,
     command_output_with_timeout, environment_report, fixture, observe_poc_tests, open_fd_count,
     oracle_hashes, parse_invocation, reset_fixed_fixture, verify_acceptance_report, write_report,
 };
@@ -1297,7 +1297,7 @@ fn save(session: &mut PtySession) -> Result<()> {
     Ok(())
 }
 
-fn clean_quit(session: &mut PtySession, baseline: &nix::sys::termios::Termios) -> Result<()> {
+fn clean_quit(session: &mut PtySession, baseline: &TerminalBaseline) -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_exit()?;
     ensure!(status.success(), "Ctrl-Q exit failed: {status}");

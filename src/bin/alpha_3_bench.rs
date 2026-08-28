@@ -12,7 +12,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alpha_1_support::{CTRL_Q, CTRL_W, DOWN, ENTER, ESC, MetricReport, PtySession};
+use alpha_1_support::{
+    CTRL_Q, CTRL_W, DOWN, ENTER, ESC, MetricReport, PtySession, TerminalBaseline,
+};
 use alpha_2_support::{CorrelationTrace, EvidenceFile};
 use alpha_3_support::{
     CONTRACT_VERSION, Fixture, GateBinary, Invocation, READY_SENTINEL, REPORT_SCHEMA_VERSION,
@@ -474,7 +476,7 @@ fn spawn_at(
     zec: &Path,
     file: &Path,
     sessions: bool,
-) -> Result<(PtySession, nix::sys::termios::Termios)> {
+) -> Result<(PtySession, TerminalBaseline)> {
     let arguments = [fixture.root.as_os_str(), file.as_os_str()];
     let mut environment = fixture.env_pairs();
     if !sessions {
@@ -493,7 +495,7 @@ fn spawn_source(
     fixture: &Fixture,
     zec: &Path,
     sessions: bool,
-) -> Result<(PtySession, nix::sys::termios::Termios)> {
+) -> Result<(PtySession, TerminalBaseline)> {
     let (mut session, baseline) = spawn_at(fixture, zec, &fixture.source, sessions)?;
     session.wait_ready("zec project", READY_SENTINEL)?;
     session.assert_raw(&baseline)?;
@@ -502,7 +504,7 @@ fn spawn_source(
     Ok((session, baseline))
 }
 
-fn quit_clean(mut session: PtySession, baseline: &nix::sys::termios::Termios) -> Result<()> {
+fn quit_clean(mut session: PtySession, baseline: &TerminalBaseline) -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_exit()?;
     ensure!(status.success(), "benchmark zec process exited as {status}");

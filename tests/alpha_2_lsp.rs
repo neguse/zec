@@ -1,54 +1,24 @@
-#![cfg(unix)]
+#[path = "support/alpha_2.rs"]
+mod support;
 
-use std::{
-    fs,
-    os::unix::fs::{PermissionsExt as _, symlink},
-    path::Path,
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
-};
+use std::{fs, path::Path, time::Duration};
 
 use serde_json::Value;
+use support::ProbeEnvironment;
 
 #[test]
 fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
-    let temp = tempfile::tempdir().expect("create Alpha 2 test directory");
-    let root = temp.path().join("project");
-    let source_dir = root.join("src");
-    let zed_dir = root.join(".zed");
-    let bin_dir = temp.path().join("bin");
-    let home = temp.path().join("home");
-    let xdg_config = temp.path().join("xdg-config");
-    let xdg_data = temp.path().join("xdg-data");
-    let xdg_cache = temp.path().join("xdg-cache");
-    let xdg_state = temp.path().join("xdg-state");
-    let rustup_home = temp.path().join("rustup");
-    let cargo_home = temp.path().join("cargo");
-    for directory in [
-        &source_dir,
-        &zed_dir,
-        &bin_dir,
-        &home,
-        &xdg_config.join("zed"),
-        &xdg_data,
-        &xdg_cache,
-        &xdg_state,
-        &rustup_home,
-        &cargo_home,
-    ] {
-        fs::create_dir_all(directory).expect("create Alpha 2 fixture directory");
-    }
+    let probe_env = ProbeEnvironment::new("alpha-2-test");
     fs::write(
-        xdg_config.join("zed/settings.json"),
+        probe_env.user_config.join("settings.json"),
         r#"{"session":{"trust_all_worktrees":true},"edit_predictions":{"provider":"none"}}"#,
     )
     .expect("write isolated trusted user settings");
-    fs::write(xdg_config.join("zed/global_settings.json"), "{}")
+    fs::write(probe_env.user_config.join("global_settings.json"), "{}")
         .expect("write isolated global settings");
-    fs::write(xdg_config.join("zed/keymap.json"), "[]").expect("write isolated keymap");
+    fs::write(probe_env.user_config.join("keymap.json"), "[]").expect("write isolated keymap");
     fs::write(
-        zed_dir.join("settings.json"),
+        probe_env.zed_dir.join("settings.json"),
         r#"{
           "edit_predictions": { "provider": "none" },
           "format_on_save": "off",
@@ -57,81 +27,25 @@ fn zed_project_discovers_and_uses_fixture_rust_analyzer() {
         }"#,
     )
     .expect("write Alpha 2 fixture project settings");
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"alpha-2-test\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-    )
-    .expect("write fixture Cargo.toml");
-    let source = source_dir.join("main.rs");
+    let source = probe_env.source_dir.join("main.rs");
     fs::write(&source, "fn main() {\n    let _value = alpha_;\n}   \n")
         .expect("write fixture Rust source");
     fs::write(
-        source_dir.join("lib.rs"),
+        probe_env.source_dir.join("lib.rs"),
         "pub fn fixture_peer() {\n    let _peer = alpha_;\n}  \n",
     )
     .expect("write fixture peer source");
+    probe_env.install_fixture_server(Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp")));
 
-    let fixture_server = Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp"));
-    symlink(fixture_server, bin_dir.join("rust-analyzer")).expect("link fixture as rust-analyzer");
-    let fake_rustup = bin_dir.join("rustup");
-    fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n").expect("write fake rustup");
-    let mut permissions = fs::metadata(&fake_rustup)
-        .expect("read fake rustup metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_rustup, permissions).expect("make fake rustup executable");
-
-    let log = temp.path().join("lsp.jsonl");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zec"))
-        .args([
-            "--alpha-2-probe",
-            "language-service",
-            root.to_str().expect("UTF-8 fixture root"),
-            source.to_str().expect("UTF-8 fixture source"),
-        ])
-        .env(
-            "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", bin_dir.display()),
-        )
-        .env("RUSTUP_HOME", &rustup_home)
-        .env("CARGO_HOME", &cargo_home)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &xdg_config)
-        .env("XDG_DATA_HOME", &xdg_data)
-        .env("XDG_CACHE_HOME", &xdg_cache)
-        .env("XDG_STATE_HOME", &xdg_state)
-        .env("ZEC_ALPHA2_LSP_LOG", &log)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn zec Alpha 2 probe");
-
-    let deadline = Instant::now() + Duration::from_secs(25);
-    loop {
-        if child.try_wait().expect("poll zec Alpha 2 probe").is_some() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            child.kill().expect("kill timed-out zec Alpha 2 probe");
-            let output = child.wait_with_output().expect("collect timed-out probe");
-            panic!(
-                "Alpha 2 probe exceeded 25 seconds\nstdout={}\nstderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    let output = child.wait_with_output().expect("collect Alpha 2 probe");
-    assert!(
-        output.status.success(),
-        "Alpha 2 probe failed\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let log = probe_env.log.clone();
+    let report = probe_env.run_probe(
+        Path::new(env!("CARGO_BIN_EXE_zec")),
+        "language-service",
+        &source,
+        &[],
+        Duration::from_secs(25),
+        "Alpha 2 probe",
     );
-
-    let report: Value =
-        serde_json::from_slice(&output.stdout).expect("parse Alpha 2 probe JSON output");
     assert_eq!(report["language"], "Rust");
     assert_eq!(report["servers"][0]["name"], "rust-analyzer");
     assert!(report["servers"][0]["process_id"].is_number());

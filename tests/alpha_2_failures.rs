@@ -1,15 +1,15 @@
-#![cfg(unix)]
+#[path = "support/alpha_2.rs"]
+mod support;
 
 use std::{
     fs,
-    os::unix::fs::{PermissionsExt as _, symlink},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    path::Path,
     thread,
     time::{Duration, Instant},
 };
 
 use serde_json::Value;
+use support::ProbeEnvironment;
 
 const SCENARIOS: &[&str] = &[
     "server-not-found",
@@ -37,38 +37,8 @@ fn lsp_failure_matrix_preserves_editor_and_reaps_processes() {
 }
 
 fn run_scenario(scenario: &str) {
-    let temp = tempfile::tempdir().expect("create LSP failure fixture directory");
-    let root = temp.path().join("project");
-    let source_dir = root.join("src");
-    let zed_dir = root.join(".zed");
-    let bin_dir = temp.path().join("bin");
-    let home = temp.path().join("home");
-    let xdg_config = temp.path().join("xdg-config");
-    let xdg_data = temp.path().join("xdg-data");
-    let xdg_cache = temp.path().join("xdg-cache");
-    let xdg_state = temp.path().join("xdg-state");
-    let rustup_home = temp.path().join("rustup");
-    let cargo_home = temp.path().join("cargo");
-    for directory in [
-        &source_dir,
-        &zed_dir,
-        &bin_dir,
-        &home,
-        &xdg_config.join("zed"),
-        &xdg_data,
-        &xdg_cache,
-        &xdg_state,
-        &rustup_home,
-        &cargo_home,
-    ] {
-        fs::create_dir_all(directory).expect("create LSP failure fixture component");
-    }
-    fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = \"alpha-2-failure\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
-    )
-    .expect("write failure fixture Cargo.toml");
-    let source = source_dir.join("main.rs");
+    let mut probe_env = ProbeEnvironment::new("alpha-2-failure");
+    let source = probe_env.source_dir.join("main.rs");
     fs::write(&source, "fn main() { let _value = alpha_; }\n")
         .expect("write failure fixture source");
     let (format_on_save, formatter) = if scenario == "formatter-error" {
@@ -77,7 +47,7 @@ fn run_scenario(scenario: &str) {
         ("off", "")
     };
     fs::write(
-        zed_dir.join("settings.json"),
+        probe_env.zed_dir.join("settings.json"),
         format!(
             r#"{{
               "format_on_save": "{format_on_save}"{formatter},
@@ -88,109 +58,37 @@ fn run_scenario(scenario: &str) {
     )
     .expect("write failure fixture settings");
     fs::write(
-        xdg_config.join("zed/settings.json"),
+        probe_env.user_config.join("settings.json"),
         r#"{"session":{"trust_all_worktrees":true}}"#,
     )
     .expect("write isolated trusted user settings");
-    fs::write(xdg_config.join("zed/global_settings.json"), "{}")
+    fs::write(probe_env.user_config.join("global_settings.json"), "{}")
         .expect("write isolated global settings");
-    fs::write(xdg_config.join("zed/keymap.json"), "[]").expect("write isolated keymap");
+    fs::write(probe_env.user_config.join("keymap.json"), "[]").expect("write isolated keymap");
 
     let fixture_server = Path::new(env!("CARGO_BIN_EXE_alpha_2_fixture_lsp"));
     match scenario {
         "server-not-found" => {}
-        "spawn-failure" => {
-            let wrapper = bin_dir.join("rust-analyzer");
-            fs::write(
-                &wrapper,
-                "#!/bin/sh\nif [ \"${1:-}\" = \"--help\" ]; then\n  echo fixture\n  chmod 000 \"$0\"\n  exit 0\nfi\nexit 99\n",
-            )
-            .expect("write spawn-failure wrapper");
-            let mut permissions = fs::metadata(&wrapper)
-                .expect("read wrapper permissions")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
-        }
-        _ => symlink(fixture_server, bin_dir.join("rust-analyzer"))
-            .expect("link fixture as rust-analyzer"),
+        "spawn-failure" => probe_env.install_unspawnable_server(),
+        _ => probe_env.install_fixture_server(fixture_server),
     }
-    let fake_rustup = bin_dir.join("rustup");
-    fs::write(&fake_rustup, "#!/bin/sh\nexit 1\n").expect("write fake rustup");
-    let mut permissions = fs::metadata(&fake_rustup)
-        .expect("read fake rustup permissions")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_rustup, permissions).expect("make fake rustup executable");
 
-    let log = temp.path().join("lsp.jsonl");
-    let restart_state = temp.path().join("restart-state");
+    let log = probe_env.log.clone();
+    let restart_state = probe_env.temp.path().join("restart-state");
     let fixture_scenario = match scenario {
         "server-not-found" | "spawn-failure" => "normal",
         scenario => scenario,
     };
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zec"))
-        .args([
-            "--alpha-2-probe",
-            "lsp-failure",
-            root.to_str().expect("UTF-8 failure root"),
-            source.to_str().expect("UTF-8 failure source"),
-            scenario,
-        ])
-        .env(
-            "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", bin_dir.display()),
-        )
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &xdg_config)
-        .env("XDG_DATA_HOME", &xdg_data)
-        .env("XDG_CACHE_HOME", &xdg_cache)
-        .env("XDG_STATE_HOME", &xdg_state)
-        .env("RUSTUP_HOME", &rustup_home)
-        .env("CARGO_HOME", &cargo_home)
-        .env("ZEC_ALPHA2_LSP_LOG", &log)
-        .env("ZEC_ALPHA2_LSP_SCENARIO", fixture_scenario)
-        .env("ZEC_ALPHA2_RESTART_STATE", &restart_state)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("spawn zec failure scenario {scenario}: {error}"));
-
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if child
-            .try_wait()
-            .unwrap_or_else(|error| panic!("poll {scenario}: {error}"))
-            .is_some()
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            child
-                .kill()
-                .unwrap_or_else(|error| panic!("kill timed-out {scenario}: {error}"));
-            let output = child
-                .wait_with_output()
-                .unwrap_or_else(|error| panic!("collect timed-out {scenario}: {error}"));
-            panic!(
-                "LSP failure scenario {scenario} exceeded 30 seconds\nstdout={}\nstderr={}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    let output = child
-        .wait_with_output()
-        .unwrap_or_else(|error| panic!("collect {scenario}: {error}"));
-    assert!(
-        output.status.success(),
-        "LSP failure scenario {scenario} failed\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    probe_env.push_env("ZEC_ALPHA2_LSP_SCENARIO", fixture_scenario);
+    probe_env.push_env("ZEC_ALPHA2_RESTART_STATE", restart_state.as_os_str());
+    let report = probe_env.run_probe(
+        Path::new(env!("CARGO_BIN_EXE_zec")),
+        "lsp-failure",
+        &source,
+        &[scenario],
+        Duration::from_secs(30),
+        &format!("LSP failure scenario {scenario}"),
     );
-    let report: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("parse {scenario} report: {error}"));
     assert_eq!(report["scenario"], scenario);
     for field in [
         "dirty_after_edit",
@@ -327,12 +225,11 @@ fn assert_fixture_processes_reaped(log: &Path, scenario: &str) {
         .collect::<Vec<_>>();
     let deadline = Instant::now() + Duration::from_secs(5);
     for pid in &pids {
-        let process_path = PathBuf::from(format!("/proc/{pid}"));
-        while process_path.exists() && Instant::now() < deadline {
+        while support::process_exists(*pid) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            !process_path.exists(),
+            !support::process_exists(*pid),
             "fixture process {pid} from scenario {scenario} survived zec"
         );
     }

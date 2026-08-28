@@ -13,6 +13,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(unix)]
 use nix::{
     sys::{
         signal::{Signal, killpg},
@@ -419,34 +420,73 @@ pub fn statistics(samples: &[u64]) -> (u64, u64, u64) {
     (rank(50), rank(95), sorted[sorted.len() - 1])
 }
 
-pub fn environment_report() -> Result<EnvironmentReport> {
+#[cfg(unix)]
+fn host_cpu_model() -> Result<String> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").context("read /proc/cpuinfo")?;
-    let cpu_model = cpuinfo
+    Ok(cpuinfo
         .lines()
         .find_map(|line| line.strip_prefix("model name\t: "))
         .unwrap_or("unknown")
-        .to_owned();
-    let cpu_core_count = std::thread::available_parallelism()
-        .map(|count| count.get() as u64)
-        .unwrap_or(0);
+        .to_owned())
+}
+
+#[cfg(unix)]
+fn host_ram_bytes() -> Result<u64> {
     let meminfo = fs::read_to_string("/proc/meminfo").context("read /proc/meminfo")?;
-    let ram_bytes = meminfo
+    Ok(meminfo
         .lines()
         .find_map(|line| line.strip_prefix("MemTotal:"))
         .and_then(|value| value.split_whitespace().next())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0)
-        .saturating_mul(1024);
-    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
+        .saturating_mul(1024))
+}
+
+#[cfg(unix)]
+fn host_kernel_release() -> Result<String> {
+    Ok(fs::read_to_string("/proc/sys/kernel/osrelease")
         .context("read kernel release")?
         .trim()
-        .to_owned();
+        .to_owned())
+}
+
+#[cfg(windows)]
+fn host_cpu_model() -> Result<String> {
+    let mut system = sysinfo::System::new();
+    system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+    Ok(system
+        .cpus()
+        .first()
+        .map(|cpu| cpu.brand().trim().to_owned())
+        .filter(|brand| !brand.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned()))
+}
+
+#[cfg(windows)]
+fn host_ram_bytes() -> Result<u64> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    Ok(system.total_memory())
+}
+
+#[cfg(windows)]
+fn host_kernel_release() -> Result<String> {
+    Ok(sysinfo::System::kernel_version().unwrap_or_else(|| "unknown".to_owned()))
+}
+
+pub fn environment_report() -> Result<EnvironmentReport> {
+    let cpu_model = host_cpu_model()?;
+    let cpu_core_count = std::thread::available_parallelism()
+        .map(|count| count.get() as u64)
+        .unwrap_or(0);
+    let ram_bytes = host_ram_bytes()?;
+    let kernel = host_kernel_release()?;
     let runner_image_version = std::env::var("ImageVersion")
         .or_else(|_| std::env::var("RUNNER_IMAGE_VERSION"))
         .unwrap_or_else(|_| os_release_value("VERSION_ID").unwrap_or_else(|| "unknown".to_owned()));
     let runner_environment =
         std::env::var("RUNNER_ENVIRONMENT").unwrap_or_else(|_| "local".to_owned());
-    let image_os = std::env::var("ImageOS").unwrap_or_else(|_| "linux".to_owned());
+    let image_os = std::env::var("ImageOS").unwrap_or_else(|_| std::env::consts::OS.to_owned());
     let runner_class = if runner_environment == "github-hosted"
         && image_os == "ubuntu24"
         && std::env::consts::ARCH == "x86_64"
@@ -1195,11 +1235,18 @@ pub fn fresh_config_dir(case_id: &str) -> Result<PathBuf> {
         fs::remove_dir_all(&path)
             .with_context(|| format!("remove old config {}", path.display()))?;
     }
-    let zed = path.join("zed");
-    fs::create_dir_all(&zed).with_context(|| format!("create fresh config {}", zed.display()))?;
-    fs::write(zed.join("settings.json"), PINNED_SETTINGS)
-        .with_context(|| format!("write pinned Alpha 1 settings under {}", zed.display()))?;
+    write_pinned_settings(&path)?;
     Ok(path)
+}
+
+/// Writes the pinned Alpha settings using the `ZEC_DATA_DIR` layout
+/// (`<root>/config/settings.json`) that `PtySession` points zec at.
+pub fn write_pinned_settings(isolation_root: &Path) -> Result<()> {
+    let config = isolation_root.join("config");
+    fs::create_dir_all(&config)
+        .with_context(|| format!("create fresh config {}", config.display()))?;
+    fs::write(config.join("settings.json"), PINNED_SETTINGS)
+        .with_context(|| format!("write pinned Alpha settings under {}", config.display()))
 }
 
 enum ReaderEvent {
@@ -1251,6 +1298,17 @@ fn mark_around_action_with_clock(
     })
 }
 
+/// Snapshot of the outer terminal state taken before zec starts.
+///
+/// On Unix this captures the PTY termios so raw-mode entry and restoration can
+/// be proven against kernel state. ConPTY exposes no equivalent, so on Windows
+/// the snapshot is empty and those properties are judged from the emitted VT
+/// sequences alone.
+pub struct TerminalBaseline {
+    #[cfg(unix)]
+    termios: Termios,
+}
+
 pub struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -1273,7 +1331,7 @@ impl PtySession {
         cwd: &Path,
         arguments: &[&OsStr],
         config_dir: &Path,
-    ) -> Result<(Self, Termios)> {
+    ) -> Result<(Self, TerminalBaseline)> {
         Self::spawn_with_env(zec, cwd, arguments, config_dir, &[])
     }
 
@@ -1283,7 +1341,7 @@ impl PtySession {
         arguments: &[&OsStr],
         config_dir: &Path,
         environment: &[(&OsStr, &OsStr)],
-    ) -> Result<(Self, Termios)> {
+    ) -> Result<(Self, TerminalBaseline)> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: ROWS,
@@ -1292,10 +1350,15 @@ impl PtySession {
                 pixel_height: 0,
             })
             .context("open native PTY")?;
-        let baseline = pair
-            .master
-            .get_termios()
-            .context("PTY does not expose initial termios")?;
+        #[cfg(unix)]
+        let baseline = TerminalBaseline {
+            termios: pair
+                .master
+                .get_termios()
+                .context("PTY does not expose initial termios")?,
+        };
+        #[cfg(not(unix))]
+        let baseline = TerminalBaseline {};
         Self::from_pair(pair, zec, cwd, arguments, config_dir, environment)
             .map(|session| (session, baseline))
     }
@@ -1332,7 +1395,7 @@ impl PtySession {
                             }
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => {
+                        Err(error) if is_pty_disconnect(&error) => {
                             let _ = sender.send(ReaderEvent::Eof);
                             break;
                         }
@@ -1350,6 +1413,10 @@ impl PtySession {
         command.env("TERM", "xterm-256color");
         command.env("LANG", "C.UTF-8");
         command.env("LC_ALL", "C.UTF-8");
+        // ZEC_DATA_DIR is the cross-platform isolation root (config lives at
+        // <root>/config); the XDG variables keep Unix-only side channels such
+        // as Zed's state and cache directories inside the same root.
+        command.env("ZEC_DATA_DIR", config_dir);
         command.env("XDG_CONFIG_HOME", config_dir);
         command.env("XDG_CACHE_HOME", config_dir);
         command.env("XDG_DATA_HOME", config_dir);
@@ -1397,7 +1464,14 @@ impl PtySession {
         self.wait_after("Alpha 1 Ready frame", mark, STARTUP_TIMEOUT, |screen| {
             let (cursor_row, cursor_col) = screen.cursor_position();
             let (rows, cols) = screen.size();
-            screen.alternate_screen()
+            // ConPTY flattens the client's alternate-screen switch into plain
+            // full redraws, so the property is observable only on Unix.
+            let alternate_screen = if cfg!(unix) {
+                screen.alternate_screen()
+            } else {
+                true
+            };
+            alternate_screen
                 && (rows, cols) == (ROWS, COLS)
                 && screen.contents().contains(root_label)
                 && screen.contents().contains(sentinel)
@@ -1577,6 +1651,7 @@ impl PtySession {
             .map(|completed| duration_us(completed.saturating_duration_since(mark.at))))
     }
 
+    #[cfg(unix)]
     pub fn send_signal(&self, signal: Signal) -> Result<()> {
         ensure!(
             Instant::now() < self.scenario_deadline,
@@ -1587,10 +1662,12 @@ impl PtySession {
             .with_context(|| format!("send {signal:?} to zec process group {pid}"))
     }
 
+    #[cfg(unix)]
     pub fn send_signal_marked(&self, signal: Signal) -> Result<OperationMark> {
         mark_around_action(self.generation, || self.send_signal(signal))
     }
 
+    #[cfg(unix)]
     pub fn wait_stopped(&mut self) -> Result<()> {
         let pid = Pid::from_raw(self.pid()?);
         let deadline = (Instant::now() + CHILD_TIMEOUT).min(self.scenario_deadline);
@@ -1645,40 +1722,81 @@ impl PtySession {
         }
     }
 
-    pub fn assert_raw(&self, baseline: &Termios) -> Result<()> {
-        let current = self.termios()?;
-        ensure!(&current != baseline, "zec did not enable raw mode");
-        ensure!(
-            !current
-                .local_flags
-                .contains(LocalFlags::ICANON | LocalFlags::ECHO),
-            "canonical input or echo remained enabled"
-        );
+    pub fn assert_raw(&self, baseline: &TerminalBaseline) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let current = self.termios()?;
+            ensure!(&current != &baseline.termios, "zec did not enable raw mode");
+            ensure!(
+                !current
+                    .local_flags
+                    .contains(LocalFlags::ICANON | LocalFlags::ECHO),
+                "canonical input or echo remained enabled"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = baseline;
+            // ConPTY exposes neither termios nor the alternate-screen switch;
+            // the full-screen redraw it synthesizes is the observable evidence
+            // that zec took the terminal over.
+            ensure!(
+                contains_bytes(&self.transcript, b"\x1b[2J"),
+                "zec did not repaint the ConPTY screen"
+            );
+        }
         Ok(())
     }
 
-    pub fn assert_restored(&mut self, baseline: &Termios) -> Result<()> {
-        let deadline = (Instant::now() + CHILD_TIMEOUT).min(self.scenario_deadline);
-        loop {
-            self.drain_available()?;
-            let now = Instant::now();
-            if contains_bytes(&self.transcript, CLEANUP_ESCAPES) {
-                ensure!(
-                    now <= deadline,
-                    "terminal cleanup escapes arrived after 5 seconds"
-                );
-                break;
+    pub fn assert_restored(&mut self, baseline: &TerminalBaseline) -> Result<()> {
+        // ConPTY absorbs the client's cleanup escapes and re-synthesizes its
+        // own teardown output, so the exact sequence is only provable on Unix;
+        // Windows relies on the final parser state checked below.
+        #[cfg(unix)]
+        {
+            let deadline = (Instant::now() + CHILD_TIMEOUT).min(self.scenario_deadline);
+            loop {
+                self.drain_available()?;
+                let now = Instant::now();
+                if contains_bytes(&self.transcript, CLEANUP_ESCAPES) {
+                    ensure!(
+                        now <= deadline,
+                        "terminal cleanup escapes arrived after 5 seconds"
+                    );
+                    break;
+                }
+                if now >= deadline {
+                    bail!(
+                        "terminal cleanup escapes were not observed\n{}",
+                        self.diagnostic()
+                    );
+                }
+                self.receive_one((deadline - now).min(EVENT_POLL))?;
             }
-            if now >= deadline {
-                bail!(
-                    "terminal cleanup escapes were not observed\n{}",
-                    self.diagnostic()
-                );
+        }
+        #[cfg(not(unix))]
+        {
+            let deadline = (Instant::now() + CHILD_TIMEOUT).min(self.scenario_deadline);
+            loop {
+                self.drain_available()?;
+                if !self.parser.screen().hide_cursor() {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                self.receive_one((deadline - now).min(EVENT_POLL))?;
             }
-            self.receive_one((deadline - now).min(EVENT_POLL))?;
         }
         self.drain_available()?;
-        ensure!(&self.termios()? == baseline, "tcgetattr baseline differs");
+        #[cfg(unix)]
+        ensure!(
+            &self.termios()? == &baseline.termios,
+            "tcgetattr baseline differs"
+        );
+        #[cfg(not(unix))]
+        let _ = baseline;
         let screen = self.parser.screen();
         ensure!(
             !screen.alternate_screen(),
@@ -1705,7 +1823,7 @@ impl PtySession {
         Ok(())
     }
 
-    pub fn assert_restored_and_joined(&mut self, baseline: &Termios) -> Result<()> {
+    pub fn assert_restored_and_joined(&mut self, baseline: &TerminalBaseline) -> Result<()> {
         ensure!(
             self.child.is_none(),
             "zec child was not reaped before reader join"
@@ -1751,6 +1869,7 @@ impl PtySession {
         )
     }
 
+    #[cfg(unix)]
     fn termios(&self) -> Result<Termios> {
         self.master
             .as_ref()
@@ -1837,6 +1956,18 @@ impl PtySession {
                 self.generation = self.generation.wrapping_add(1);
                 self.last_read_at = Some(completed_at);
                 append_bounded(&mut self.transcript, &bytes);
+                // A ConPTY host must answer the cursor-position report conhost
+                // requests at startup; client console I/O stays deferred until
+                // the reply arrives.
+                if contains_bytes(&bytes, b"\x1b[6n") {
+                    let (row, column) = self.parser.screen().cursor_position();
+                    let reply = format!("\x1b[{};{}R", row + 1, column + 1);
+                    if let Some(writer) = self.writer.as_mut() {
+                        let _ = writer
+                            .write_all(reply.as_bytes())
+                            .and_then(|_| writer.flush());
+                    }
+                }
                 Ok(())
             }
             ReaderEvent::Eof => {
@@ -1852,7 +1983,12 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         let deadline = Instant::now() + CHILD_TIMEOUT;
         if self.child.is_some() {
+            #[cfg(unix)]
             let _ = killpg(Pid::from_raw(self.process_id), Signal::SIGKILL);
+            #[cfg(not(unix))]
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.kill();
+            }
         }
         while let Some(child) = self.child.as_mut() {
             match child.try_wait() {
@@ -1889,6 +2025,7 @@ impl Drop for PtySession {
     }
 }
 
+#[cfg(unix)]
 pub fn assert_process_group_absent(process_group: i32) -> Result<()> {
     let deadline = Instant::now() + CHILD_TIMEOUT;
     loop {
@@ -1904,6 +2041,26 @@ pub fn assert_process_group_absent(process_group: i32) -> Result<()> {
         ensure!(
             Instant::now() < deadline,
             "process group {process_group} still exists 5 seconds after child exit"
+        );
+        thread::sleep(EVENT_POLL);
+    }
+}
+
+/// Windows has no process groups; prove the child itself is gone instead.
+#[cfg(windows)]
+pub fn assert_process_group_absent(process_id: i32) -> Result<()> {
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    let pid = sysinfo::Pid::from_u32(u32::try_from(process_id).context("PID fits u32")?);
+    loop {
+        let refresh = sysinfo::ProcessRefreshKind::nothing();
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
+        if system.process(pid).is_none() {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "process {process_id} still exists 5 seconds after child exit"
         );
         thread::sleep(EVENT_POLL);
     }
@@ -1937,6 +2094,7 @@ pub fn vm_hwm_bytes(pid: i32) -> Result<u64> {
     vm_hwm_bytes_if_present(pid)?.context("VmHWM is absent from zec status")
 }
 
+#[cfg(unix)]
 pub fn vm_hwm_bytes_if_present(pid: i32) -> Result<Option<u64>> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))
         .with_context(|| format!("read /proc/{pid}/status"))?;
@@ -1949,6 +2107,38 @@ pub fn vm_hwm_bytes_if_present(pid: i32) -> Result<Option<u64>> {
         .map(|kib| kib.saturating_mul(1024)))
 }
 
+/// Windows counterpart of Linux `VmHWM`: the peak working-set size.
+#[cfg(windows)]
+pub fn vm_hwm_bytes_if_present(pid: i32) -> Result<Option<u64>> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::{
+            ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        },
+    };
+
+    let pid = u32::try_from(pid).context("PID fits u32")?;
+    // SAFETY: OpenProcess with a query-only access right; the handle is closed
+    // on every path below.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return Err(io::Error::last_os_error()).with_context(|| format!("open process {pid}"));
+        }
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        counters.cb = u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).expect("cb fits u32");
+        let ok = K32GetProcessMemoryInfo(handle, &mut counters, counters.cb);
+        let error = io::Error::last_os_error();
+        CloseHandle(handle);
+        if ok == 0 {
+            return Err(error).with_context(|| format!("query process {pid} memory counters"));
+        }
+        Ok(Some(counters.PeakWorkingSetSize as u64))
+    }
+}
+
+#[cfg(unix)]
 pub fn descendant_process_count(pid: i32) -> Result<usize> {
     let mut descendants = BTreeSet::new();
     let mut pending = vec![pid];
@@ -1986,10 +2176,55 @@ pub fn descendant_process_count(pid: i32) -> Result<usize> {
     Ok(descendants.len())
 }
 
+#[cfg(windows)]
+pub fn descendant_process_count(pid: i32) -> Result<usize> {
+    let root = sysinfo::Pid::from_u32(u32::try_from(pid).context("PID fits u32")?);
+    let refresh = sysinfo::ProcessRefreshKind::nothing();
+    let mut system = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_processes(refresh),
+    );
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, refresh);
+    let mut descendants = BTreeSet::new();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (candidate, process) in system.processes() {
+            if *candidate == root || descendants.contains(candidate) {
+                continue;
+            }
+            if process
+                .parent()
+                .is_some_and(|parent| parent == root || descendants.contains(&parent))
+            {
+                descendants.insert(*candidate);
+                grew = true;
+            }
+        }
+    }
+    Ok(descendants.len())
+}
+
+#[cfg(unix)]
 pub fn open_fd_count() -> Result<usize> {
     Ok(fs::read_dir("/proc/self/fd")
         .context("read /proc/self/fd")?
         .count())
+}
+
+/// Windows counterpart of the Unix fd count: the process handle count.
+#[cfg(windows)]
+pub fn open_fd_count() -> Result<usize> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    let mut count = 0_u32;
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing.
+    let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    ensure!(
+        ok != 0,
+        "query own handle count: {}",
+        io::Error::last_os_error()
+    );
+    Ok(count as usize)
 }
 
 fn duration_us(duration: Duration) -> u64 {
@@ -2010,6 +2245,20 @@ fn append_bounded(transcript: &mut Vec<u8>, bytes: &[u8]) {
         transcript.drain(..overflow);
     }
     transcript.extend_from_slice(bytes);
+}
+
+/// Reports whether a PTY read error means the peer side is simply gone:
+/// EIO on a Unix PTY, a broken pipe on ConPTY.
+fn is_pty_disconnect(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(nix::libc::EIO)
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_BROKEN_PIPE: i32 = 109;
+        error.kind() == io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(ERROR_BROKEN_PIPE)
+    }
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

@@ -16,16 +16,16 @@ use std::{
 
 use alpha_1_support::{
     ALT_F, BenchmarkReport, CTRL_G, CTRL_P, CTRL_Q, CTRL_S, DELETE, DOWN, ENTER, ESC, InputTrace,
-    Invocation, MetricReport, PtySession, REPORT_SCHEMA_VERSION, benchmark_oracle, binary_report,
-    descendant_process_count, environment_report, fixture, oracle_hashes, parse_invocation,
-    reset_fixed_fixture, verify_benchmark_oracle, verify_benchmark_report, vm_hwm_bytes_if_present,
-    write_report,
+    Invocation, MetricReport, PtySession, REPORT_SCHEMA_VERSION, TerminalBaseline,
+    benchmark_oracle, binary_report, descendant_process_count, environment_report, fixture,
+    oracle_hashes, parse_invocation, reset_fixed_fixture, verify_benchmark_oracle,
+    verify_benchmark_report, vm_hwm_bytes_if_present, write_report,
 };
 use alpha_1_support::{
     SearchResultReport, expected_benchmark_quick_open_queries, expected_benchmark_search_rows,
 };
 use anyhow::{Context as _, Result, bail, ensure};
-use nix::{libc, sys::termios::Termios};
+use nix::libc;
 
 const STARTUP_WARMUPS: usize = 2;
 const STARTUP_SAMPLES: usize = 20;
@@ -688,7 +688,7 @@ fn spawn_ready(
     zec: &Path,
     root: &Path,
     config_name: &str,
-) -> Result<(PtySession, Termios, u64, ResourceMonitor)> {
+) -> Result<(PtySession, TerminalBaseline, u64, ResourceMonitor)> {
     let config = alpha_1_support::fresh_config_dir(config_name)?;
     let armed_monitor = ResourceMonitor::arm()?;
     let (mut session, baseline) = PtySession::spawn(zec, root, &[root.as_os_str()], &config)?;
@@ -1310,7 +1310,7 @@ fn begin_in_flight_search(session: &mut PtySession, query: &str) -> Result<()> {
 
 fn quit_clean(
     session: &mut PtySession,
-    baseline: &Termios,
+    baseline: &TerminalBaseline,
     resources: &mut ResourceTracker,
     monitor: ResourceMonitor,
 ) -> Result<()> {
