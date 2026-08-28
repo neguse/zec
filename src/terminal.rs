@@ -310,6 +310,35 @@ pub struct RenamePreparation {
 }
 
 #[derive(Debug)]
+pub struct ResizeAcknowledgement {
+    pending: Arc<AtomicBool>,
+}
+
+impl Drop for ResizeAcknowledgement {
+    fn drop(&mut self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResizeCoalescer {
+    pending: Arc<AtomicBool>,
+}
+
+impl ResizeCoalescer {
+    fn event(&self) -> Option<TerminalEvent> {
+        self.pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(TerminalEvent::Resize {
+            _acknowledgement: ResizeAcknowledgement {
+                pending: self.pending.clone(),
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
 pub enum TerminalEvent {
     Action(TerminalAction),
     Key(KeyEvent),
@@ -317,7 +346,9 @@ pub enum TerminalEvent {
     Mouse(MouseEvent),
     MouseScroll(ScrollDirection),
     FocusChanged(bool),
-    Resize,
+    Resize {
+        _acknowledgement: ResizeAcknowledgement,
+    },
     Redraw,
     /// The remote transport status or terminal askpass prompt changed.
     RemoteChanged,
@@ -673,11 +704,57 @@ fn send_pending_signal(sender: &Sender<TerminalEvent>, pending: &AtomicUsize) ->
     !is_suspend_signal(signal)
 }
 
+const RESIZE_BURST_QUIET_PERIOD: Duration = Duration::from_millis(4);
+const RESIZE_BURST_LIMIT: Duration = Duration::from_millis(25);
+
+fn coalesce_resize_runs(events: impl IntoIterator<Item = Event>) -> Vec<Event> {
+    let mut compacted = Vec::new();
+    let mut pending_resize = None;
+    for event in events {
+        match event {
+            resize @ Event::Resize(_, _) => pending_resize = Some(resize),
+            event => {
+                if let Some(resize) = pending_resize.take() {
+                    compacted.push(resize);
+                }
+                compacted.push(event);
+            }
+        }
+    }
+    if let Some(resize) = pending_resize {
+        compacted.push(resize);
+    }
+    compacted
+}
+
+fn read_resize_burst(first: Event) -> io::Result<Vec<Event>> {
+    if !matches!(first, Event::Resize(_, _)) {
+        return Ok(vec![first]);
+    }
+
+    let started = Instant::now();
+    let mut events = vec![first];
+    loop {
+        let remaining = RESIZE_BURST_LIMIT.saturating_sub(started.elapsed());
+        if remaining.is_zero() || !event::poll(RESIZE_BURST_QUIET_PERIOD.min(remaining))? {
+            break;
+        }
+        let next = event::read()?;
+        let follows_resize_run = matches!(next, Event::Resize(_, _));
+        events.push(next);
+        if !follows_resize_run {
+            break;
+        }
+    }
+    Ok(coalesce_resize_runs(events))
+}
+
 fn read_events(
     sender: Sender<TerminalEvent>,
     stop: Arc<AtomicBool>,
     pending_signal: Arc<AtomicUsize>,
 ) {
+    let resize_coalescer = ResizeCoalescer::default();
     let mut known_size = crossterm_terminal::size().ok();
     let mut last_size_check = Instant::now();
 
@@ -696,7 +773,8 @@ fn read_events(
                     last_size_check = Instant::now();
                     if let Ok(size) = crossterm_terminal::size()
                         && known_size.replace(size) != Some(size)
-                        && sender.send_blocking(TerminalEvent::Resize).is_err()
+                        && let Some(event) = resize_coalescer.event()
+                        && sender.send_blocking(event).is_err()
                     {
                         break;
                     }
@@ -712,8 +790,8 @@ fn read_events(
             }
         }
 
-        let event = match event::read() {
-            Ok(event) => event,
+        let events = match event::read().and_then(read_resize_burst) {
+            Ok(events) => events,
             Err(error) => {
                 if !send_pending_signal(&sender, &pending_signal) {
                     let _ = sender.send_blocking(TerminalEvent::Error(error.to_string()));
@@ -725,20 +803,25 @@ fn read_events(
             break;
         }
 
-        if let Event::Resize(columns, rows) = &event {
-            known_size = Some((*columns, *rows));
-        };
-        let Some(event) = map_event(event) else {
-            continue;
-        };
+        for event in events {
+            if let Event::Resize(columns, rows) = &event {
+                known_size = Some((*columns, *rows));
+            };
+            let Some(event) = map_event_with_resize(event, &resize_coalescer) else {
+                continue;
+            };
 
-        if sender.send_blocking(event).is_err() {
-            break;
+            if sender.send_blocking(event).is_err() {
+                return;
+            }
         }
     }
 }
 
-fn map_event(event: Event) -> Option<TerminalEvent> {
+fn map_event_with_resize(
+    event: Event,
+    resize_coalescer: &ResizeCoalescer,
+) -> Option<TerminalEvent> {
     match event {
         Event::Key(key) => Some(TerminalEvent::Key(key)),
         Event::Paste(text) => Some(TerminalEvent::Paste(text)),
@@ -750,10 +833,15 @@ fn map_event(event: Event) -> Option<TerminalEvent> {
             }
             _ => None,
         },
-        Event::Resize(_, _) => Some(TerminalEvent::Resize),
+        Event::Resize(_, _) => resize_coalescer.event(),
         Event::FocusGained => Some(TerminalEvent::FocusChanged(true)),
         Event::FocusLost => Some(TerminalEvent::FocusChanged(false)),
     }
+}
+
+#[cfg(test)]
+fn map_event(event: Event) -> Option<TerminalEvent> {
+    map_event_with_resize(event, &ResizeCoalescer::default())
 }
 
 #[cfg(test)]
@@ -806,13 +894,47 @@ mod tests {
     }
 
     #[test]
+    fn coalesces_resizes_until_the_queued_event_is_consumed() {
+        let resize_coalescer = ResizeCoalescer::default();
+        let first = resize_coalescer
+            .event()
+            .expect("first resize must be queued");
+        assert!(resize_coalescer.event().is_none());
+
+        drop(first);
+        assert!(matches!(
+            resize_coalescer.event(),
+            Some(TerminalEvent::Resize { .. })
+        ));
+    }
+
+    #[test]
+    fn resize_burst_keeps_the_last_size_before_following_input() {
+        let key = KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE);
+        let compacted = coalesce_resize_runs([
+            Event::Resize(1, 1),
+            Event::Resize(80, 24),
+            Event::Resize(1, 1),
+            Event::Resize(120, 40),
+            Event::Key(key),
+        ]);
+
+        assert_eq!(compacted.len(), 2);
+        assert!(matches!(compacted[0], Event::Resize(120, 40)));
+        assert!(matches!(compacted[1], Event::Key(actual) if actual == key));
+    }
+
+    #[test]
     fn closing_a_full_channel_unblocks_a_blocking_sender() {
         let (sender, _receiver) = async_channel::bounded(1);
         sender
             .send_blocking(TerminalEvent::Redraw)
             .expect("fill event channel");
         let blocked_sender = sender.clone();
-        let blocked = thread::spawn(move || blocked_sender.send_blocking(TerminalEvent::Resize));
+        let resize = ResizeCoalescer::default()
+            .event()
+            .expect("create the pending resize event");
+        let blocked = thread::spawn(move || blocked_sender.send_blocking(resize));
 
         sender.close();
         assert!(blocked.join().expect("join blocked sender").is_err());
@@ -938,7 +1060,7 @@ mod tests {
         ));
         assert!(matches!(
             map_event(Event::Resize(80, 24)),
-            Some(TerminalEvent::Resize)
+            Some(TerminalEvent::Resize { .. })
         ));
         assert!(matches!(
             map_event(Event::FocusGained),

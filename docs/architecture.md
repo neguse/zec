@@ -336,6 +336,43 @@ Go-to-line、BufferStore saveを使い、10万行・64 KiB行のactual-binary PT
 末尾edit、disk内容、Linux VmHWM、terminal lifecycleを測る。Alpha 1の500-edit benchmarkとBeta 2の境界形状試験は
 別oracleとして維持する。
 
+## AI, collaboration, media, and Notebook
+
+Agent panelは`AcpThread`を会話、tool call、permission、session statusのauthorityとして保持する。
+設定がなければ`NativeAgentServer`とglobal `ThreadStore`でprocess内Zed Agentを生成し、
+`ZEC_ACP_AGENT`が明示された場合だけ`AcpConnection::stdio`でexternal agentを起動する。terminal側は
+bounded prompt/history/local outputを持つだけで、stream entryやpermission outcomeを複製しない。
+model/mode/config/session/authはACP connectionの公開API、MCPはProject `ContextServerStore`、
+skill/instructionはtrusted worktreeのZed Agent discoveryへ戻す。
+
+edit predictionは全hidden Editorを観測し、Zed language settingsとorganization/user eventに応じて
+Zed/Copilot/Codestralまたはcustom FIM delegateを付け替える。表示とaccept-all/word/lineはEditorの
+native ghost-text actionである。inline assistantは対象Buffer generationとrangeをcaptureし、Zed
+`PromptBuilder`/`LanguageModelRegistry`でstreamした結果を1 transactionのpreviewとして適用する。
+source generationが変わった結果は適用せず、accept/reject/undoも同じBuffer transactionを使う。
+
+Collaboration panelはproduction `Client`、`UserStore`、`ChannelStore`のsnapshotだけを投影する。
+create/invite/sign-in/out/refreshは各store APIへ戻し、notes tabのtext/collaborators/replica stateは
+`ChannelBuffer`がauthorityである。splitは同じBuffer Entityを共有し、followingはcollaborator pointを
+通常のEditor selectionへ変換する。offline fixtureはPTYの決定性だけのために隔離し、production stateと
+混在させない。
+
+voice/screen shareはterminal cellで代替できないためexternal bridgeとする。strict JSON config、
+terminal capability、selected channel URL、毎回の確認が揃った時だけowned childを起動し、kindとURLを
+末尾引数に渡す。start/stop/exit/errorをpanelへ投影し、stopとDropはkill後にwaitする。
+
+`.ipynb`は通常のProject Bufferとは別にhidden GPUI windowの`NotebookEditor`を開く。cells、cell Editor、
+execution request、Jupyter messageはNotebookEditor、save/session dirty stateはProject Bufferがauthorityで、
+terminalは`to_notebook`のimmutable JSON snapshotだけを描画する。同じBuffer IDのsplitは1つの
+Notebook stateを共有する。cell actionはZed notebook actionをhidden dispatch treeへ送り、native snapshotが
+変わった時だけBufferを更新する。固定upstream serializerが落とす既存display-dataはcell IDで保全し、
+run/clear時に失効させる。
+
+固定upstreamはStarting中のlocal kernelをrestart/closeした時にprocess groupを残す場合がある。
+zecはNotebook Entity IDから`kernel-zed-<id>.json`を導出し、現在processの子孫かつそのconnection fileを
+argvに持つprocessだけをsysinfoで選ぶ。restart後は事前snapshotのPIDだけ、最終Dropは全matching PIDを
+Unix process group（非Unixはprocess）単位で終了するため、別Notebook、terminal、taskを巻き込まない。
+
 ## Buffer search (`Ctrl-F`, active Buffer only)
 
 この節のBuffer内検索は`Alt-F`のrepository-wide Project Searchとは別機能である。
@@ -487,9 +524,10 @@ keymap、複数 selection、fold/inlay の同期が必要になる。
 
 ## Deferred
 
-tabのreorder UI、LSP、検索option/history、Go to lineの相対指定/live preview、clipboard metadata/read、native set外の
-grammar、完全なlanguage injection、terminal-aware soft wrap、mouse drag/double/triple/modifier selection、
-外部rename/deleteの詳細なrecovery UIは後続で追加する。
+default-branch hosted evidence、live AI providerと2-client channel共同編集、desktop media bridge、
+real kernelが新規生成するimage/HTML/JSON output、remote/Windows Notebook lifecycle、OS signing/notarizationは
+verificationとして残る。presentation機能では検索history、Go to lineの相対指定/live preview、clipboard
+metadata/read、native set外のgrammarと完全なlanguage injection、terminal cell幅を使うsoft wrapが未完了である。
 
 自動確認には `--smoke` と単体テストを使う。端末経路はPTY上で文字入力、undo、
 新規・既存ファイルの保存、scratchのsave-asと上書き確認、OSC 52 copy、Zed Cutのundo、

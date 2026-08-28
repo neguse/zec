@@ -201,7 +201,13 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
                     && contents.contains("deterministic fixture warning")
             },
         )?;
-        let dismiss = session.send_marked(ESC)?;
+        let return_to_editor = session.send_marked(ESC)?;
+        session.wait_contains(
+            "diagnostics focus return",
+            return_to_editor,
+            "editor focused; diagnostics dock remains open",
+        )?;
+        let dismiss = session.send_marked(F8)?;
         session.wait_absent("diagnostics dismissal", dismiss, "Diagnostics")?;
         if index >= diagnostic_warmups {
             let id = format!("B8_DIAGNOSTICS_{:03}", index - diagnostic_warmups + 1);
@@ -454,20 +460,28 @@ fn run(arguments: alpha_2_support::RunArguments) -> Result<()> {
             Instant::now() < diagnostics_deadline,
             "10,000 diagnostics did not reach the project within 15 seconds"
         );
-        let dismiss = large_session.send_marked(ESC)?;
-        large_session.wait_absent(
-            "empty diagnostics dismissal",
-            dismiss,
-            "No matching diagnostics",
+        let return_to_editor = large_session.send_marked(ESC)?;
+        large_session.wait_contains(
+            "empty diagnostics focus return",
+            return_to_editor,
+            "editor focused; diagnostics dock remains open",
         )?;
+        let dismiss = large_session.send_marked(F8)?;
+        large_session.wait_absent("empty diagnostics dismissal", dismiss, "Diagnostics")?;
         thread::sleep(Duration::from_millis(25));
     }
     let diagnostics_vm = alpha_1_support::vm_hwm_bytes(large_session.pid()?)?;
-    let dismiss_diagnostics = large_session.send_marked(ESC)?;
+    let return_to_editor = large_session.send_marked(ESC)?;
+    large_session.wait_contains(
+        "large diagnostics focus return",
+        return_to_editor,
+        "editor focused; diagnostics dock remains open",
+    )?;
+    let dismiss_diagnostics = large_session.send_marked(F8)?;
     large_session.wait_absent(
         "large diagnostics dismissal",
         dismiss_diagnostics,
-        "bounded diagnostic",
+        "Diagnostics",
     )?;
     large_session.send(CTRL_Q)?;
     ensure!(

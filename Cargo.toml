@@ -117,6 +117,7 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 release_channel = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 remote = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 remote_server = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+repl = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 semver = "1"
 shellexpand = "3"
 rope = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
@@ -126,6 +127,7 @@ serde_json = "1"
 sha2 = "0.10"
 similar = "2.7"
 settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+sysinfo = "0.37"
 task = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme_extension = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
@@ -141,6 +143,7 @@ vt100 = "0.16"
 watch = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 workspace = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 worktree = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+zed_actions = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["fs", "signal", "term"] }

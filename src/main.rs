@@ -8,6 +8,7 @@ mod extension_picker;
 mod git_panel;
 mod inline_assistant;
 mod input;
+mod notebook;
 mod outline_panel;
 mod project_panel;
 mod project_search;
@@ -262,7 +263,7 @@ use workspace_session::{
 use worktree::{EntryKind as WorktreeEntryKind, ProjectEntryId};
 use zed_fs::{Fs, RealFs};
 
-const USAGE: &str = "Usage: zec [DIRECTORY | FILE ...]\n       zec --smoke\n       zec --version\n       zec remote ssh HOST [--user USER] [--port PORT] [--arg ARG]... [--timeout SECONDS] [--nickname NAME] [--no-upload] ABSOLUTE_PATH...\n       zec remote wsl DISTRO [--user USER] ABSOLUTE_PATH...\n       zec remote container NAME [--id ID] [--user USER] [--podman|--docker] [--env NAME=VALUE]... [--no-upload] ABSOLUTE_PATH...\n       zec update check [--manifest PATH|HTTPS_URL]\n       zec update download --output PATH [--manifest PATH|HTTPS_URL]\n       zec update apply [--manifest PATH|HTTPS_URL]\n       zec update verify --binary PATH [--manifest PATH|HTTPS_URL]\n\nKeys: F1/Ctrl-Shift-P commands, Ctrl-Shift-A Agent, Ctrl-Alt-C collaboration, Ctrl-Enter inline assistant, Alt-\\ show prediction, Alt-L/K/J accept prediction/all/word/line, Ctrl-Alt-Shift-E toggle predictions, Ctrl-Shift-V Markdown preview, Ctrl-Shift-X extensions, Ctrl-Alt-T/I theme/icon theme, Ctrl-, settings, Ctrl-Alt-, keymap, F3/Ctrl-` terminal, Ctrl-Shift-` new terminal, Ctrl-Shift-G Git, Ctrl-Shift-B tasks, Ctrl-Alt-B rerun task, F5 debug, Ctrl-Shift-D debugger, Ctrl-F9 breakpoint, Ctrl/Shift-F5 continue/stop, Ctrl-F6 pause, Alt-F10/F11 step over/in, Alt-Shift-F11 step out, Ctrl-Shift-R debug REPL, F4 terminal capabilities, F7 project panel, F9 outline panel, F10/Shift-F10 split right/down, Ctrl-Alt-Arrows focus panes, Ctrl-Alt-Shift-Arrows move tabs, F11/Ctrl-F11/Shift-F11 fold/fold all/unfold all, Alt-Z soft wrap, Ctrl-: inlay hints, Shift-Alt-Up/Down add cursors, Ctrl-D/Ctrl-Shift-L select next/all occurrences, Ctrl-Space/Alt-/ completion, F2 hover, F6 rename, F8 diagnostics, F12 definition, Alt-F12 type definition, Shift-F12 references, Ctrl-. code actions, Shift-Alt-F format, Ctrl-Alt-F format selection, Ctrl-T symbols, Alt-Left/Right history, Ctrl-N new, Ctrl-O open, Ctrl-P quick open, Alt-F project search, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z/Y undo/redo";
+const USAGE: &str = "Usage: zec [DIRECTORY | FILE ...]\n       zec --smoke\n       zec --version\n       zec remote ssh HOST [--user USER] [--port PORT] [--arg ARG]... [--timeout SECONDS] [--nickname NAME] [--no-upload] ABSOLUTE_PATH...\n       zec remote wsl DISTRO [--user USER] ABSOLUTE_PATH...\n       zec remote container NAME [--id ID] [--user USER] [--podman|--docker] [--env NAME=VALUE]... [--no-upload] ABSOLUTE_PATH...\n       zec update check [--manifest PATH|HTTPS_URL]\n       zec update download --output PATH [--manifest PATH|HTTPS_URL]\n       zec update apply [--manifest PATH|HTTPS_URL]\n       zec update verify --binary PATH [--manifest PATH|HTTPS_URL]\n\nKeys: F1/Ctrl-Shift-P commands, Ctrl-Shift-A Agent, Ctrl-Alt-C collaboration, Ctrl-Enter inline assistant, Alt-\\ show prediction, Alt-L/K/J accept prediction/all/word/line, Ctrl-Alt-Shift-E toggle predictions, Ctrl-Shift-V Markdown preview, Ctrl-Shift-X extensions, Ctrl-Alt-T/I theme/icon theme, Ctrl-, settings, Ctrl-Alt-, keymap, F3/Ctrl-` terminal, Ctrl-Shift-` new terminal, Ctrl-Shift-G Git, Ctrl-Shift-B tasks, Ctrl-Alt-B rerun task, F5 debug, Ctrl-Shift-D debugger, Ctrl-F9 breakpoint, Ctrl/Shift-F5 continue/stop, Ctrl-F6 pause, Alt-F10/F11 step over/in, Alt-Shift-F11 step out, Ctrl-Shift-R debug REPL, .ipynb Notebook: Up/Down cells, Enter edit, Ctrl/Shift-Enter run, b/m add, dd delete, i interrupt, r restart, R run all, F4 terminal capabilities, F7 project panel, F9 outline panel, F10/Shift-F10 split right/down, Ctrl-Alt-Arrows focus panes, Ctrl-Alt-Shift-Arrows move tabs, F11/Ctrl-F11/Shift-F11 fold/fold all/unfold all, Alt-Z soft wrap, Ctrl-: inlay hints, Shift-Alt-Up/Down add cursors, Ctrl-D/Ctrl-Shift-L select next/all occurrences, Ctrl-Space/Alt-/ completion, F2 hover, F6 rename, F8 diagnostics, F12 definition, Alt-F12 type definition, Shift-F12 references, Ctrl-. code actions, Shift-Alt-F format, Ctrl-Alt-F format selection, Ctrl-T symbols, Alt-Left/Right history, Ctrl-N new, Ctrl-O open, Ctrl-P quick open, Alt-F project search, Ctrl-W close tab, Ctrl-PgUp/PgDn tabs, Alt-PgUp/PgDn scroll, Ctrl-C copy, Ctrl-X cut, Ctrl-F find, Ctrl-H replace, Ctrl-G line, Ctrl-R reload, Ctrl-S save, Ctrl-Q quit, Ctrl-Z/Y undo/redo";
 const QUICK_OPEN_LIMIT: usize = 100;
 const PROJECT_SYMBOL_LIMIT: usize = 100;
 const MAX_CONCURRENT_PROJECT_SEARCHES: usize = 2;
@@ -3339,6 +3340,17 @@ struct InteractiveStartupTarget {
     remote_delegate: Option<Arc<remote_session::TerminalRemoteDelegate>>,
 }
 
+fn invalidate_terminal_after_resize<B>(
+    terminal: &mut ratatui::Terminal<B>,
+) -> std::result::Result<(), B::Error>
+where
+    B: ratatui::backend::Backend,
+{
+    terminal.backend_mut().clear()?;
+    terminal.swap_buffers();
+    Ok(())
+}
+
 async fn await_remote_connection(
     connection: Task<Result<Option<Entity<remote::RemoteClient>>>>,
     request: &remote_session::RemoteRequest,
@@ -3382,11 +3394,14 @@ async fn await_remote_connection(
                         bail!("remote connection interrupted by signal {signal}");
                     }
                     TerminalEvent::Error(error) => bail!("terminal input failed: {error}"),
+                    TerminalEvent::Resize { .. } => {
+                        invalidate_terminal_after_resize(terminal)
+                            .context("force a full remote-connection redraw after resize")?;
+                    }
                     TerminalEvent::Action(_)
                     | TerminalEvent::Mouse(_)
                     | TerminalEvent::MouseScroll(_)
                     | TerminalEvent::FocusChanged(_)
-                    | TerminalEvent::Resize
                     | TerminalEvent::Redraw
                     | TerminalEvent::RemoteChanged
                     | TerminalEvent::ExtensionsFetched { .. }
@@ -3835,6 +3850,8 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
             let mut pending_project_mutation: Option<PendingProjectMutation> = None;
             let mut rich_content_by_item: BTreeMap<ItemId, rich_content::RichContentState> =
                 initial_rich_content_by_item;
+            let mut notebook_by_buffer = BTreeMap::<u64, notebook::NotebookState>::new();
+            let mut notebook_open_failures = BTreeMap::<u64, String>::new();
             let mut pending_external_open: Option<(ItemId, String)> = None;
             let mut displayed_graphic: Option<(
                 ItemId,
@@ -3965,6 +3982,92 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                         break;
                     }
                 };
+                let live_notebook_buffers = tabs
+                    .iter()
+                    .filter(|tab| tab_is_notebook(tab, cx))
+                    .map(|tab| notebook_buffer_key(tab, cx))
+                    .collect::<BTreeSet<_>>();
+                let stale_notebook_buffers = notebook_by_buffer
+                    .keys()
+                    .copied()
+                    .filter(|key| !live_notebook_buffers.contains(key))
+                    .collect::<Vec<_>>();
+                for key in stale_notebook_buffers {
+                    if let Some(notebook) = notebook_by_buffer.remove(&key)
+                        && let Err(error) = notebook.close(cx)
+                    {
+                        message = Some(format!(
+                            "failed to close stale notebook projection: {error:#}"
+                        ));
+                    }
+                }
+                notebook_open_failures
+                    .retain(|key, _| live_notebook_buffers.contains(key));
+
+                let active_notebook_key = notebook_buffer_key(&tabs[active_index], cx);
+                let notebook_processes_allowed = repository.as_ref().is_none_or(|repository| {
+                    repository_mutation_is_trusted(repository, &services, cx)
+                });
+                if tab_is_notebook(&tabs[active_index], cx)
+                    && notebook_processes_allowed
+                    && !notebook_by_buffer.contains_key(&active_notebook_key)
+                    && !notebook_open_failures.contains_key(&active_notebook_key)
+                {
+                    match notebook::NotebookState::open(
+                        tabs[active_index].document.buffer.clone(),
+                        services.project.clone(),
+                        redraw_sender.clone(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Ok(Some(notebook)) => {
+                            notebook_by_buffer.insert(active_notebook_key, notebook);
+                            message = Some(
+                                "opened .ipynb through Zed NotebookEditor and ReplStore"
+                                    .to_owned(),
+                            );
+                        }
+                        Ok(None) => {
+                            notebook_open_failures.insert(
+                                active_notebook_key,
+                                "Zed could not resolve this .ipynb to a ProjectPath".to_owned(),
+                            );
+                        }
+                        Err(error) => {
+                            let error = format!("{error:#}");
+                            notebook_open_failures
+                                .insert(active_notebook_key, error.clone());
+                            message = Some(format!(
+                                "notebook projection unavailable; raw JSON remains editable: {error}"
+                            ));
+                        }
+                    }
+                }
+
+                let mut rejected_notebooks = Vec::new();
+                let mut synchronized_notebooks = BTreeSet::new();
+                for tab in &tabs {
+                    let key = notebook_buffer_key(tab, cx);
+                    if !synchronized_notebooks.insert(key) {
+                        continue;
+                    }
+                    if let Some(notebook) = notebook_by_buffer.get_mut(&key)
+                        && let Err(error) = notebook.synchronize(&tab.document.buffer, cx)
+                    {
+                        rejected_notebooks.push((key, format!("{error:#}")));
+                    }
+                }
+                for (key, error) in rejected_notebooks {
+                    if let Some(notebook) = notebook_by_buffer.remove(&key) {
+                        let _ = notebook.close(cx);
+                    }
+                    notebook_open_failures.insert(key, error.clone());
+                    message = Some(format!(
+                        "notebook authority synchronization failed; raw JSON remains available: {error}"
+                    ));
+                }
+
                 let mut newly_active_channel_notes = None;
                 for (index, tab) in tabs.iter().enumerate() {
                     if let Some(notes) = tab.channel_notes.as_ref() {
@@ -4274,7 +4377,36 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                             // remain authoritative while rich content is active. Rendering the
                             // rich projection over `capture_editor` here would make the overlay
                             // invisible while it continued to consume all input.
-                            if overlay_kind.is_none()
+                            let notebook_snapshot = if overlay_kind.is_none() {
+                                let key = notebook_buffer_key(tab, cx);
+                                notebook_by_buffer
+                                    .get_mut(&key)
+                                    .map(|notebook| {
+                                        notebook.snapshot(
+                                            usize::from(pane_area.area.width),
+                                            usize::from(pane_area.area.height),
+                                            pane_area
+                                                .focused
+                                                .then_some(display_message.as_deref())
+                                                .flatten(),
+                                            cx,
+                                        )
+                                    })
+                                    .transpose()
+                                    .map_err(|error| {
+                                        io::Error::other(format!(
+                                            "failed to capture Zed notebook snapshot: {error:#}"
+                                        ))
+                                    })?
+                            } else {
+                                None
+                            };
+                            if let Some(notebook_snapshot) = notebook_snapshot.as_ref() {
+                                frame.render_widget(
+                                    notebook::NotebookWidget::new(notebook_snapshot),
+                                    pane_area.area,
+                                );
+                            } else if overlay_kind.is_none()
                                 && let Some(rich_content) =
                                     rich_content_by_item.get_mut(&tab.item_id)
                             {
@@ -4602,10 +4734,9 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                 };
                 // An Editor notification can arrive while the previous frame is
                 // being captured. Collapse that burst to one repaint, but retain
-                // every input and state-bearing event in FIFO order. Besides
-                // avoiding redundant work, this prevents a continuously animated
-                // DisplayMap decoration (for example edit-prediction ghost text)
-                // from occupying the bounded input queue ahead of keystrokes.
+                // every input and state-bearing event in FIFO order. Resize bursts
+                // are coalesced by InputReader and must reach dispatch so Ratatui's
+                // previous frame can be invalidated before the next draw.
                 if matches!(event, TerminalEvent::Redraw) {
                     while let Ok(queued) = event_receiver.try_recv() {
                         if !matches!(queued, TerminalEvent::Redraw) {
@@ -4812,6 +4943,44 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                             continue;
                         }
                         rich_content::RichContentInput::Unhandled => {}
+                    }
+                }
+
+                if overlay_kind.is_none()
+                    && matches!(workspace.focus, FocusTarget::Pane(_))
+                {
+                    let key = notebook_buffer_key(&tabs[active_index], cx);
+                    if let Some(notebook) = notebook_by_buffer.get_mut(&key) {
+                        let notebook_input = match &event {
+                            TerminalEvent::Key(key) => notebook.handle_key(
+                                *key,
+                                body_height,
+                                cx,
+                            ),
+                            TerminalEvent::Paste(text) => notebook.handle_paste(text, cx),
+                            TerminalEvent::MouseScroll(direction) => {
+                                notebook.scroll(
+                                    matches!(direction, ScrollDirection::Down),
+                                    3,
+                                );
+                                Ok(notebook::NotebookInput::Consumed)
+                            }
+                            _ => Ok(notebook::NotebookInput::Unhandled),
+                        };
+                        match notebook_input {
+                            Ok(notebook::NotebookInput::Consumed) => {
+                                quit_armed = false;
+                                message = None;
+                                continue;
+                            }
+                            Ok(notebook::NotebookInput::Unhandled) => {}
+                            Err(error) => {
+                                message = Some(format!(
+                                    "notebook input failed; raw JSON remains protected: {error:#}"
+                                ));
+                                continue;
+                            }
+                        }
                     }
                 }
 
@@ -7929,6 +8098,15 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                         // Image tabs use an implementation-only scratch buffer to host Zed's
                         // editor window. It is never user-editable state and must not inherit
                         // scratch-buffer discard confirmation, including after session restore.
+                        let closing_notebook_key = tab_is_notebook(&tabs[active_index], cx)
+                            .then(|| notebook_buffer_key(&tabs[active_index], cx));
+                        let closes_last_notebook_view =
+                            closing_notebook_key.is_some_and(|closing_key| {
+                                tabs.iter()
+                                    .filter(|tab| notebook_buffer_key(tab, cx) == closing_key)
+                                    .count()
+                                    == 1
+                            });
                         let needs_confirmation = tabs[active_index].image_project_path.is_none()
                             && tabs[active_index].channel_notes.is_none()
                             && tab_state(&tabs[active_index], cx).needs_discard_confirmation();
@@ -7946,6 +8124,19 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                         {
                             failure = Some(format!("failed to close buffer search: {error:#}"));
                             break;
+                        }
+                        let mut notebook_close_error = None;
+                        if closes_last_notebook_view
+                            && let Some(key) = closing_notebook_key
+                        {
+                            if let Some(notebook) = notebook_by_buffer.remove(&key)
+                                && let Err(error) = notebook.close(cx)
+                            {
+                                notebook_close_error = Some(format!(
+                                    "tab closed, but its notebook projection failed to close: {error:#}"
+                                ));
+                            }
+                            notebook_open_failures.remove(&key);
                         }
                         if let Err(error) = editor_window.update(cx, |_editor, window, _cx| {
                             window.remove_window();
@@ -7974,7 +8165,8 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                         quick_open_prompt = None;
                         close_project_search_prompt(&mut project_search_prompt, &mut project_search_coordinator);
                         close_armed = false;
-                        message = Some("tab closed".to_owned());
+                        message =
+                            notebook_close_error.or_else(|| Some("tab closed".to_owned()));
                     }
                     TerminalEvent::Key(event)
                         if input::is_previous_tab(&event) || input::is_next_tab(&event) =>
@@ -9202,9 +9394,25 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
 
                             reload_armed = false;
                             save_conflict_armed = false;
+                            let reloaded_notebook_key =
+                                tab_is_notebook(&tabs[active_index], cx)
+                                    .then(|| notebook_buffer_key(&tabs[active_index], cx));
                             match reload_tab(&tabs[active_index], &services, cx).await
                             {
                                 Ok(()) => {
+                                    let notebook_close_warning =
+                                        if let Some(key) = reloaded_notebook_key {
+                                            notebook_open_failures.remove(&key);
+                                            notebook_by_buffer.remove(&key).and_then(|notebook| {
+                                                notebook.close(cx).err().map(|error| {
+                                                    format!(
+                                                        "old notebook projection failed to close: {error:#}"
+                                                    )
+                                                })
+                                            })
+                                        } else {
+                                            None
+                                        };
                                     let conflict = tab_state(&tabs[active_index], cx).conflict;
                                     if conflict {
                                         message = Some(
@@ -9222,6 +9430,12 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                                             break;
                                         }
                                         message = Some("reloaded from disk".to_owned());
+                                    }
+                                    if let Some(warning) = notebook_close_warning {
+                                        let status = message
+                                            .take()
+                                            .unwrap_or_else(|| "reloaded from disk".to_owned());
+                                        message = Some(format!("{status}; {warning}"));
                                     }
                                 }
                                 Err(error) => {
@@ -12558,9 +12772,15 @@ fn run_interactive_target(target: InteractiveTarget) -> Result<()> {
                             outline_refresh_requested = true;
                         }
                     }
-                    TerminalEvent::Resize
-                    | TerminalEvent::Redraw
-                    | TerminalEvent::RemoteChanged => {}
+                    TerminalEvent::Resize { .. } => {
+                        if let Err(error) = invalidate_terminal_after_resize(&mut terminal) {
+                            failure = Some(format!(
+                                "failed to force a full redraw after resize: {error}"
+                            ));
+                            break;
+                        }
+                    }
+                    TerminalEvent::Redraw | TerminalEvent::RemoteChanged => {}
                     TerminalEvent::Signal(signal) => {
                         if terminal::is_suspend_signal(signal) {
                             if let Err(error) = terminal::suspend_and_resume(
@@ -19115,6 +19335,21 @@ fn aggregate_buffer_state(buffers: &[Entity<Buffer>], cx: &gpui::AsyncApp) -> Do
     state
 }
 
+fn notebook_buffer_key(tab: &DocumentTab, cx: &gpui::AsyncApp) -> u64 {
+    tab.document
+        .buffer
+        .read_with(cx, |buffer, _| buffer.remote_id().to_proto())
+}
+
+fn tab_is_notebook(tab: &DocumentTab, cx: &gpui::AsyncApp) -> bool {
+    document_state(&tab.document, cx)
+        .path
+        .as_deref()
+        .and_then(Path::extension)
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
+}
+
 fn tab_state(tab: &DocumentTab, cx: &gpui::AsyncApp) -> DocumentState {
     // Channel notes are synchronized operation-by-operation by ChannelBuffer;
     // they are neither file-backed nor part of zec's discard/save contract.
@@ -20891,6 +21126,8 @@ fn init_zed(cx: &mut App) {
             Arc::new(RealFs::new(None, cx.background_executor().clone()));
         let file_system: Arc<dyn Fs> = ZecFs::guarded(real_file_system);
         <dyn Fs>::set_global(file_system.clone(), cx);
+        repl::init(file_system.clone(), cx);
+        repl::notebook::init(cx);
         let prompt_builder = prompt_store::PromptBuilder::load(file_system.clone(), true, cx);
         let language_registry = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
         language_registry.set_theme(cx.theme().clone());
@@ -25105,6 +25342,24 @@ async fn alpha_1_search_failure_probe(
 mod tests {
     use super::*;
     use editor::MultiBufferOffset;
+
+    #[test]
+    fn resize_invalidation_clears_backend_and_forces_a_full_redraw() {
+        use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+        let mut terminal = Terminal::new(TestBackend::new(6, 2)).expect("create test terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new("before"), frame.area()))
+            .expect("draw initial frame");
+        terminal.backend().assert_buffer_lines(["before", "      "]);
+
+        invalidate_terminal_after_resize(&mut terminal).expect("invalidate after resize");
+        terminal.backend().assert_buffer_lines(["      ", "      "]);
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new("after"), frame.area()))
+            .expect("draw replacement frame");
+        terminal.backend().assert_buffer_lines(["after ", "      "]);
+    }
 
     struct TemporaryTestFile {
         path: PathBuf,

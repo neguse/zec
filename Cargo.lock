@@ -723,6 +723,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-attributes"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3203e79f4dd9bdda415ed03cf14dae5a2bf775c683a00f94e9cd1faf0f596e5"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,6 +777,16 @@ dependencies = [
  "compression-core",
  "futures-io",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-dispatcher"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c8bff43baa5b0ca8f8bcd7f9338f5d30fbd75236a2aa89130a7c5121a06d6ca"
+dependencies = [
+ "async-task",
+ "futures-lite 1.13.0",
 ]
 
 [[package]]
@@ -902,6 +922,7 @@ version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c8e079a4ab67ae52b7403632e4618815d6db36d2a010cfe41b02c1b1578f93b"
 dependencies = [
+ "async-attributes",
  "async-channel 1.9.0",
  "async-global-executor",
  "async-io",
@@ -983,6 +1004,19 @@ dependencies = [
  "futures-lite 2.6.1",
  "pin-project",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -1133,6 +1167,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -6858,6 +6893,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "jupyter-protocol"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ebf93748a4d7fff4b475da4f50d95b1ea6cf9ed528ed5ec26db8228eabc112a"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "jupyter-websocket-client"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c2ae4d8d5344f69bf9734b264e969c2139e30e932ce9b6455de9f65663ed614"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "async-tungstenite",
+ "bytes",
+ "futures",
+ "jupyter-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8231,6 +8301,21 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "nbformat"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89bd627a9b44814f546a1ce9dbc088599d3a030b8667b8816c07f2bd5a4507ba"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "jupyter-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
@@ -9901,6 +9986,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "picker"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "db",
+ "gpui",
+ "language",
+ "menu",
+ "project",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11175,6 +11284,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "repl"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "async-dispatcher",
+ "async-task",
+ "async-tungstenite",
+ "base64",
+ "client",
+ "collections",
+ "command_palette_hooks",
+ "editor",
+ "feature_flags",
+ "file_icons",
+ "futures",
+ "gpui",
+ "html_to_markdown",
+ "http_client",
+ "image",
+ "jupyter-protocol",
+ "jupyter-websocket-client",
+ "language",
+ "log",
+ "markdown",
+ "menu",
+ "multi_buffer",
+ "nbformat",
+ "picker",
+ "project",
+ "remote",
+ "runtimelib",
+ "serde",
+ "serde_json",
+ "settings",
+ "shlex 1.3.0",
+ "smol",
+ "telemetry",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "uuid",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "reqwest_client"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
@@ -11228,7 +11387,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -11320,6 +11479,32 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "runtimelib"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1c46eb84b80531e9745a859f60fd599eab9f6397d0db1bda8c99720796d3000"
+dependencies = [
+ "async-dispatcher",
+ "async-std",
+ "aws-lc-rs",
+ "base64",
+ "bytes",
+ "chrono",
+ "data-encoding",
+ "dirs",
+ "futures",
+ "glob",
+ "jupyter-protocol",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "smol",
+ "thiserror 2.0.20",
+ "uuid",
+ "zeromq",
 ]
 
 [[package]]
@@ -11525,7 +11710,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
 dependencies = [
  "ring",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -11537,7 +11722,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -11577,6 +11762,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
+name = "saa"
+version = "5.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f5acb362a0e75c2a963532fa7fabf13dff81626dc494df16488d30befcbea0"
+
+[[package]]
 name = "safe_arch"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11609,6 +11800,16 @@ dependencies = [
  "smol",
  "tempfile",
  "windows-registry 0.6.1",
+]
+
+[[package]]
+name = "scc"
+version = "3.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8af0b99483d1c3e59471d4f0cb58b244169436a8979c889a91a3f697075ea01"
+dependencies = [
+ "saa",
+ "sdd",
 ]
 
 [[package]]
@@ -11707,7 +11908,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
  "ring",
- "untrusted",
+ "untrusted 0.9.0",
+]
+
+[[package]]
+name = "sdd"
+version = "4.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f95d4cc3459db1e608946153c95cf20158af0b86131ae4ae451f90f54549e7d1"
+dependencies = [
+ "saa",
 ]
 
 [[package]]
@@ -13106,6 +13316,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_view"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "async-recursion",
+ "breadcrumbs",
+ "collections",
+ "db",
+ "dirs",
+ "editor",
+ "futures",
+ "gpui",
+ "itertools 0.14.0",
+ "language",
+ "log",
+ "menu",
+ "pretty_assertions",
+ "project",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "settings",
+ "shellexpand",
+ "shlex 1.3.0",
+ "task",
+ "terminal",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "text"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
@@ -13354,6 +13601,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2 0.6.5",
@@ -14065,6 +14313,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"
@@ -16262,6 +16516,7 @@ dependencies = [
  "release_channel",
  "remote",
  "remote_server",
+ "repl",
  "rope",
  "rpc",
  "semver",
@@ -16272,6 +16527,7 @@ dependencies = [
  "shellexpand",
  "signal-hook 0.3.18",
  "similar",
+ "sysinfo",
  "task",
  "tempfile",
  "terminal",
@@ -16286,6 +16542,7 @@ dependencies = [
  "watch",
  "workspace",
  "worktree",
+ "zed_actions",
  "zeroize",
 ]
 
@@ -16437,6 +16694,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zeromq"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efb2c254fd8f366755335c9e43b865f8484fe3bd717d65ffe7c3f28852863030"
+dependencies = [
+ "async-dispatcher",
+ "async-std",
+ "async-trait",
+ "asynchronous-codec",
+ "bytes",
+ "crossbeam-queue",
+ "futures",
+ "log",
+ "num-traits",
+ "once_cell",
+ "parking_lot",
+ "rand 0.9.5",
+ "regex",
+ "scc",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

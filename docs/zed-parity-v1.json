@@ -128,7 +128,7 @@
       "id": "NOTEBOOK_INTERACTIVE",
       "milestone": "beta-1",
       "delivery": "terminal-adapted",
-      "status": "planned",
+      "status": "candidate",
       "evidence": "docs/beta-1.md"
     },
     {
@@ -177,22 +177,22 @@
       "id": "AI_AGENT_ASSISTANCE",
       "milestone": "parity-1",
       "delivery": "terminal-adapted",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/parity-1.md"
     },
     {
       "id": "COLLABORATIVE_EDITING",
       "milestone": "parity-1",
       "delivery": "faithful",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/parity-1.md"
     },
     {
       "id": "COLLABORATION_MEDIA",
       "milestone": "parity-1",
       "delivery": "external-bridge",
-      "status": "planned",
-      "evidence": "docs/zed-parity.md"
+      "status": "candidate",
+      "evidence": "docs/parity-1.md"
     }
   ]
 }

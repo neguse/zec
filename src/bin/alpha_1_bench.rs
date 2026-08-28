@@ -923,18 +923,20 @@ fn parse_project_search_status(
         .checked_sub(rendered_core.len())
         .context("project-search status core exceeded terminal width")?;
     // Every fixed benchmark row leaves at most six cells, so only the
-    // ASCII prefix of ProjectSearchPrompt's action hint can be rendered.
-    const PROJECT_SEARCH_ACTION_PREFIX: &str = "  Enter";
+    // ASCII prefix of ProjectSearchPrompt's default option summary can be
+    // rendered. Alpha 3 deliberately exposes search modes before actions.
+    const PROJECT_SEARCH_DEFAULT_OPTIONS_PREFIX: &str =
+        "  [lit case:off word:off ignored:off open:off full:off]";
     ensure!(
-        remaining_columns <= PROJECT_SEARCH_ACTION_PREFIX.len(),
-        "benchmark row left unverified columns after its action hint prefix"
+        remaining_columns <= PROJECT_SEARCH_DEFAULT_OPTIONS_PREFIX.len(),
+        "benchmark row left unverified columns after its option-summary prefix"
     );
-    let expected_footer = PROJECT_SEARCH_ACTION_PREFIX
+    let expected_footer = PROJECT_SEARCH_DEFAULT_OPTIONS_PREFIX
         .get(..remaining_columns)
-        .expect("ASCII action hint clipping is a character boundary");
+        .expect("ASCII option-summary clipping is a character boundary");
     ensure!(
         footer == expected_footer,
-        "rendered project-search action suffix differed after terminal clipping: observed {footer:?}, expected {expected_footer:?}"
+        "rendered project-search option suffix differed after terminal clipping: observed {footer:?}, expected {expected_footer:?}"
     );
     let preview = &preview_and_footer[..expected.preview.len()];
     let mut location = location.rsplitn(3, ':');
@@ -1369,20 +1371,20 @@ mod tests {
             expected.path, expected.line, expected.column, expected.preview
         );
         assert_eq!(core.len(), 115);
-        let status_with_clipped_hint = format!("{core}  Ent");
+        let status_with_clipped_options = format!("{core}  [li");
         assert_eq!(
-            status_with_clipped_hint.len(),
+            status_with_clipped_options.len(),
             usize::from(alpha_1_support::COLS)
         );
         let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
-        parser.process(format!("\x1b[2J\x1b[40;1H{status_with_clipped_hint}").as_bytes());
+        parser.process(format!("\x1b[2J\x1b[40;1H{status_with_clipped_options}").as_bytes());
         let (position, total_hits, observed) =
             parse_project_search_status(parser.screen(), &expected)
-                .expect("accept the exact action hint clipped at 120 columns");
+                .expect("accept the exact option summary clipped at 120 columns");
         assert_eq!((position, total_hits), (10, 1_000));
         assert_eq!(observed, expected);
 
-        let status_with_bad_suffix = format!("{core}  EnX");
+        let status_with_bad_suffix = format!("{core}  [lX");
         let mut parser = vt100::Parser::new(alpha_1_support::ROWS, alpha_1_support::COLS, 0);
         parser.process(format!("\x1b[2J\x1b[40;1H{status_with_bad_suffix}").as_bytes());
         let error = parse_project_search_status(parser.screen(), &expected)
@@ -1390,7 +1392,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("rendered project-search action suffix differed")
+                .contains("rendered project-search option suffix differed")
         );
     }
 

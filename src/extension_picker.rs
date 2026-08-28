@@ -402,7 +402,7 @@ impl ExtensionPickerPrompt {
             .unwrap_or_default();
         (
             format!(
-                "{prefix}{}  {current}/{}  Enter install/update/rebuild  Del uninstall  Ctrl-D dev  Tab scope  Ctrl-R reload  Esc close{loading}{feedback}",
+                "{prefix}{}  {current}/{}{loading}{feedback}  |  Enter install/update/rebuild  Del uninstall  Ctrl-D dev  Tab scope  Ctrl-R reload  Esc close",
                 self.prompt.text(),
                 self.visible.len()
             ),
@@ -532,6 +532,27 @@ mod tests {
         picker.cycle_scope();
         assert_eq!(picker.scope, ExtensionScope::Updates);
         assert_eq!(picker.visible.len(), 1);
+    }
+
+    #[test]
+    fn operation_feedback_precedes_help_and_remains_visible_with_a_message() {
+        let mut picker = ExtensionPickerPrompt::new(vec![record(
+            "beta-2-dev-theme",
+            "0.4.3",
+            Some("0.4.3"),
+            true,
+        )]);
+        assert_eq!(
+            picker.prompt.handle_paste("Beta 2 Dev Theme"),
+            PromptAction::Changed
+        );
+        let feedback = "press Delete again to uninstall beta-2-dev-theme";
+        picker.set_feedback(feedback);
+
+        let (status, _) = picker.status(Some("user settings reloaded"));
+        let first_160_columns = status.chars().take(160).collect::<String>();
+        assert!(first_160_columns.contains(feedback));
+        assert!(status.find(feedback) < status.find("Enter install/update/rebuild"));
     }
 
     #[test]

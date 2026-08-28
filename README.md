@@ -3,10 +3,11 @@
 Zed の編集コアを使う CUI エディタです。repository/language editingとTerminal Workspace、
 Git/terminal/tasks/DAPのlocal development loopに加え、Zed extension host、theme、settings/keymap、
 manifest検証付きupdate、6-target release pipeline、Zed remote protocolによるSSH workspace、
-Markdown/画像、10万行large-file pathまで
-implemented candidateです。Alpha 3の361-case actual-binary acceptanceと860-ID benchmarkはlocalで完走し、
-hosted evidence待ちです。AI、collaboration、notebookはまだparity未達であり、
-production-readyではありません。
+Markdown/画像、10万行large-file path、Zed Agent/ACP/MCP、edit prediction/inline assistant、
+channels/channel notes/following、voice/screen bridge、native Zed Notebookまでimplemented candidateです。
+機械可読台帳の27 capabilityすべてに実装証跡があります。Alpha 3の361-case actual-binary acceptanceと
+860-ID benchmarkはlocalで完走していますが、default-branch hosted evidence、live service、
+全platformの証跡待ちなので、まだverifiedでもproduction-readyでもありません。
 
 現在は、GPUI runtime 上で `editor::Editor` を動かし、Crossterm から Zed の
 keymap へ入力を渡し、Ratatui で本文、カーソル、selection、syntax styleを描画します。
@@ -19,7 +20,8 @@ PoCの卒業判定、検証記録、既知制約は [docs/poc-graduation.md](doc
 [docs/alpha-1.md](docs/alpha-1.md)、次のProject-backed language editing loopは
 [docs/alpha-2.md](docs/alpha-2.md)、Terminal Workspaceは[docs/alpha-3.md](docs/alpha-3.md)、
 local development loopは[docs/beta-1.md](docs/beta-1.md)、ecosystemと配布は
-[docs/beta-2.md](docs/beta-2.md)の機械判定contractで管理します。
+[docs/beta-2.md](docs/beta-2.md)、AI/collaboration/mediaは
+[docs/parity-1.md](docs/parity-1.md)の機械判定contractで管理します。
 
 Alpha 2の通常回帰は、unit/PTYに加えて次のactual-binary integration testで確認できます。
 canonicalな20-process acceptanceとbenchmark、Alpha 1再検証、evidence-only promotionを含む完全な
@@ -174,6 +176,34 @@ zec update check
 zec update download --output ./zec-new
 zec update apply
 ```
+
+## Agent, collaboration, and Notebook
+
+`Ctrl-Shift-A`（またはcommand paletteの`Toggle Agent Panel`）でAgent panelを開きます。
+既定はprocess内のnative Zed Agentで、`ZEC_ACP_AGENT`にstrict JSONのcommand/args/env/idを設定した
+場合だけexternal stdio ACP agentへ接続します。prompt、stream、tool call、permissionのallow/reject、
+cancel、新規sessionに加え、`/models`、`/modes`、`/config`、`/sessions`、`/skills`、
+`/instructions`、`/mcp`、`/auth`を操作できます。外部agentを含むprocess開始はworktree trust後です。
+
+`Alt-\`でZed edit predictionを表示し、`Alt-L` / `Alt-K` / `Alt-J`で全体／次word／次lineを
+Zed transactionとして受け入れます。providerはZed language settingsの
+Zed/Copilot/Codestral/Ollama/OpenAI-compatible設定に追従します。`Ctrl-Enter`のinline assistantは
+stream結果をdiff previewにし、`Enter`でaccept、`Esc`でrejectします。
+
+`Ctrl-Alt-C`でZed Client/UserStore/ChannelStoreを使うCollaboration panelを開きます。
+矢印と`Enter`でchannel notes、`Tab`と`f`でcollaborator follow、`c`でchannel作成、
+`a` / `d`でinvite応答、`i`でsign-in/outを操作します。notesはZed `ChannelBuffer`なのでsplit間で
+同じ共同編集authorityを共有します。voice/screenは端末内に偽装せずexternal bridgeです。
+`ZEC_MEDIA_BRIDGE`と`ZEC_EXTERNAL_MEDIA=1`の両方がある場合のみ、`v` / `s`の後に毎回`y`で
+許可して開始し、stop/終了時にowned processを回収します。
+
+`.ipynb`はZed `NotebookItem` / `NotebookEditor`で開きます。矢印でcell選択、`Enter`で編集、
+`Ctrl-Enter` / `Shift-Enter`でrun/run-and-advance、`b` / `m`でcode/Markdown追加、`dd`で削除、
+`Alt-Up/Down`で移動、`R`でrun all、`c`でoutput消去、`i` / `r`でkernel interrupt/restartです。
+stream/error/Markdownと既存rich outputのmetadata fallbackを投影し、nbformat JSONを通常の
+Project Bufferへ保存します。splitは1つのNotebook authorityを共有し、再起動中や最終closeでも
+local Jupyter process groupを残しません。詳細・制約・実バイナリ証跡は
+[docs/parity-1.md](docs/parity-1.md)を参照してください。
 
 端末を使わず、Zed Editorへの挿入とundoを確認するheadless smoke:
 

@@ -1585,6 +1585,316 @@ fn parity_1_collaboration_notes_follow_invites_and_media_run_through_the_actual_
     session.assert_terminal_restored(&termios_before)
 }
 
+#[test]
+fn parity_1_notebook_cells_outputs_kernel_controls_and_cleanup_run_through_the_actual_binary()
+-> Result<()> {
+    const MARKDOWN: &str = "NOTEBOOK_MARKDOWN_READY";
+    const PRELOADED: &str = "NOTEBOOK_PRELOADED_STREAM";
+    const EDITED: &str = "NOTEBOOK_EDITED_FROM_TERMINAL";
+
+    let temp = tempfile::tempdir().context("create Notebook PTY fixture")?;
+    let root = temp.path().join("notebook-project");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&root).context("create Notebook fixture project")?;
+    fs::create_dir_all(&bin).context("create Notebook fixture bin")?;
+    let notebook_path = root.join("console.ipynb");
+    let notebook_json = serde_json::to_string_pretty(&serde_json::json!({
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "id": "intro",
+                "metadata": {},
+                "source": ["# Console Notebook\n", format!("{MARKDOWN}\n")]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": 7,
+                "id": "fixture-code",
+                "metadata": {},
+                "outputs": [
+                    {
+                        "name": "stdout",
+                        "output_type": "stream",
+                        "text": [format!("{PRELOADED}\n")]
+                    },
+                    {
+                        "data": {"image/png": "aGVsbG8="},
+                        "metadata": {},
+                        "output_type": "display_data"
+                    }
+                ],
+                "source": ["print('fixture')\n"]
+            }
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            },
+            "language_info": {"name": "python"}
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5
+    }))
+    .context("serialize Notebook fixture")?;
+    fs::write(&notebook_path, notebook_json).context("write Notebook fixture")?;
+
+    let kernel_log = temp.path().join("notebook-kernel.log");
+    let python = bin.join("python3");
+    fs::write(
+        &python,
+        r#"#!/bin/sh
+case " $* " in
+  *" ipykernel_launcher "*) ;;
+  *) exec /usr/bin/python3 "$@" ;;
+esac
+count=0
+if [ -f "$ZEC_NOTEBOOK_KERNEL_LOG" ]; then
+  count=$(/usr/bin/wc -l < "$ZEC_NOTEBOOK_KERNEL_LOG")
+fi
+printf '%s|%s\n' "$$" "$*" >> "$ZEC_NOTEBOOK_KERNEL_LOG"
+if [ "$count" -eq 1 ]; then
+  exit 41
+fi
+/bin/sleep 60
+"#,
+    )
+    .context("write deterministic Notebook kernel")?;
+    let mut permissions = fs::metadata(&python)
+        .context("read Notebook kernel metadata")?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&python, permissions).context("make Notebook kernel executable")?;
+
+    let fixture_path = std::env::join_paths(std::iter::once(bin.clone()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .context("construct Notebook fixture PATH")?;
+    let pair = open_pty()?;
+    let termios_before = pair
+        .master
+        .get_termios()
+        .context("PTY does not expose its initial termios")?;
+    let environment = [
+        (OsStr::new("PATH"), fixture_path.as_os_str()),
+        (
+            OsStr::new("ZEC_NOTEBOOK_KERNEL_LOG"),
+            kernel_log.as_os_str(),
+        ),
+    ];
+    let mut session = PtySession::spawn_with_env(
+        pair,
+        &[root.as_os_str(), notebook_path.as_os_str()],
+        &environment,
+    )?;
+    session.wait_for_screen("Notebook worktree trust", STARTUP_TIMEOUT, |screen| {
+        screen.contains("Worktree Trust") && screen.contains("notebook-project")
+    })?;
+    ensure!(
+        !kernel_log.exists(),
+        "Notebook kernel started before worktree trust confirmation"
+    );
+    session.send(ENTER)?;
+    session.wait_for_screen(
+        "native Zed Notebook projection",
+        STARTUP_TIMEOUT,
+        |screen| {
+            screen.contains("Notebook · Python 3 · 2 cells · command mode")
+                && screen.contains(MARKDOWN)
+                && screen.contains(PRELOADED)
+                && screen.contains("image/png output")
+                && screen.contains("terminal metadata fallback")
+                && !screen.contains("Worktree Trust")
+        },
+    )?;
+    session.assert_raw_mode_enabled(&termios_before)?;
+    session.wait_until("first native Notebook kernel", ACTION_TIMEOUT, |_| {
+        notebook_kernel_pids(&kernel_log).is_ok_and(|pids| pids.len() == 1)
+    })?;
+    let first_pid = notebook_kernel_pids(&kernel_log)?[0];
+    ensure!(
+        process_is_live(first_pid),
+        "first Notebook kernel did not remain alive"
+    );
+    ensure!(
+        process_group_id(first_pid) == Some(first_pid),
+        "Zed Notebook kernel {first_pid} was not its process-group leader: {:?}",
+        process_group_id(first_pid)
+    );
+    ensure!(
+        fs::read_to_string(&kernel_log)?.contains("-m ipykernel_launcher -f"),
+        "Zed did not launch the native Jupyter kernelspec"
+    );
+
+    session.send(b"b")?;
+    session.wait_for_screen("add native Notebook code cell", ACTION_TIMEOUT, |screen| {
+        screen.contains("Notebook · Python 3 · 3 cells · edit mode")
+            && screen.contains("added a code cell below; edit mode")
+    })?;
+    session.paste(EDITED)?;
+    session.send(b"\x1b")?;
+    session.wait_for_screen("edit native Notebook cell", ACTION_TIMEOUT, |screen| {
+        screen.contains(EDITED) && screen.contains("command mode")
+    })?;
+    session.send(CTRL_S)?;
+    session.wait_for_screen("save native Notebook cell", ACTION_TIMEOUT, |screen| {
+        screen.contains("saved") && screen.contains(EDITED)
+    })?;
+    session.wait_until("Notebook JSON persistence", ACTION_TIMEOUT, |_| {
+        fs::read_to_string(&notebook_path).is_ok_and(|text| {
+            text.contains(EDITED) && serde_json::from_str::<serde_json::Value>(&text).is_ok()
+        })
+    })?;
+
+    session.send(F10)?;
+    session.wait_for_screen("shared Notebook split", ACTION_TIMEOUT, |screen| {
+        screen.matches("Notebook · Python 3 · 3 cells").count() >= 2
+            && screen.matches(EDITED).count() >= 2
+    })?;
+    session.send(CTRL_W)?;
+    session.wait_for_screen("close one Notebook split", ACTION_TIMEOUT, |screen| {
+        screen.matches("Notebook · Python 3 · 3 cells").count() == 1
+            && screen.contains("tab closed")
+    })?;
+    ensure!(
+        process_is_live(first_pid),
+        "closing one shared Notebook split killed its live kernel"
+    );
+
+    session.send(b"i")?;
+    session.wait_for_screen(
+        "interrupt native Notebook kernel",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("interrupt requested from the Zed Jupyter session"),
+    )?;
+    session.send(b"r")?;
+    session.wait_for_screen("restart native Notebook kernel", ACTION_TIMEOUT, |screen| {
+        screen.contains("kernel restart requested")
+            && screen.contains("recovered 1 stale starting process")
+    })?;
+    session.wait_until("previous Notebook kernel cleanup", ACTION_TIMEOUT, |_| {
+        !process_is_live(first_pid)
+    })?;
+    session.wait_until("second native Notebook kernel", ACTION_TIMEOUT, |_| {
+        notebook_kernel_pids(&kernel_log).is_ok_and(|pids| pids.len() >= 2)
+    })?;
+    let second_pid = notebook_kernel_pids(&kernel_log)?[1];
+    session.wait_until("failing Notebook kernel exited", ACTION_TIMEOUT, |_| {
+        !process_is_live(second_pid)
+    })?;
+    session.send(b"\x1b[13;5u")?;
+    session.wait_for_screen("Notebook kernel failure output", ACTION_TIMEOUT, |screen| {
+        screen.contains("Kernel Error: cell could not be executed")
+            && screen.contains("the kernel is still starting")
+    })?;
+    session.send(b"c")?;
+    session.wait_for_screen("clear native Notebook outputs", ACTION_TIMEOUT, |screen| {
+        screen.contains("cleared all notebook outputs")
+            && !screen.contains("Kernel Error")
+            && !screen.contains(PRELOADED)
+    })?;
+
+    session.send(b"r")?;
+    session.wait_until("third native Notebook kernel", ACTION_TIMEOUT, |_| {
+        notebook_kernel_pids(&kernel_log).is_ok_and(|pids| pids.len() >= 3)
+    })?;
+    let third_pid = notebook_kernel_pids(&kernel_log)?[2];
+    ensure!(
+        PathBuf::from(format!("/proc/{third_pid}")).exists(),
+        "third Notebook kernel did not remain alive"
+    );
+    session.send(CTRL_S)?;
+    session.wait_for_screen("save cleared Notebook outputs", ACTION_TIMEOUT, |screen| {
+        screen.contains("saved") && screen.contains(EDITED)
+    })?;
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&notebook_path).context("read saved Notebook fixture")?,
+    )
+    .context("saved Notebook is invalid JSON")?;
+    let cells = saved["cells"]
+        .as_array()
+        .context("saved Notebook omitted cells")?;
+    ensure!(
+        cells.iter().any(|cell| {
+            let source = &cell["source"];
+            source
+                .as_str()
+                .is_some_and(|source| source.contains(EDITED))
+                || source.as_array().is_some_and(|lines| {
+                    lines
+                        .iter()
+                        .any(|line| line.as_str().is_some_and(|line| line.contains(EDITED)))
+                })
+        }),
+        "saved Notebook omitted the terminal cell edit"
+    );
+    ensure!(
+        cells
+            .iter()
+            .filter(|cell| cell["cell_type"] == "code")
+            .all(|cell| {
+                cell["outputs"]
+                    .as_array()
+                    .is_some_and(|outputs| outputs.is_empty())
+            }),
+        "cleared Notebook outputs were not persisted"
+    );
+
+    session.send(CTRL_W)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "Notebook zec exit failed: {status}");
+    let kernel_pids = [first_pid, second_pid, third_pid];
+    let deadline = Instant::now() + ACTION_TIMEOUT;
+    while kernel_pids
+        .iter()
+        .any(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    ensure!(
+        kernel_pids
+            .iter()
+            .all(|pid| !PathBuf::from(format!("/proc/{pid}")).exists()),
+        "closing the final Notebook tab leaked a kernel process: {kernel_pids:?}"
+    );
+    session.assert_terminal_restored(&termios_before)
+}
+
+fn process_group_id(pid: u32) -> Option<u32> {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()?
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(2)?
+        .parse()
+        .ok()
+}
+
+fn process_is_live(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_owned()))
+        .and_then(|fields| fields.chars().next())
+        .is_some_and(|state| state != char::from(90_u8))
+}
+
+fn notebook_kernel_pids(path: &Path) -> Result<Vec<u32>> {
+    fs::read_to_string(path)
+        .with_context(|| format!("read Notebook kernel log {}", path.display()))?
+        .lines()
+        .map(|line| {
+            line.split_once('|')
+                .context("Notebook kernel log line omitted separator")?
+                .0
+                .parse()
+                .context("parse Notebook kernel pid")
+        })
+        .collect()
+}
+
 fn open_collaboration_panel(session: &mut PtySession) -> Result<()> {
     session.send(F1)?;
     session.wait_for_screen("collaboration command palette", ACTION_TIMEOUT, |screen| {
@@ -3518,6 +3828,22 @@ fn normal_edit_undo_resize_save_and_quit(directory: &Path) -> Result<()> {
     })?;
 
     session.resize(RESIZED)?;
+    for _ in 0..20 {
+        session.resize_immediately(PtySize {
+            rows: 1,
+            cols: 1,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        session.resize_immediately(RESIZED)?;
+    }
+    session.wait_for_screen("redraw after PTY resize storm", ACTION_TIMEOUT, |screen| {
+        screen.contains("zec ") && screen.contains("先頭-seed line")
+    })?;
+    session.send(F4)?;
+    session.wait_for_screen("input after PTY resize storm", ACTION_TIMEOUT, |screen| {
+        screen.contains("terminal keyboard=")
+    })?;
     session.send(CTRL_A)?;
     session.paste(FINAL)?;
     session.wait_for_screen("editing after resize", ACTION_TIMEOUT, |screen| {
@@ -4198,12 +4524,7 @@ impl PtySession {
 
     fn resize(&mut self, size: PtySize) -> Result<()> {
         let previous_generation = self.output_generation;
-        self.master
-            .as_ref()
-            .context("PTY master is closed")?
-            .resize(size)
-            .context("resize PTY")?;
-        self.parser.screen_mut().set_size(size.rows, size.cols);
+        self.resize_immediately(size)?;
         self.wait_until("child redraw after PTY resize", ACTION_TIMEOUT, |session| {
             session.output_generation > previous_generation
                 && session.parser.screen().size() == (size.rows, size.cols)
@@ -4214,6 +4535,16 @@ impl PtySession {
                     .nth(usize::from(size.rows.saturating_sub(1)))
                     .is_some_and(|row| row.contains("zec "))
         })
+    }
+
+    fn resize_immediately(&mut self, size: PtySize) -> Result<()> {
+        self.master
+            .as_ref()
+            .context("PTY master is closed")?
+            .resize(size)
+            .context("resize PTY")?;
+        self.parser.screen_mut().set_size(size.rows, size.cols);
+        Ok(())
     }
 
     fn send_signal(&self, signal: Signal) -> Result<()> {

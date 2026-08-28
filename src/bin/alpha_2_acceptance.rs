@@ -301,7 +301,18 @@ fn pty_language_workflow(
             contents.contains("Diagnostics") && contents.contains("deterministic fixture warning")
         },
     )?;
-    let dismiss_diagnostics = session.send_marked(ESC)?;
+    let return_to_editor = session.send_marked(ESC)?;
+    session.wait_after(
+        "diagnostics focus return",
+        return_to_editor,
+        alpha_1_support::SCREEN_TIMEOUT,
+        |screen| {
+            let contents = screen.contents();
+            contents.contains("editor focused; diagnostics dock remains open")
+                && contents.contains("deterministic fixture warning")
+        },
+    )?;
+    let dismiss_diagnostics = session.send_marked(F8)?;
     session.wait_absent("diagnostics dismissal", dismiss_diagnostics, "Diagnostics")?;
 
     let references_mark = session.send_marked(SHIFT_F12)?;

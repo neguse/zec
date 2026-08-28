@@ -1173,6 +1173,20 @@ pub fn reset_fixed_fixture() -> Result<fixture::GeneratedFixture> {
     fixture::generate(Path::new(fixture::FIXED_ROOT)).map_err(anyhow::Error::msg)
 }
 
+const PINNED_SETTINGS: &str = concat!(
+    "{\n",
+    "  \"session\": { \"trust_all_worktrees\": true },\n",
+    "  \"format_on_save\": \"off\",\n",
+    "  \"formatter\": \"language_server\",\n",
+    "  \"enable_language_server\": false,\n",
+    "  \"prettier\": { \"allowed\": false },\n",
+    "  \"remove_trailing_whitespace_on_save\": false,\n",
+    "  \"ensure_final_newline_on_save\": false,\n",
+    "  \"git\": { \"disable_git\": true },\n",
+    "  \"languages\": { \"Rust\": { \"format_on_save\": \"off\", \"formatter\": \"language_server\", \"enable_language_server\": false, \"language_servers\": [], \"prettier\": { \"allowed\": false } } }\n",
+    "}\n",
+);
+
 pub fn fresh_config_dir(case_id: &str) -> Result<PathBuf> {
     let path = Path::new(fixture::FIXED_WORKSPACE)
         .join("configs")
@@ -1183,20 +1197,8 @@ pub fn fresh_config_dir(case_id: &str) -> Result<PathBuf> {
     }
     let zed = path.join("zed");
     fs::create_dir_all(&zed).with_context(|| format!("create fresh config {}", zed.display()))?;
-    fs::write(
-        zed.join("settings.json"),
-        concat!(
-            "{\n",
-            "  \"session\": { \"trust_all_worktrees\": true },\n",
-            "  \"format_on_save\": \"off\",\n",
-            "  \"remove_trailing_whitespace_on_save\": false,\n",
-            "  \"ensure_final_newline_on_save\": false,\n",
-            "  \"git\": { \"disable_git\": true },\n",
-            "  \"languages\": { \"Rust\": { \"language_servers\": [] } }\n",
-            "}\n",
-        ),
-    )
-    .with_context(|| format!("write pinned Alpha 1 settings under {}", zed.display()))?;
+    fs::write(zed.join("settings.json"), PINNED_SETTINGS)
+        .with_context(|| format!("write pinned Alpha 1 settings under {}", zed.display()))?;
     Ok(path)
 }
 
@@ -1350,10 +1352,12 @@ impl PtySession {
         command.env("LC_ALL", "C.UTF-8");
         command.env("XDG_CONFIG_HOME", config_dir);
         command.env("XDG_CACHE_HOME", config_dir);
+        command.env("XDG_DATA_HOME", config_dir);
+        command.env("XDG_STATE_HOME", config_dir);
+        command.env("ZEC_DISABLE_SESSIONS", "1");
         for (name, value) in environment {
             command.env(name, value);
         }
-        command.env("XDG_DATA_HOME", config_dir);
         let spawn_started = Instant::now();
         let child = slave
             .spawn_command(command)
@@ -2022,7 +2026,22 @@ mod marked_action_tests {
         time::{Duration, Instant},
     };
 
-    use super::mark_around_action_with_clock;
+    use super::{PINNED_SETTINGS, mark_around_action_with_clock};
+
+    #[test]
+    fn pinned_settings_disable_external_language_processes() {
+        let settings: serde_json::Value =
+            serde_json::from_str(PINNED_SETTINGS).expect("pinned settings are valid JSON");
+        assert_eq!(settings["formatter"], "language_server");
+        assert_eq!(settings["enable_language_server"], false);
+        assert_eq!(settings["prettier"]["allowed"], false);
+        assert_eq!(settings["languages"]["Rust"]["format_on_save"], "off");
+        assert_eq!(
+            settings["languages"]["Rust"]["enable_language_server"],
+            false
+        );
+        assert_eq!(settings["languages"]["Rust"]["prettier"]["allowed"], false);
+    }
 
     #[test]
     fn observation_mark_precedes_action_but_latency_origin_follows_it() {

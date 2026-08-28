@@ -2,6 +2,9 @@
 
 Status: Accepted (2026-08-26)
 
+Implementation coverage: all 27 registered capabilities are implemented candidates (2026-08-28).
+No capability is `verified` until the completion rule below is satisfied.
+
 ## Goal
 
 zecの長期目標は、Zedが持つ編集、language intelligence、workspace、Git、実行・debug、
@@ -78,9 +81,10 @@ normative contractは[`alpha-3.md`](alpha-3.md)とする。実装とlocal shorte
 ### Beta 1: local development loop
 
 Git、integrated terminal、tasks/test、DAP debugger、REPL/notebookとcrash recoveryを保証する。
-Git、terminal、tasks、DAP debugger、debug console、Alpha 3由来のsession/crash recoveryは
-implemented candidateであり、[`beta-1.md`](beta-1.md)がcontractとlocal machine evidenceを定める。
-Notebookは別capabilityとして未実装のまま残し、debug consoleの完成から推論してはならない。
+Git、terminal、tasks、DAP debugger、debug console、native Zed Notebook、Alpha 3由来の
+session/crash recoveryはimplemented candidateであり、[`beta-1.md`](beta-1.md)がcontractと
+local machine evidenceを定める。Notebookは独立したactual-binary kernel証跡を持ち、debug consoleの
+完成から推論していない。
 
 ### Beta 2: ecosystem and remote
 
@@ -95,9 +99,14 @@ SSH実証の存在だけからそれらを推論してはならない。
 
 ### Parity 1: AI and collaboration
 
-Zed Agent、external ACP agent、MCP、skills/instructions、edit prediction、inline assistant、parallel agent、
-real-time共同編集、channels、following、notesを統合する。voiceとscreen shareは
-`external-bridge`として権限とlifecycleをzecから操作する。
+Zed Agent、external ACP agent、MCP、skills/instructions、edit prediction、inline assistant、
+channels、following、channel notesを統合済みである。voiceとscreen shareは`external-bridge`として
+明示確認、能力検出、開始・停止・error・process回収をzecから操作する。実装、authority、安全条件、
+actual-binary evidenceは[`parity-1.md`](parity-1.md)をnormative contractとする。
+
+AI、共同編集、mediaはimplemented candidateである。live Zed channelの2-client同時編集、各provider、
+parallel-agent、desktop capture/playback、macOS/Windowsのhosted evidenceは未完了であり、それらを
+fixture/local PTYの成功から`verified`と推論してはならない。
 
 ## Completion rule
 

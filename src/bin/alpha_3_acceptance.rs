@@ -267,14 +267,12 @@ fn run_standard_capability(zec: &Path, prefix: &str, case_id: &str) -> Result<St
             let mark = session.send_marked(ALT_F)?;
             session.wait_contains("project search prompt", mark, "Project search:")?;
             let mark = session.paste_marked(SEARCH_TOKEN)?;
+            let expected_result = format!("Project search: {SEARCH_TOKEN}  1/2  src/main.rs:3:18");
             session.wait_after(
                 "project search results",
                 mark,
                 alpha_1_support::SCREEN_TIMEOUT,
-                |screen| {
-                    let contents = screen.contents();
-                    contents.contains(SEARCH_TOKEN) && !contents.contains("searching…")
-                },
+                |screen| screen.contents().contains(&expected_result),
             )?;
             let mark = session.send_marked(F9)?;
             session.wait_contains("project-search MultiBuffer", mark, "editable MultiBuffer")?;
@@ -579,7 +577,20 @@ fn resize_storm(zec: &Path, case_id: &str) -> Result<String> {
         "redraw after resize storm",
         final_mark,
         alpha_1_support::SCREEN_TIMEOUT,
-        |screen| screen.size() == (alpha_1_support::ROWS, alpha_1_support::COLS),
+        |screen| {
+            screen.size() == (alpha_1_support::ROWS, alpha_1_support::COLS)
+                && screen.contents().contains(READY_SENTINEL)
+                && screen
+                    .rows(0, alpha_1_support::COLS)
+                    .nth(usize::from(alpha_1_support::ROWS.saturating_sub(1)))
+                    .is_some_and(|row| row.contains("zec project"))
+        },
+    )?;
+    let input_mark = session.send_marked(F4)?;
+    session.wait_contains(
+        "input response after resize storm",
+        input_mark,
+        "terminal keyboard=",
     )?;
     finish(session, &baseline, false)?;
     Ok("twenty 1x1/full-size cycles preserved a responsive PTY".to_owned())

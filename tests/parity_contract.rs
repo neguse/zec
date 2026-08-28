@@ -136,8 +136,15 @@ fn parity_contract_is_complete_consistent_and_pinned() {
         );
     }
 
+    let notebook = contract
+        .capabilities
+        .iter()
+        .find(|capability| capability.id == "NOTEBOOK_INTERACTIVE")
+        .expect("missing Notebook capability");
+    assert_eq!(notebook.status, "candidate");
+    assert_eq!(notebook.evidence, "docs/beta-1.md");
+
     for id in [
-        "NOTEBOOK_INTERACTIVE",
         "AI_AGENT_ASSISTANCE",
         "COLLABORATIVE_EDITING",
         "COLLABORATION_MEDIA",
@@ -146,12 +153,23 @@ fn parity_contract_is_complete_consistent_and_pinned() {
             .capabilities
             .iter()
             .find(|capability| capability.id == id)
-            .unwrap_or_else(|| panic!("missing planned capability {id}"));
+            .unwrap_or_else(|| panic!("missing Parity 1 capability {id}"));
         assert_eq!(
-            capability.status, "planned",
-            "{id} must not be promoted without its own implemented evidence"
+            capability.status, "candidate",
+            "{id} lost its implemented Parity 1 status"
+        );
+        assert_eq!(
+            capability.evidence, "docs/parity-1.md",
+            "{id} must use the normative Parity 1 evidence"
         );
     }
+    assert!(
+        contract
+            .capabilities
+            .iter()
+            .all(|capability| capability.status != "planned"),
+        "all registered parity capabilities must have implemented evidence"
+    );
 
     let cargo_toml = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
     let mut zed_dependency_count = 0;
