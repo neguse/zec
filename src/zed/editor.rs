@@ -68,58 +68,78 @@ pub fn close_window(window: &WindowHandle<Editor>, cx: &mut AsyncApp) -> Result<
         .context("close editor window")
 }
 
-/// Forwards Editor repaints and buffer changes as events. A clean buffer's
-/// external change reloads through the store; the completion is reported so
-/// the status can say so.
-pub fn subscribe<T>(
+/// Forwards Editor repaints as events.
+pub fn observe_editor<T>(
     window: &WindowHandle<Editor>,
-    buffer: &Entity<Buffer>,
-    buffer_store: Entity<BufferStore>,
     sender: Sender<T>,
     cx: &mut AsyncApp,
 ) -> Result<()>
 where
     T: From<Event> + Send + 'static,
 {
-    let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id().to_proto());
     window
         .update(cx, |_editor, _window, cx| {
-            let redraw = sender.clone();
             cx.observe_self(move |_editor, _cx| {
-                let _ = redraw.try_send(Event::Redraw.into());
-            })
-            .detach();
-            cx.subscribe(buffer, move |_editor, buffer, event, cx| match event {
-                BufferEvent::ReloadNeeded => {
-                    let reload = buffer_store.update(cx, |store, cx| {
-                        store.reload_buffers([buffer.clone()].into_iter().collect(), true, cx)
-                    });
-                    let sender = sender.clone();
-                    cx.spawn(async move |_, _| {
-                        let result = reload
-                            .await
-                            .map(|_| ())
-                            .map_err(|error| format!("{error:#}"));
-                        let _ = sender
-                            .send(Event::ReloadFinished { buffer_id, result }.into())
-                            .await;
-                    })
-                    .detach();
-                }
-                BufferEvent::LanguageChanged(_)
-                | BufferEvent::Reparsed
-                | BufferEvent::FileHandleChanged
-                | BufferEvent::Reloaded
-                | BufferEvent::DirtyChanged
-                | BufferEvent::Saved
-                | BufferEvent::CapabilityChanged => {
-                    let _ = sender.try_send(Event::Redraw.into());
-                }
-                _ => {}
+                let _ = sender.try_send(Event::Redraw.into());
             })
             .detach();
         })
-        .context("observe editor and buffer")
+        .context("observe editor")
+}
+
+/// Forwards buffer changes as events for as long as the subscription
+/// lives. A clean buffer's external change reloads through the store; the
+/// completion is reported so the status can say so.
+pub fn watch_buffer<T>(
+    buffer: &Entity<Buffer>,
+    buffer_store: Entity<BufferStore>,
+    sender: Sender<T>,
+    cx: &mut AsyncApp,
+) -> gpui::Subscription
+where
+    T: From<Event> + Send + 'static,
+{
+    let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id().to_proto());
+    cx.update(|cx| {
+        cx.subscribe(buffer, move |buffer, event, cx| match event {
+            BufferEvent::ReloadNeeded => {
+                let reload = buffer_store.update(cx, |store, cx| {
+                    store.reload_buffers([buffer.clone()].into_iter().collect(), true, cx)
+                });
+                let sender = sender.clone();
+                cx.spawn(async move |_| {
+                    let result = reload
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = sender
+                        .send(Event::ReloadFinished { buffer_id, result }.into())
+                        .await;
+                })
+                .detach();
+            }
+            BufferEvent::LanguageChanged(_)
+            | BufferEvent::Reparsed
+            | BufferEvent::FileHandleChanged
+            | BufferEvent::Reloaded
+            | BufferEvent::DirtyChanged
+            | BufferEvent::Saved
+            | BufferEvent::CapabilityChanged => {
+                let _ = sender.try_send(Event::Redraw.into());
+            }
+            _ => {}
+        })
+    })
+}
+
+/// The caret as a buffer point.
+pub fn caret_point(window: &WindowHandle<Editor>, cx: &mut AsyncApp) -> Result<text::Point> {
+    window
+        .update(cx, |editor, _window, cx| {
+            let display = editor.display_snapshot(cx);
+            editor.selections.newest::<text::Point>(&display).head()
+        })
+        .context("read caret")
 }
 
 /// Sends a keystroke through the window so Zed's keymap resolves it.

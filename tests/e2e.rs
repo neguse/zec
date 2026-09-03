@@ -55,6 +55,13 @@ const CTRL_S: &[u8] = b"\x13";
 const CTRL_W: &[u8] = b"\x17";
 const CTRL_Z: &[u8] = b"\x1a";
 const CTRL_PAGE_DOWN: &[u8] = b"\x1b[6;5~";
+const F10: &[u8] = b"\x1b[21~";
+const SHIFT_F10: &[u8] = b"\x1b[21;2~";
+const CTRL_ALT_LEFT: &[u8] = b"\x1b[1;7D";
+const CTRL_ALT_RIGHT: &[u8] = b"\x1b[1;7C";
+const CTRL_ALT_SHIFT_LEFT: &[u8] = b"\x1b[1;8D";
+const CTRL_ALT_SHIFT_UP: &[u8] = b"\x1b[1;8A";
+const CTRL_ALT_EQUALS: &[u8] = b"\x1b[61;7u";
 const DOWN: &[u8] = b"\x1b[B";
 const ALT_F: &[u8] = b"\x1bf";
 const CTRL_F: &[u8] = b"\x06";
@@ -262,6 +269,178 @@ fn find_replace_and_go_to_line_drive_the_active_buffer() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "exit after search failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn splits_focus_move_and_collapse_panes() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let first = temp.path().join("first.txt");
+    let second = temp.path().join("second.txt");
+    fs::write(&first, "first file\n")?;
+    fs::write(&second, "second file\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[first.as_os_str()])?;
+    session.wait_ready()?;
+
+    session.send(F10)?;
+    session.wait_for_screen("split right", ACTION_TIMEOUT, |screen| {
+        screen.contains("split right")
+            && screen.matches("first file").count() == 2
+            && screen.contains('│')
+    })?;
+
+    // The new pane is focused: a file opened now lands there.
+    session.send(CTRL_O)?;
+    session.wait_for_screen("open prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Open:")
+    })?;
+    session.paste(&second.to_string_lossy())?;
+    session.send(ENTER)?;
+    session.wait_for_screen("second file in the right pane", ACTION_TIMEOUT, |screen| {
+        screen.contains("second file")
+            && screen.contains("[second.txt]")
+            && screen.contains("first file")
+    })?;
+
+    session.send(CTRL_ALT_LEFT)?;
+    session.wait_for_screen("focus left", ACTION_TIMEOUT, |screen| {
+        screen.contains("focused pane to the left")
+    })?;
+    session.send(CTRL_ALT_RIGHT)?;
+    session.wait_for_screen("focus right", ACTION_TIMEOUT, |screen| {
+        screen.contains("focused pane to the right")
+    })?;
+
+    // The moved tab joins the left pane; the right pane keeps its copy of
+    // the first file.
+    session.send(CTRL_ALT_SHIFT_LEFT)?;
+    session.wait_for_screen("tab moved left", ACTION_TIMEOUT, |screen| {
+        screen.contains("moved tab to the left")
+            && screen.contains('│')
+            && screen.contains("2/2")
+            && screen.contains("[second.txt]")
+    })?;
+
+    // Closing the right pane's last tab collapses the split.
+    session.send(CTRL_ALT_RIGHT)?;
+    session.wait_for_screen("focus right again", ACTION_TIMEOUT, |screen| {
+        screen.contains("focused pane to the right")
+    })?;
+    session.send(CTRL_W)?;
+    session.wait_for_screen("pane closed", ACTION_TIMEOUT, |screen| {
+        screen.contains("tab closed") && !screen.contains('│') && screen.contains("2/2")
+    })?;
+
+    session.send(SHIFT_F10)?;
+    session.wait_for_screen("split down", ACTION_TIMEOUT, |screen| {
+        screen.contains("split down") && screen.contains('─')
+    })?;
+    session.send(CTRL_ALT_EQUALS)?;
+    session.wait_for_screen("grown pane", ACTION_TIMEOUT, |screen| {
+        screen.contains("pane size 55%")
+    })?;
+
+    // Moving the lower pane's only tab up collapses that split.
+    session.send(CTRL_ALT_SHIFT_UP)?;
+    session.wait_for_screen(
+        "tab moved up and split collapsed",
+        ACTION_TIMEOUT,
+        |screen| {
+            screen.contains("moved tab above") && !screen.contains('─') && screen.contains("3/3")
+        },
+    )?;
+    session.send(CTRL_W)?;
+    session.wait_for_screen("copy closed", ACTION_TIMEOUT, |screen| {
+        screen.contains("tab closed") && screen.contains("2/2")
+    })?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "split session exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn sessions_restore_split_layout_and_tabs() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("session-repo");
+    fs::create_dir_all(&root)?;
+    fs::write(root.join("alpha.txt"), "alpha file\n")?;
+    fs::write(root.join("beta.txt"), "beta file\n")?;
+    let data_dir = tempfile::tempdir().context("create shared data directory")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session =
+        PtySession::spawn_with_data_dir(pair, &[root.as_os_str()], data_dir.path(), None)?;
+    session.wait_ready()?;
+
+    session.send(CTRL_P)?;
+    session.wait_for_screen("quick open", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open:") && screen.contains("alpha.txt")
+    })?;
+    session.paste("alpha")?;
+    session.wait_for_screen("quick open filtered to alpha", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: alpha") && screen.contains("› alpha.txt")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("alpha opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("alpha file") && screen.contains("opened alpha.txt")
+    })?;
+    session.send(F10)?;
+    session.wait_for_screen("split right", ACTION_TIMEOUT, |screen| {
+        screen.contains("split right")
+    })?;
+    session.send(CTRL_P)?;
+    session.wait_for_screen("quick open again", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open:")
+    })?;
+    session.paste("beta")?;
+    session.wait_for_screen("quick open filtered to beta", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: beta") && screen.contains("› beta.txt")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("beta opened in the right pane", ACTION_TIMEOUT, |screen| {
+        screen.contains("beta file")
+            && screen.contains("[beta.txt]")
+            && screen.contains("alpha file")
+    })?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "first session exit failed: {status}");
+    session.assert_terminal_restored(&baseline)?;
+    let sessions = data_dir.path().join("zec-sessions");
+    ensure!(
+        fs::read_dir(&sessions)?
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")),
+        "no session file under {}",
+        sessions.display()
+    );
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session =
+        PtySession::spawn_with_data_dir(pair, &[root.as_os_str()], data_dir.path(), None)?;
+    // The restored split halves the status row, so the ready hint may be
+    // cut off; the layout itself is the ready signal here.
+    session.wait_for_screen("session restored", STARTUP_TIMEOUT, |screen| {
+        screen.contains('│')
+            && screen.contains("alpha file")
+            && screen.contains("beta file")
+            && screen.contains("[beta.txt]")
+            && !screen.contains("Untitled")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "restored session exit failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 
@@ -655,11 +834,24 @@ struct PtySession {
     parser: Parser,
     output_generation: u64,
     transcript: Vec<u8>,
-    _data_dir: tempfile::TempDir,
+    _data_dir: Option<tempfile::TempDir>,
 }
 
 impl PtySession {
     fn spawn(pair: PtyPair, arguments: &[&OsStr]) -> Result<Self> {
+        let data_dir = tempfile::tempdir().context("create isolated data directory")?;
+        let path = data_dir.path().to_path_buf();
+        Self::spawn_with_data_dir(pair, arguments, &path, Some(data_dir))
+    }
+
+    /// `owned` keeps a temporary data directory alive with the session; a
+    /// test that relaunches into the same directory owns it instead.
+    fn spawn_with_data_dir(
+        pair: PtyPair,
+        arguments: &[&OsStr],
+        data_dir: &Path,
+        owned: Option<tempfile::TempDir>,
+    ) -> Result<Self> {
         let PtyPair { slave, master } = pair;
         let mut reader = master.try_clone_reader().context("clone PTY reader")?;
         let writer = master.take_writer().context("take PTY writer")?;
@@ -698,11 +890,12 @@ impl PtySession {
 
         // Isolate every Zed user directory so the test never reads or writes
         // the developer's real configuration.
-        let data_dir = tempfile::tempdir().context("create isolated data directory")?;
-        let config = data_dir.path().join("config");
+        let config = data_dir.join("config");
         fs::create_dir_all(&config)?;
-        fs::write(config.join("settings.json"), "{}")?;
-        fs::write(config.join("keymap.json"), "[]")?;
+        if !config.join("settings.json").exists() {
+            fs::write(config.join("settings.json"), "{}")?;
+            fs::write(config.join("keymap.json"), "[]")?;
+        }
 
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_zec"));
         command.args(arguments);
@@ -710,9 +903,9 @@ impl PtySession {
         command.env("LANG", "C.UTF-8");
         command.env("LC_ALL", "C.UTF-8");
         command.env("ZEC_KEYBOARD_PROTOCOL", "modifyOtherKeys");
-        command.env("ZEC_DATA_DIR", data_dir.path());
-        command.env("XDG_CONFIG_HOME", data_dir.path());
-        command.env("XDG_DATA_HOME", data_dir.path().join("data"));
+        command.env("ZEC_DATA_DIR", data_dir);
+        command.env("XDG_CONFIG_HOME", data_dir);
+        command.env("XDG_DATA_HOME", data_dir.join("data"));
         let child = slave
             .spawn_command(command)
             .context("spawn the actual zec binary")?;
@@ -730,7 +923,7 @@ impl PtySession {
             parser: Parser::new(INITIAL_SIZE.rows, INITIAL_SIZE.cols, 0),
             output_generation: 0,
             transcript: Vec::new(),
-            _data_dir: data_dir,
+            _data_dir: owned,
         })
     }
 

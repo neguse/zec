@@ -94,11 +94,11 @@ struct App {
     capabilities: Capabilities,  // detected at startup, refined by observed input
     cwd: PathBuf,
     root: Option<PathBuf>,       // the visible worktree root, when a directory was opened
-    workspace: WorkspaceModel,   // ordered tab list plus the active tab; reducer with invariants
+    workspace: WorkspaceModel,   // pane tree, each pane's tabs, the active pane and tab; reducer with invariants
     documents: Documents,        // ItemId -> Document
     overlays: Overlays,          // stack; the top owns focus while it is a prompt or picker
     status: Status,              // one transient message
-    frame: Option<Frame>,        // the last drawn frame, for mouse hit testing and scrolling
+    frame: Option<Frame>,        // the last render plan and pane snapshots, for mouse hit testing and scrolling
     resize: Option<ResizeAcknowledgement>, // released after the first frame after a resize
     needs_invalidate: bool,
 }
@@ -113,11 +113,14 @@ struct Document {
 ```
 
 Label, dirty state, disk state, and save eligibility derive from
-`Buffer::file()` at use time and are never cached. In debug builds every
-`update` ends with the whole tree checked: tab ids are unique, the active
-index is valid, every tab has a document, every overlay references live
-state. Splits (two tabs on one Buffer) and docks return with feature 6 and
-extend `WorkspaceModel` rather than adding a second model.
+`Buffer::file()` at use time and are never cached. `WorkspaceModel` is a
+binary tree of splits whose leaves are panes; every `update` ends with the
+whole tree checked: the leaves and the pane map match one to one, no pane
+is empty, tab ids are unique across panes, active indices are valid, and
+every tab has a document. A split is two tabs on one Buffer, each with its
+own Editor; the Buffer is watched once for as long as any tab shows it.
+Docks return with feature 5, the first panel, and extend `WorkspaceModel`
+rather than adding a second model.
 
 ## Events
 
@@ -204,19 +207,24 @@ it.
 cursor follow, clipping, and snapshot capture happen in one step and cannot
 race a resize:
 
-1. The active document sets the Editor's wrap width to the body width,
-   follows the cursor, clamps the viewport, and reads only
+1. `layout::plan` assigns non-overlapping rects to the panes of the tree
+   with a one-cell divider per split. A split narrower than three cells
+   shows only the branch holding the active pane, so no pane is ever zero
+   cells. Docks will reserve their edges here first.
+2. Each visible pane's document sets its Editor's wrap width to the pane
+   body width, follows the cursor, clamps the viewport, and reads only
    `[top_row, top_row + height)` from Zed's `DisplaySnapshot`. The
-   viewport is the only state `draw` mutates and the wrap width the only
-   Zed write.
-2. `EditorWidget` renders the snapshot; the status row shows the tab
-   strip and key hints, or the transient message, or the top overlay's
-   presentation (a prompt line or a bounded picker list).
-3. The frame is stored for mouse hit testing. Everything is projected onto
-   visible cells only; the terminal never recomputes folds, wraps, or
+   viewports are the only state `draw` mutates and the wrap widths the
+   only Zed writes.
+3. `EditorWidget` renders each pane. The focused pane's status row shows
+   the tab strip and key hints, or the transient message, or the top
+   overlay's presentation (a prompt line or a bounded picker list); the
+   other panes' rows show their tab strip.
+4. The plan and every pane's snapshot are stored as the frame for mouse
+   hit testing: a click focuses the pane under the pointer and places the
+   caret there. Dividers move by keyboard only. Everything is projected
+   onto visible cells; the terminal never recomputes folds, wraps, or
    highlights.
-
-Panes, docks, and a render plan return with feature 6.
 
 ## Feature contract
 
@@ -233,14 +241,15 @@ impl <Name> {
 }
 
 // src/app/feature.rs
-pub struct Ctx<'a> { services, root, editor, overlays, status, events }
+pub struct Ctx<'a> { services, root, editor, workspace, documents, overlays, status, events }
 pub struct Features { pub <name>: <Name>, ... }
 pub enum FeatureEvent { <Name>(<Name>Event), ... }
 ```
 
 `Ctx` is a feature's only access to the rest of zec; `editor` is the
 active document's hidden window, so a feature can drive Zed's Editor APIs
-(search, selections) without seeing `Documents`. A feature never
+(search, selections), and `workspace` and `documents` are read views for
+a feature that records the tree. A feature never
 touches another feature's state; a cross-feature effect is a `Command`.
 Work a feature spawns completes as its own event through `events`, tagged
 with the generation that requested it, and `update` drops stale

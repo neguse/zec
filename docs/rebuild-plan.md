@@ -24,10 +24,8 @@ command palette; status row; terminal lifecycle; `--smoke`.
 
 Transplanted with trimming: `terminal.rs` (split into session,
 capabilities, reader), `render.rs`, `clipboard.rs`, `prompt.rs`, `tabs.rs`,
-`workspace_model.rs` (reduced to a tab list), `cli.rs`, the palette search
-from `actions.rs`. Rewritten: everything that lived in `main.rs`. Left in
-history for feature 6: `workspace_render.rs` and the pane, dock, and
-layout parts of `workspace_model.rs`.
+`workspace_model.rs`, `cli.rs`, the palette search from `actions.rs`.
+Rewritten: everything that lived in `main.rs`.
 
 ## Return order
 
@@ -58,7 +56,14 @@ prefilter, source budgets, benchmark, and 5,000-file / 10,000-range limits
 stay in history). 3 as `features/buffer_search` (Zed's `SearchableItem` on
 the Editor owns matching, highlights, activation, and the replacement
 transactions; the previous `ActiveSearch` and `GoToLinePrompt` stay in
-history).
+history). 6 as core splits and layout (a pane tree in `workspace.rs`, the
+render plan in `layout.rs`; keyboard focus, move, and resize, and a mouse
+click focuses a pane; divider dragging, preview and pinned tabs, tab
+reordering, and navigation history stay in history) plus
+`features/sessions` (one JSON per root under the data directory, written
+when the tab set or layout changes and at exit; generations, recovery
+blobs, leases, quarantine, and `ZEC_SESSION_DIR` stay in history). Docks
+wait for feature 5, the first panel.
 
 ## Behavior carried into the core
 

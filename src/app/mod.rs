@@ -5,6 +5,7 @@ pub mod documents;
 mod draw;
 pub mod event;
 pub mod feature;
+mod layout;
 pub mod overlay;
 pub mod status;
 pub mod tabs;
@@ -35,7 +36,7 @@ use crate::{
     },
 };
 use command::Command;
-use documents::{Document, Documents};
+use documents::Documents;
 use draw::Frame;
 use event::Event;
 use feature::Features;
@@ -101,9 +102,11 @@ impl App {
             capabilities,
         } = startup;
 
-        let mut errors = Vec::new();
+        let mut messages = Vec::new();
         let mut root = None;
         let mut documents = Documents::default();
+        let mut workspace = None;
+        let mut features = Features::default();
         let mut items = Vec::new();
 
         let directory = match paths.as_slice() {
@@ -117,41 +120,62 @@ impl App {
         };
         if let Some(directory) = directory {
             services.add_root(&directory, cx).await?;
+            features.sessions.bind(&directory);
+            if let Some(session) = features.sessions.load() {
+                let restored = features
+                    .sessions
+                    .restore(session, &services, &events, cx)
+                    .await;
+                if restored.skipped > 0 {
+                    messages.push(format!(
+                        "session: {} file(s) no longer exist",
+                        restored.skipped
+                    ));
+                }
+                if restored.restored > 0 {
+                    messages.push("session restored".to_owned());
+                }
+                documents = restored.documents;
+                workspace = restored.workspace;
+            }
             root = Some(directory);
         } else {
             for path in &paths {
                 match services.open_file(path, cx).await {
                     Ok(buffer) => {
-                        if documents.item_for_buffer(&buffer).is_some() {
+                        if !documents.items_for_buffer(&buffer).is_empty() {
                             continue;
                         }
-                        let document = Document::open(buffer, None, &services, &events, cx)?;
-                        items.push(documents.insert(document));
+                        items.push(documents.open(buffer, None, &services, &events, cx)?);
                     }
                     Err(error) => {
-                        errors.push(format!("failed to open {}: {error:#}", path.display()))
+                        messages.push(format!("failed to open {}: {error:#}", path.display()))
                     }
                 }
             }
         }
-        if items.is_empty() {
-            let buffer = cx.update(|cx| services.create_scratch(cx));
-            let label = documents.next_untitled_label();
-            let document = Document::open(buffer, Some(label), &services, &events, cx)?;
-            items.push(documents.insert(document));
-        }
-
-        let mut workspace = WorkspaceModel::new(items[0]);
-        for item in &items[1..] {
-            workspace.open_item(*item).context("register startup tab")?;
-        }
-        workspace
-            .focus_item(items[0])
-            .context("focus first startup tab")?;
+        let workspace = match workspace {
+            Some(workspace) => workspace,
+            None => {
+                if items.is_empty() {
+                    let buffer = cx.update(|cx| services.create_scratch(cx));
+                    let label = documents.next_untitled_label();
+                    items.push(documents.open(buffer, Some(label), &services, &events, cx)?);
+                }
+                let mut workspace = WorkspaceModel::new(items[0]);
+                for item in &items[1..] {
+                    workspace.open_item(*item).context("register startup tab")?;
+                }
+                workspace
+                    .focus_item(items[0])
+                    .context("focus first startup tab")?;
+                workspace
+            }
+        };
 
         let mut status = Status::default();
-        if !errors.is_empty() {
-            status.set(errors.join("; "));
+        if !messages.is_empty() {
+            status.set(messages.join("; "));
         }
 
         let app = Self {
@@ -166,7 +190,7 @@ impl App {
             documents,
             overlays: Overlays::default(),
             status,
-            features: Features::default(),
+            features,
             frame: None,
             resize: None,
             needs_invalidate: false,

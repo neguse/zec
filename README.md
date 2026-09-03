@@ -39,6 +39,10 @@ which are also listed in the command palette:
 | `Ctrl-R` | Reload from disk |
 | `Ctrl-W` | Close Tab |
 | `Ctrl-PgUp` / `Ctrl-PgDn` | Previous / Next Tab |
+| `F10` / `Shift-F10` | Split Right / Split Down |
+| `Ctrl-Alt-Arrow` | Focus the pane in that direction |
+| `Ctrl-Alt-Shift-Arrow` | Move the tab to the pane in that direction |
+| `Ctrl-Alt-=` / `Ctrl-Alt--` | Grow / Shrink Pane |
 | `Ctrl-C` / `Ctrl-X` | Copy / Cut through OSC 52 |
 | `Ctrl-,` / `Ctrl-Alt-,` | Open Settings / Open Keymap |
 | `F4` | Show Terminal Capabilities |
@@ -49,7 +53,8 @@ input dismisses the question. Zed's `settings.json` and `keymap.json` are
 read from Zed's configuration directory and reloaded on change.
 `ZEC_DATA_DIR` moves that directory, and `ZEC_KEYBOARD_PROTOCOL`
 (`kitty`, `modifyOtherKeys`, or `legacy`) overrides keyboard protocol
-detection.
+detection. In directory mode zec remembers the layout and open files per
+root under its data directory and restores them on the next start.
 
 ## Building
 

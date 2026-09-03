@@ -10,12 +10,16 @@ use async_channel::Sender;
 use editor::Editor;
 use gpui::WindowHandle;
 
-use super::{event::Event, overlay::Overlays, status::Status};
+use super::{
+    documents::Documents, event::Event, overlay::Overlays, status::Status,
+    workspace::WorkspaceModel,
+};
 use crate::{
     features::{
         buffer_search::{BufferSearch, BufferSearchEvent},
         project_search::{ProjectSearch, ProjectSearchEvent},
         quick_open::{QuickOpen, QuickOpenEvent},
+        sessions::Sessions,
     },
     zed::services::Services,
 };
@@ -28,6 +32,9 @@ pub struct Ctx<'a> {
     /// The active document's hidden window: Zed's Editor APIs, without
     /// the rest of `Documents`.
     pub editor: WindowHandle<Editor>,
+    /// Read views of the pane tree and its documents.
+    pub workspace: &'a WorkspaceModel,
+    pub documents: &'a Documents,
     pub overlays: &'a mut Overlays,
     pub status: &'a mut Status,
     /// For completions of work a feature spawned.
@@ -40,6 +47,7 @@ pub struct Features {
     pub quick_open: QuickOpen,
     pub project_search: ProjectSearch,
     pub buffer_search: BufferSearch,
+    pub sessions: Sessions,
 }
 
 /// One variant per feature, wrapping that feature's own event.

@@ -1,14 +1,22 @@
-//! One frame: capture inside the draw callback, then widgets.
+//! One frame: the render plan, one capture per visible pane inside the
+//! draw callback, then widgets.
+
+use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
 use gpui::AsyncApp;
-use ratatui::layout::Rect;
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+};
 
 use super::{
     App,
     command::Command,
+    layout::{self, RenderPlan},
     overlay::Presentation,
     tabs::{self, TabLabel},
+    workspace::{Axis, PaneId},
 };
 use crate::{
     terminal::{
@@ -32,10 +40,22 @@ const HINTS: &[(Command, &str)] = &[
 /// Rows a picker may use above the status row.
 const OVERLAY_ROW_LIMIT: usize = 12;
 
-/// What the last frame showed, for mouse hit testing and scrolling.
-pub struct Frame {
+/// What one pane showed in the last frame.
+pub struct PaneFrame {
     pub area: Rect,
     pub snapshot: RenderSnapshot,
+}
+
+/// What the last frame showed, for mouse hit testing and scrolling.
+pub struct Frame {
+    pub plan: RenderPlan,
+    pub panes: BTreeMap<PaneId, PaneFrame>,
+}
+
+impl Frame {
+    pub fn pane(&self, pane: PaneId) -> Option<&PaneFrame> {
+        self.panes.get(&pane)
+    }
 }
 
 impl App {
@@ -59,42 +79,86 @@ impl App {
         Ok(())
     }
 
-    /// Reads the visible rows inside the draw callback so the viewport and
-    /// the frame area cannot disagree.
+    /// Reads the visible rows of every pane inside the draw callback so the
+    /// viewports and the frame area cannot disagree.
     fn draw(&mut self, frame: &mut ratatui::Frame, cx: &mut AsyncApp) -> Result<Frame> {
         let area = frame.area();
-        let label = self.tab_label(cx)?;
+        let plan = layout::plan(&self.workspace, area);
         let row_budget = usize::from(area.height.saturating_sub(2)).min(OVERLAY_ROW_LIMIT);
-        let status = self.status_row(&label, row_budget);
-        let document = self
-            .documents
-            .get_mut(self.workspace.active_item())
-            .context("active item has no document")?;
-        let (viewport, follow) = (document.viewport, document.follow);
-        let capture = document
-            .editor
-            .update(cx, |editor, window, cx| {
-                editor::capture(editor, window, cx, viewport, follow, area, status)
-            })
-            .context("read editor state")?;
-        document.viewport = capture.snapshot.viewport;
-        document.follow = capture.follow;
+        let active_pane = self.workspace.active_pane();
+        let mut panes = BTreeMap::new();
 
-        let widget = EditorWidget::new(&capture.snapshot);
-        let cursor = widget.cursor_position(area);
-        frame.render_widget(widget, area);
-        if let Some(cursor) = cursor {
-            frame.set_cursor_position(cursor);
+        for pane_area in &plan.panes {
+            let focused = pane_area.pane == active_pane;
+            let status = if focused {
+                self.status_row(&self.tab_label(pane_area.pane, cx)?, row_budget)
+            } else {
+                StatusRow {
+                    text: self.tab_strip(pane_area.pane, cx)?,
+                    cursor_column: None,
+                    overlay: None,
+                }
+            };
+            let item = self
+                .workspace
+                .pane(pane_area.pane)
+                .context("planned pane is not in the workspace")?
+                .active_item();
+            let document = self
+                .documents
+                .get_mut(item)
+                .context("pane item has no document")?;
+            let (viewport, follow) = (document.viewport, document.follow);
+            let capture = document
+                .editor
+                .update(cx, |editor, window, cx| {
+                    editor::capture(editor, window, cx, viewport, follow, pane_area.area, status)
+                })
+                .context("read editor state")?;
+            document.viewport = capture.snapshot.viewport;
+            document.follow = capture.follow;
+
+            let widget = EditorWidget::new(&capture.snapshot);
+            let cursor = widget.cursor_position(pane_area.area);
+            frame.render_widget(widget, pane_area.area);
+            if focused && let Some(cursor) = cursor {
+                frame.set_cursor_position(cursor);
+            }
+            panes.insert(
+                pane_area.pane,
+                PaneFrame {
+                    area: pane_area.area,
+                    snapshot: capture.snapshot,
+                },
+            );
         }
-        Ok(Frame {
-            area,
-            snapshot: capture.snapshot,
-        })
+
+        let buffer = frame.buffer_mut();
+        let divider_style = Style::default().add_modifier(Modifier::DIM);
+        for divider in &plan.dividers {
+            let symbol = match divider.axis {
+                Axis::Horizontal => "│",
+                Axis::Vertical => "─",
+            };
+            for y in divider.area.y..divider.area.bottom() {
+                for x in divider.area.x..divider.area.right() {
+                    if let Some(cell) = buffer.cell_mut((x, y)) {
+                        cell.set_symbol(symbol).set_style(divider_style);
+                    }
+                }
+            }
+        }
+        Ok(Frame { plan, panes })
     }
 
-    fn tab_label(&self, cx: &AsyncApp) -> Result<String> {
-        let mut labels = Vec::with_capacity(self.workspace.items().len());
-        for item in self.workspace.items() {
+    /// The tab strip of one pane.
+    fn tab_strip(&self, pane: PaneId, cx: &AsyncApp) -> Result<String> {
+        let pane = self
+            .workspace
+            .pane(pane)
+            .context("pane is not in the workspace")?;
+        let mut labels = Vec::with_capacity(pane.items().len());
+        for item in pane.items() {
             let document = self
                 .documents
                 .get(*item)
@@ -106,7 +170,11 @@ impl App {
                 conflict: state.has_external_change(),
             });
         }
-        let status = tabs::format_status(&labels, self.workspace.active_index());
+        Ok(tabs::format_status(&labels, pane.active_index()))
+    }
+
+    fn tab_label(&self, pane: PaneId, cx: &AsyncApp) -> Result<String> {
+        let status = self.tab_strip(pane, cx)?;
         Ok(match &self.root {
             Some(root) => format!(
                 "{}  {status}",

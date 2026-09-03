@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use gpui::AsyncApp;
 use ratatui::layout::Position;
-use workspace::searchable::Direction;
+use workspace::searchable::Direction as SearchDirection;
 
 use super::{
     App, Flow, OVERLAY_CONTEXT,
@@ -15,7 +15,7 @@ use super::{
     event::{ConfigEvent, DocumentEvent, Event, Input},
     feature::{Ctx, FeatureEvent, Features},
     overlay::{Overlay, PickerOwner, PickerPayload, PromptTarget},
-    workspace::ItemId,
+    workspace::{Axis, Direction, ItemId, PaneId},
 };
 use crate::{
     terminal::{
@@ -73,7 +73,7 @@ impl App {
             }
             Event::Fatal(message) => bail!(message),
             Event::Document(DocumentEvent::ReloadFinished { buffer_id, result }) => {
-                if self.documents.item_for_buffer_id(buffer_id, cx).is_some() {
+                if self.documents.shows_buffer_id(buffer_id, cx) {
                     match result {
                         Ok(()) => self.status.set("reloaded from disk"),
                         Err(error) => self.status.set(format!("reload failed: {error}")),
@@ -105,13 +105,15 @@ impl App {
             }
         };
         self.check_invariants()?;
+        let (features, mut ctx) = self.feature_ctx();
+        features.sessions.sync(&mut ctx, cx);
         Ok(flow)
     }
 
     pub(super) fn shutdown(&mut self, cx: &mut AsyncApp) {
-        for (_, document) in self.documents.iter() {
-            let _ = zed::editor::close_window(&document.editor, cx);
-        }
+        let (features, mut ctx) = self.feature_ctx();
+        features.sessions.finish(&mut ctx, cx);
+        self.documents.close_all(cx);
     }
 
     // ---- input routing ----
@@ -144,11 +146,15 @@ impl App {
                 if self.overlays.owns_input() {
                     return Ok(Flow::Continue);
                 }
-                let Some(frame) = self.frame.as_ref() else {
+                let Some(pane) = self
+                    .frame
+                    .as_ref()
+                    .and_then(|frame| frame.pane(self.workspace.active_pane()))
+                else {
                     return Ok(Flow::Continue);
                 };
-                let total_rows = frame.snapshot.total_rows;
-                let body_height = usize::from(frame.area.height.saturating_sub(1));
+                let total_rows = pane.snapshot.total_rows;
+                let body_height = usize::from(pane.area.height.saturating_sub(1));
                 let document = self.active_document_mut();
                 if document
                     .viewport
@@ -281,9 +287,9 @@ impl App {
             }
             OverlayOutcome::Submit(PromptTarget::Find, _, alternate) => {
                 let direction = if alternate {
-                    Direction::Prev
+                    SearchDirection::Prev
                 } else {
-                    Direction::Next
+                    SearchDirection::Next
                 };
                 let (features, mut ctx) = self.feature_ctx();
                 features.buffer_search.step(&mut ctx, direction, cx);
@@ -371,12 +377,24 @@ impl App {
             return Ok(());
         }
         let position = Position::new(mouse.column, mouse.row);
-        let Some(text_position) = self.frame.as_ref().and_then(|frame| {
-            EditorWidget::new(&frame.snapshot).text_position_at(frame.area, position)
-        }) else {
+        let Some(frame) = self.frame.as_ref() else {
             return Ok(());
         };
-        zed::editor::place_caret(&self.active_document().editor, text_position, cx)?;
+        let Some(pane) = frame.plan.pane_at(position) else {
+            return Ok(());
+        };
+        let text_position = frame.pane(pane).and_then(|shown| {
+            EditorWidget::new(&shown.snapshot).text_position_at(shown.area, position)
+        });
+        if pane != self.workspace.active_pane() {
+            self.workspace
+                .focus_pane(pane)
+                .context("focus the clicked pane")?;
+            self.item_changed();
+        }
+        if let Some(text_position) = text_position {
+            zed::editor::place_caret(&self.active_document().editor, text_position, cx)?;
+        }
         self.input_reached_document();
         Ok(())
     }
@@ -428,6 +446,18 @@ impl App {
                 let (features, mut ctx) = self.feature_ctx();
                 features.buffer_search.go_to_line(&mut ctx);
             }
+            Command::SplitRight => self.split(Axis::Horizontal, cx)?,
+            Command::SplitDown => self.split(Axis::Vertical, cx)?,
+            Command::FocusPaneLeft => self.focus_pane(Direction::Left)?,
+            Command::FocusPaneRight => self.focus_pane(Direction::Right)?,
+            Command::FocusPaneUp => self.focus_pane(Direction::Up)?,
+            Command::FocusPaneDown => self.focus_pane(Direction::Down)?,
+            Command::MoveTabLeft => self.move_tab(Direction::Left)?,
+            Command::MoveTabRight => self.move_tab(Direction::Right)?,
+            Command::MoveTabUp => self.move_tab(Direction::Up)?,
+            Command::MoveTabDown => self.move_tab(Direction::Down)?,
+            Command::GrowPane => self.resize_pane(50),
+            Command::ShrinkPane => self.resize_pane(-50),
             Command::NextItem | Command::PreviousItem => {
                 if self
                     .workspace
@@ -491,14 +521,10 @@ impl App {
         if self.documents.len() == 1 {
             return Ok(Flow::Exit);
         }
-        let document = self
-            .documents
-            .remove(item)
-            .context("active item has no document")?;
-        zed::editor::close_window(&document.editor, cx)?;
         self.workspace
             .close_item(item)
             .context("close item through the workspace")?;
+        self.documents.close(item, cx)?;
         self.item_changed();
         self.status.set("tab closed");
         Ok(Flow::Continue)
@@ -616,8 +642,9 @@ impl App {
     async fn new_file(&mut self, cx: &mut AsyncApp) -> Result<()> {
         let buffer = cx.update(|cx| self.services.create_scratch(cx));
         let label = self.documents.next_untitled_label();
-        let document = Document::open(buffer, Some(label), &self.services, &self.events, cx)?;
-        let item = self.documents.insert(document);
+        let item = self
+            .documents
+            .open(buffer, Some(label), &self.services, &self.events, cx)?;
         self.show_item(item)?;
         self.status.set("new tab");
         Ok(())
@@ -626,15 +653,24 @@ impl App {
     /// Opens `path` in a tab, or activates the tab already showing it.
     async fn open_document_at(&mut self, path: PathBuf, cx: &mut AsyncApp) -> Result<String> {
         let buffer = self.services.open_file(&path, cx).await?;
-        if let Some(item) = self.documents.item_for_buffer(&buffer) {
+        // A buffer already shown is activated where it is, preferring the
+        // active pane when a split shows it twice.
+        let showing = self.documents.items_for_buffer(&buffer);
+        let existing = showing
+            .iter()
+            .copied()
+            .find(|item| self.workspace.items().contains(item))
+            .or_else(|| showing.first().copied());
+        if let Some(item) = existing {
             self.workspace
                 .focus_item(item)
                 .context("activate existing tab")?;
             self.item_changed();
             return Ok(format!("switched to {}", self.display_path(&path)));
         }
-        let document = Document::open(buffer, None, &self.services, &self.events, cx)?;
-        let item = self.documents.insert(document);
+        let item = self
+            .documents
+            .open(buffer, None, &self.services, &self.events, cx)?;
         self.show_item(item)?;
         Ok(format!("opened {}", self.display_path(&path)))
     }
@@ -664,6 +700,73 @@ impl App {
             self.status.set("copied to terminal clipboard");
         }
         Ok(())
+    }
+
+    // ---- panes ----
+
+    /// Splits the active pane; the new pane shows the same buffer through
+    /// its own editor.
+    fn split(&mut self, axis: Axis, cx: &mut AsyncApp) -> Result<()> {
+        let item = self.workspace.active_item();
+        let new_item = self
+            .documents
+            .split(item, &self.services, &self.events, cx)?;
+        if let Err(error) = self.workspace.split_active(axis, new_item) {
+            self.documents.close(new_item, cx)?;
+            return Err(error).context("split the active pane");
+        }
+        self.item_changed();
+        self.status.set(match axis {
+            Axis::Horizontal => "split right",
+            Axis::Vertical => "split down",
+        });
+        Ok(())
+    }
+
+    /// The pane beside the active one in the last frame.
+    fn neighbour_pane(&self, direction: Direction) -> Option<PaneId> {
+        self.frame
+            .as_ref()?
+            .plan
+            .neighbour(self.workspace.active_pane(), direction)
+    }
+
+    fn focus_pane(&mut self, direction: Direction) -> Result<()> {
+        let Some(target) = self.neighbour_pane(direction) else {
+            self.status.set(format!("no pane {}", direction.relative()));
+            return Ok(());
+        };
+        self.workspace
+            .focus_pane(target)
+            .context("focus the neighbouring pane")?;
+        self.item_changed();
+        self.status
+            .set(format!("focused pane {}", direction.relative()));
+        Ok(())
+    }
+
+    fn move_tab(&mut self, direction: Direction) -> Result<()> {
+        let Some(target) = self.neighbour_pane(direction) else {
+            self.status.set(format!("no pane {}", direction.relative()));
+            return Ok(());
+        };
+        if self
+            .workspace
+            .move_active_item(target)
+            .context("move the tab to the neighbouring pane")?
+        {
+            self.item_changed();
+            self.status
+                .set(format!("moved tab {}", direction.relative()));
+        }
+        Ok(())
+    }
+
+    fn resize_pane(&mut self, delta: i32) {
+        match self.workspace.adjust_split(delta) {
+            Some(share) => self.status.set(format!("pane size {}%", share / 10)),
+            None => self.status.set("no split to resize"),
+        }
     }
 
     fn push_palette(&mut self, cx: &mut AsyncApp) {
@@ -751,6 +854,8 @@ impl App {
                 services,
                 root: root.as_deref(),
                 editor,
+                workspace: &*workspace,
+                documents: &*documents,
                 overlays,
                 status,
                 events,
