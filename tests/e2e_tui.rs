@@ -4093,11 +4093,21 @@ fn restricted_worktree_requires_confirmation_before_lsp(directory: &Path) -> Res
 
     session.send(ENTER)?;
     // The trust status is transient, and the capacity-1 redraw channel
-    // may coalesce it away entirely, so any post-trust evidence counts.
+    // may coalesce it away entirely, so any post-trust evidence counts. A
+    // differential terminal frame can also split status text with cursor
+    // movement sequences, so check both the raw transcript and semantic
+    // screen instead of requiring contiguous raw bytes.
     session.wait_until("trusted worktree status", ACTION_TIMEOUT, |session| {
-        contains_bytes(&session.transcript, b"worktree trusted for this session")
-            || contains_bytes(&session.transcript, b"project settings reloaded")
-            || contains_bytes(&session.transcript, b"language service starting")
+        let screen = session.parser.screen().contents();
+        [
+            "worktree trusted for this session",
+            "project settings reloaded",
+            "language service starting",
+        ]
+        .iter()
+        .any(|status| {
+            screen.contains(status) || contains_bytes(&session.transcript, status.as_bytes())
+        })
     })?;
     session.wait_until(
         "fixture LSP initialized after trust",
@@ -4298,7 +4308,10 @@ fn capture_baseline(pair: &PtyPair) -> Result<TerminalBaseline> {
     #[cfg(unix)]
     {
         Ok(TerminalBaseline {
-            termios: capture_baseline(&pair)?,
+            termios: pair
+                .master
+                .get_termios()
+                .context("PTY does not expose its initial termios")?,
         })
     }
     #[cfg(not(unix))]

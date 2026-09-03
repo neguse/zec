@@ -71,6 +71,12 @@ fn actual_binary_checks_verifies_and_downloads_a_local_release() -> Result<()> {
     // verification, so the actual zec binary is the release payload.
     let asset_bytes = fs::read(env!("CARGO_BIN_EXE_zec")).context("read actual zec binary")?;
     fs::write(&asset, &asset_bytes).context("write fixture executable")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&asset, fs::Permissions::from_mode(0o755))
+            .context("make fixture asset executable")?;
+    }
     let digest = sha256_hex(&asset_bytes);
     let manifest = write_manifest(temp.path(), &digest, asset_bytes.len())?;
 

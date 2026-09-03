@@ -17682,13 +17682,20 @@ fn file_services_with_fs(
 ) -> FileServices {
     let runtime = cx.global::<ProjectRuntime>().clone();
     let language_registry = runtime.language_registry.clone();
+    let project_environment = env::vars().collect::<collections::HashMap<_, _>>();
+    #[cfg(windows)]
+    let project_environment = {
+        let mut environment = project_environment;
+        normalize_windows_path_environment(&mut environment);
+        environment
+    };
     let project = Project::local(
         runtime.client.clone(),
         runtime.node_runtime.clone(),
         runtime.user_store.clone(),
         language_registry.clone(),
         file_system.clone(),
-        Some(env::vars().collect()),
+        Some(project_environment),
         LocalProjectFlags {
             init_worktree_trust: true,
             watch_global_configs,
@@ -17717,6 +17724,28 @@ fn file_services_with_fs(
         _lsp_store: lsp_store,
         file_system,
         language_registry,
+    }
+}
+
+/// Windows environment-variable names are case-insensitive, but the map Zed
+/// receives is not. `std::env::vars` normally yields `Path` on Windows while
+/// LSP adapter discovery looks up `PATH`, so canonicalize that one key before
+/// handing the inherited CLI environment to `Project::local`.
+#[cfg(any(windows, test))]
+fn normalize_windows_path_environment(environment: &mut collections::HashMap<String, String>) {
+    if environment.contains_key("PATH") {
+        environment.retain(|key, _| key == "PATH" || !key.eq_ignore_ascii_case("PATH"));
+        return;
+    }
+
+    let path_key = environment
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("PATH"))
+        .cloned();
+    if let Some(path_key) = path_key
+        && let Some(path) = environment.remove(&path_key)
+    {
+        environment.insert("PATH".to_owned(), path);
     }
 }
 
@@ -22697,6 +22726,46 @@ mod tests {
     use super::*;
     use editor::MultiBufferOffset;
     use std::ffi::OsString;
+
+    #[test]
+    fn windows_project_environment_canonicalizes_the_path_key() {
+        let mut environment = [
+            ("Path".to_owned(), r"C:\fixture-bin;C:\Windows".to_owned()),
+            ("TEMP".to_owned(), r"C:\Temp".to_owned()),
+        ]
+        .into_iter()
+        .collect::<collections::HashMap<_, _>>();
+
+        normalize_windows_path_environment(&mut environment);
+
+        assert_eq!(
+            environment.get("PATH").map(String::as_str),
+            Some(r"C:\fixture-bin;C:\Windows")
+        );
+        assert!(!environment.contains_key("Path"));
+        assert_eq!(
+            environment.get("TEMP").map(String::as_str),
+            Some(r"C:\Temp")
+        );
+    }
+
+    #[test]
+    fn windows_project_environment_prefers_an_existing_canonical_path() {
+        let mut environment = [
+            ("PATH".to_owned(), "canonical".to_owned()),
+            ("Path".to_owned(), "alias".to_owned()),
+        ]
+        .into_iter()
+        .collect::<collections::HashMap<_, _>>();
+
+        normalize_windows_path_environment(&mut environment);
+
+        assert_eq!(environment.len(), 1);
+        assert_eq!(
+            environment.get("PATH").map(String::as_str),
+            Some("canonical")
+        );
+    }
 
     #[test]
     fn resize_invalidation_clears_backend_and_forces_a_full_redraw() {
