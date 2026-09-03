@@ -20,6 +20,7 @@ use project::{
     LocalProjectFlags, Project, ProjectEntryId, ProjectPath, Worktree,
     buffer_store::BufferStore,
     lsp_store::{FormatTrigger, LspFormatTarget},
+    trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent},
     worktree_store::WorktreeStore,
 };
 use zed_fs::{Fs, Metadata};
@@ -84,6 +85,95 @@ impl Services {
     pub fn visible_worktree(&self, cx: &AsyncApp) -> Option<Entity<Worktree>> {
         self.worktree_store
             .read_with(cx, |store, cx| store.visible_worktrees(cx).next())
+    }
+
+    /// Forwards the project's trust and language server changes as events
+    /// for as long as the subscriptions live. Zed marks a worktree
+    /// restricted the first time something repository-controlled, such as
+    /// a language server, wants to start in it.
+    pub fn watch<T>(&self, sender: Sender<T>, cx: &mut AsyncApp) -> Vec<gpui::Subscription>
+    where
+        T: From<super::Event> + Send + 'static,
+    {
+        let mut subscriptions = Vec::new();
+        let worktree_store = self.worktree_store.clone();
+        let trust_sender = sender.clone();
+        if let Some(trusted) = cx.update(|cx| TrustedWorktrees::try_get_global(cx)) {
+            subscriptions.push(cx.update(|cx| {
+                cx.subscribe(&trusted, move |_, event, cx| {
+                    let TrustedWorktreesEvent::Restricted(store, paths) = event else {
+                        return;
+                    };
+                    if store.entity_id() != worktree_store.entity_id() {
+                        return;
+                    }
+                    for path in paths {
+                        let path = match path {
+                            PathTrust::Worktree(id) => worktree_store
+                                .read(cx)
+                                .worktree_for_id(*id, cx)
+                                .map(|worktree| worktree.read(cx).abs_path().to_path_buf()),
+                            PathTrust::AbsPath(path) => Some(path.clone()),
+                        };
+                        if let Some(path) = path {
+                            let _ = trust_sender
+                                .try_send(super::Event::WorktreeRestricted { path }.into());
+                        }
+                    }
+                })
+            }));
+        }
+        subscriptions.push(cx.update(|cx| {
+            cx.subscribe(&self.project, move |_, event, _| {
+                let (name, running) = match event {
+                    project::Event::LanguageServerAdded(_, name, _) => (name.to_string(), true),
+                    project::Event::LanguageServerRemoved(id) => (format!("#{}", id.0), false),
+                    _ => return,
+                };
+                let _ = sender.try_send(super::Event::LanguageServer { name, running }.into());
+            })
+        }));
+        subscriptions
+    }
+
+    /// The visible root, when Zed has marked it restricted. Zed decides
+    /// that while the worktree is added, before any watcher can hear it.
+    pub fn restricted_root(&self, cx: &AsyncApp) -> Option<PathBuf> {
+        let worktree = self.visible_worktree(cx)?;
+        let restricted = cx.update(|cx| {
+            TrustedWorktrees::try_get_global(cx).is_some_and(|trusted| {
+                let id = worktree.read(cx).id();
+                trusted
+                    .read(cx)
+                    .restricted_worktrees(&self.worktree_store, cx)
+                    .into_iter()
+                    .any(|(restricted, _)| restricted == id)
+            })
+        });
+        restricted.then(|| worktree.read_with(cx, |worktree, _| worktree.abs_path().to_path_buf()))
+    }
+
+    /// Trusts the visible root, letting Zed start language servers and
+    /// other repository-controlled processes in it for this process.
+    pub fn trust_root(&self, cx: &mut AsyncApp) -> Result<PathBuf> {
+        let worktree = self
+            .visible_worktree(cx)
+            .context("no directory root to trust")?;
+        let (id, path) = worktree.read_with(cx, |worktree, _| {
+            (worktree.id(), worktree.abs_path().to_path_buf())
+        });
+        let trusted = cx
+            .update(|cx| TrustedWorktrees::try_get_global(cx))
+            .context("worktree trust is not initialized")?;
+        let worktree_store = self.worktree_store.clone();
+        trusted.update(cx, |trusted, cx| {
+            trusted.trust(
+                &worktree_store,
+                collections::HashSet::from_iter([PathTrust::Worktree(id)]),
+                cx,
+            );
+        });
+        Ok(path)
     }
 
     /// Creates a file or directory at `path` through the project, so the

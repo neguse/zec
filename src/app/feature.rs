@@ -21,6 +21,7 @@ use super::{
 use crate::{
     features::{
         buffer_search::{BufferSearch, BufferSearchEvent},
+        language::{Language, LanguageEvent},
         outline_panel::OutlinePanel,
         project_panel::{ProjectPanel, ProjectPanelEvent},
         project_search::{ProjectSearch, ProjectSearchEvent},
@@ -86,6 +87,7 @@ pub struct Features {
     pub sessions: Sessions,
     pub project_panel: ProjectPanel,
     pub outline_panel: OutlinePanel,
+    pub language: Language,
 }
 
 /// One variant per feature, wrapping that feature's own event.
@@ -95,4 +97,5 @@ pub enum FeatureEvent {
     ProjectSearch(ProjectSearchEvent),
     BufferSearch(BufferSearchEvent),
     ProjectPanel(ProjectPanelEvent),
+    Language(LanguageEvent),
 }

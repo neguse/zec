@@ -5,7 +5,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Read as _, Write as _},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -66,6 +66,14 @@ const DOWN: &[u8] = b"\x1b[B";
 const F2: &[u8] = b"\x1bOQ";
 const F7: &[u8] = b"\x1b[18~";
 const F9: &[u8] = b"\x1b[20~";
+const F6: &[u8] = b"\x1b[17~";
+const F8: &[u8] = b"\x1b[19~";
+const SHIFT_F12: &[u8] = b"\x1b[24;2~";
+const ALT_SLASH: &[u8] = b"\x1b/";
+const CTRL_PERIOD: &[u8] = b"\x1b[46;5u";
+const CTRL_SHIFT_T: &[u8] = b"\x1b[116;6u";
+const CTRL_PAGE_UP: &[u8] = b"\x1b[5;5~";
+const END: &[u8] = b"\x1b[F";
 const DELETE: &[u8] = b"\x1b[3~";
 const CTRL_U: &[u8] = b"\x15";
 const ALT_F: &[u8] = b"\x1bf";
@@ -446,6 +454,172 @@ fn sessions_restore_split_layout_and_tabs() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "restored session exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn language_servers_answer_through_zed() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("lsp-repo");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/main.rs"), "stub_\n")?;
+    fs::write(root.join("src/lib.rs"), "pub fn stub_peer() {}\n")?;
+
+    // The fixture server stands in for rust-analyzer through Zed's own
+    // binary override, so the request path is the real one end to end.
+    let data_dir = tempfile::tempdir().context("create isolated data directory")?;
+    let config = data_dir.path().join("config");
+    fs::create_dir_all(&config)?;
+    let fixture = env!("CARGO_BIN_EXE_fixture_lsp").replace('\\', "/");
+    fs::write(
+        config.join("settings.json"),
+        format!(
+            r#"{{"lsp": {{"rust-analyzer": {{"binary": {{"path": "{fixture}", "arguments": []}}}}}}}}"#
+        ),
+    )?;
+    fs::write(config.join("keymap.json"), "[]")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let data_path = data_dir.path().to_path_buf();
+    let mut session =
+        PtySession::spawn_with_data_dir(pair, &[root.as_os_str()], &data_path, Some(data_dir))?;
+    session.wait_ready()?;
+
+    // Zed restricts an unknown root; the verdict stays in the status row
+    // until the root is trusted, and only then do language servers start.
+    session.wait_for_screen("worktree restricted", ACTION_TIMEOUT, |screen| {
+        screen.contains("lsp-repo [restricted]") && screen.contains("Ctrl-Shift-T trust")
+    })?;
+    session.send(CTRL_SHIFT_T)?;
+    session.wait_for_screen("worktree trusted", ACTION_TIMEOUT, |screen| {
+        screen.contains("trusted lsp-repo") && !screen.contains("[restricted]")
+    })?;
+    session.send(CTRL_P)?;
+    session.paste("main.rs")?;
+    session.wait_for_screen("quick open lists main.rs", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: main.rs") && screen.contains("› src/main.rs")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("language server started", ACTION_TIMEOUT, |screen| {
+        screen.contains("language server rust-analyzer started")
+    })?;
+
+    // Completion: the word before the caret seeds the picker's query.
+    session.send(END)?;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        session.send(ALT_SLASH)?;
+        session.wait_for_screen("completions or none", ACTION_TIMEOUT, |screen| {
+            screen.contains("Completions: stub_") || screen.contains("no completions")
+        })?;
+        if session.screen().contains("Completions: stub_") {
+            break;
+        }
+        ensure!(
+            attempts < 10,
+            "the fixture server never answered completions"
+        );
+        thread::sleep(Duration::from_millis(300));
+    }
+    session.wait_for_screen(
+        "completions filtered to the word",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("stub_completion") && !screen.contains("beta_completion"),
+    )?;
+    session.send(ENTER)?;
+    session.wait_for_screen("completion applied", ACTION_TIMEOUT, |screen| {
+        screen.contains("stub_completion()") && screen.contains("completed ")
+    })?;
+
+    // Hover is a read-only overlay.
+    session.send(F2)?;
+    session.wait_for_screen("hover shown", ACTION_TIMEOUT, |screen| {
+        screen.contains("Hover  (Esc closes)") && screen.contains("Fixture hover with")
+    })?;
+    session.send(ESC)?;
+    session.wait_for_screen("hover closed", ACTION_TIMEOUT, |screen| {
+        !screen.contains("Fixture hover with")
+    })?;
+
+    // Diagnostics list the published warning; Enter jumps to it.
+    session.send(F8)?;
+    session.wait_for_screen("diagnostics listed", ACTION_TIMEOUT, |screen| {
+        screen.contains("Diagnostics:")
+            && screen.contains("src/main.rs:1")
+            && screen.contains("warning deterministic fixture warning")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("diagnostic opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("switched to src/main.rs")
+    })?;
+
+    // References need a second open buffer to list more than one hit.
+    session.send(CTRL_P)?;
+    session.paste("lib.rs")?;
+    session.wait_for_screen("quick open lists lib.rs", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: lib.rs") && screen.contains("› src/lib.rs")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("lib.rs opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("opened src/lib.rs")
+    })?;
+    session.send(CTRL_PAGE_UP)?;
+    session.wait_for_screen("back on main.rs", ACTION_TIMEOUT, |screen| {
+        screen.contains("[main.rs+]")
+    })?;
+    session.send(SHIFT_F12)?;
+    session.wait_for_screen("references listed", ACTION_TIMEOUT, |screen| {
+        screen.contains("References:")
+            && screen.contains("src/main.rs:1")
+            && screen.contains("src/lib.rs:1")
+    })?;
+    session.send(DOWN)?;
+    session.send(ENTER)?;
+    session.wait_for_screen("reference opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("switched to src/lib.rs") && screen.contains("[lib.rs]")
+    })?;
+    session.send(CTRL_PAGE_UP)?;
+    session.wait_for_screen("back on main.rs again", ACTION_TIMEOUT, |screen| {
+        screen.contains("[main.rs+]")
+    })?;
+
+    // Rename is a prompt seeded by the server, applied as a Zed
+    // transaction, so Ctrl-Z undoes it.
+    session.send(F6)?;
+    session.wait_for_screen("rename prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Rename: stub_")
+    })?;
+    session.send(CTRL_U)?;
+    session.paste("renamed_")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("renamed", ACTION_TIMEOUT, |screen| {
+        screen.contains("renamed_completion()") && screen.contains("renamed to renamed_")
+    })?;
+    session.send(CTRL_Z)?;
+    session.wait_for_screen("rename undone", ACTION_TIMEOUT, |screen| {
+        screen.contains("stub_completion()") && !screen.contains("renamed_completion()")
+    })?;
+
+    // Code actions: the fixture's quick fix rewrites the symbol.
+    session.send(CTRL_PERIOD)?;
+    session.wait_for_screen("code actions listed", ACTION_TIMEOUT, |screen| {
+        screen.contains("Code actions:") && screen.contains("Apply fixture quick fix")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("code action applied", ACTION_TIMEOUT, |screen| {
+        screen.contains("fixture_fixedcompletion()")
+            && screen.contains("applied Apply fixture quick fix")
+    })?;
+
+    session.send(CTRL_Q)?;
+    session.wait_for_screen("dirty quit guard", ACTION_TIMEOUT, |screen| {
+        screen.contains("unsaved or deleted tab(s)")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "language e2e exit failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 
@@ -987,6 +1161,8 @@ struct PtySession {
     parser: Parser,
     output_generation: u64,
     transcript: Vec<u8>,
+    /// zec's log file, shown on failure.
+    log_path: PathBuf,
     _data_dir: Option<tempfile::TempDir>,
 }
 
@@ -1059,6 +1235,8 @@ impl PtySession {
         command.env("ZEC_DATA_DIR", data_dir);
         command.env("XDG_CONFIG_HOME", data_dir);
         command.env("XDG_DATA_HOME", data_dir.join("data"));
+        let log_path = data_dir.join("zec.log");
+        command.env("ZEC_LOG", &log_path);
         let child = slave
             .spawn_command(command)
             .context("spawn the actual zec binary")?;
@@ -1076,6 +1254,7 @@ impl PtySession {
             parser: Parser::new(INITIAL_SIZE.rows, INITIAL_SIZE.cols, 0),
             output_generation: 0,
             transcript: Vec::new(),
+            log_path,
             _data_dir: owned,
         })
     }
@@ -1248,6 +1427,11 @@ impl PtySession {
         self.wait_until(description, timeout, |session| {
             predicate(&session.parser.screen().contents())
         })
+    }
+
+    /// The screen as it is now, after the last wait.
+    fn screen(&self) -> String {
+        self.parser.screen().contents()
     }
 
     fn wait_until(
@@ -1436,10 +1620,13 @@ impl PtySession {
 
     fn diagnostic(&self) -> String {
         let tail_start = self.transcript.len().saturating_sub(DIAGNOSTIC_TAIL);
+        let log = fs::read_to_string(&self.log_path).unwrap_or_default();
+        let log_start = log.len().saturating_sub(4 * DIAGNOSTIC_TAIL);
         format!(
-            "screen:\n{}\nraw tail:\n{:?}",
+            "screen:\n{}\nraw tail:\n{:?}\nlog tail:\n{}",
             self.parser.screen().contents(),
-            String::from_utf8_lossy(&self.transcript[tail_start..])
+            String::from_utf8_lossy(&self.transcript[tail_start..]),
+            &log[log_start..]
         )
     }
 }

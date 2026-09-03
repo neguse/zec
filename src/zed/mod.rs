@@ -23,6 +23,11 @@ pub enum Event {
         kind: &'static str,
         result: Result<String, String>,
     },
+    /// Zed refused to start repository-controlled processes in a worktree
+    /// until it is trusted.
+    WorktreeRestricted { path: std::path::PathBuf },
+    /// A language server started or stopped.
+    LanguageServer { name: String, running: bool },
 }
 
 /// Headless proof that the pinned Zed Editor runs: insert, print, undo.

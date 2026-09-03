@@ -44,6 +44,8 @@ one until nothing else works.
 | --- | --- | --- |
 | `src/main.rs` | process entry, dispatch of the parsed CLI | `app`, `cli`, `zed` |
 | `src/cli.rs` | argument parsing, `ZEC_DATA_DIR` | `paths` |
+| `src/logging.rs` | the `ZEC_LOG` file that captures Zed's `log` records | `log` |
+| `src/bin/fixture_lsp.rs` | a deterministic language server for the PTY tests | serde_json |
 | `src/app/` | `App`, `Event`, `Command`, overlays, documents, the tab list, `update`, `draw`, the loop | everything |
 | `src/terminal/` | raw mode and restore, capability detection, reader thread, key translation, cell widgets, line prompt, picker list, clipboard | Ratatui, Crossterm |
 | `src/zed/` | GPUI boot, `Project` and stores, hidden Editor windows, snapshot capture, subscriptions, keymap lookup, config watchers, `--smoke` | Zed crates |
@@ -193,8 +195,9 @@ enum OverlayOutcome { Consumed, Submit(String), Cancel, Command(Command) }
 
 ```rust
 enum Overlay {
-    Prompt  { label, line: LinePrompt, target: PromptTarget, feedback },        // Save As, Open
-    Picker  { title, query: LinePrompt, list: PickerList<PickerPayload>, owner }, // palette, Quick Open
+    Prompt  { label, line: LinePrompt, target: PromptTarget, feedback },        // Save As, Open, Rename
+    Picker  { title, query: LinePrompt, list: PickerList<PickerPayload>, owner }, // palette, Quick Open, hits
+    Text    { title, rows, first },                                              // hover documentation
     Confirm { message, command: Command },
 }
 ```
@@ -202,6 +205,9 @@ enum Overlay {
 A picker's `owner` refreshes its entries when the query changes: the
 palette filters its fixed entries in place, and a feature-owned picker
 asks its feature, which replaces the entries when its match completes.
+An accepted entry carries a `PickerPayload`: a command, a path, or a
+location the app opens, or an `Index` the owning feature resolves (a
+completion, a code action). `Text` is read-only: Up and Down scroll,
 `Esc` pops the top overlay. Every overlay is bound to the active tab and
 closes when that tab changes. `Confirm` replaces every second-press flag:
 `execute` settles a pending confirmation in one place, so repeating the
@@ -252,6 +258,7 @@ impl <Name> {
     pub fn <command>(&mut self, ctx: &mut Ctx, cx: &mut AsyncApp);   // one per command
     pub fn update(&mut self, ctx: &mut Ctx, event: <Name>Event, cx: &mut AsyncApp);
     pub fn query_changed(&mut self, ctx: &mut Ctx, query: &str, cx: &mut AsyncApp); // if it owns a picker
+    pub fn pick(&mut self, ctx: &mut Ctx, title: &str, index: usize, cx: &mut AsyncApp); // if its entries are `Index`
     // a dock panel:
     pub const KEY_CONTEXT: &str;
     pub fn execute(&mut self, ctx: &mut Ctx, command: Command, cx: &mut AsyncApp) -> PanelOutcome;
@@ -283,7 +290,9 @@ Adding a feature touches exactly: its directory, a line per command in
 arms in `app/update.rs` (command, event, and the prompt target or picker
 owner when it has one). A feature fills pickers and prompts but never
 opens documents: an accepted entry carries a `PickerPayload` (a command, a
-path, or a location) that the app acts on.
+path, a location, or an index the feature resolves) that the app acts on,
+and a feature's `update` may answer with an outcome the app performs, such
+as opening a location.
 A dock panel adds a `PanelKind` variant, a dock in `WorkspaceModel`, its
 key context section in `keymap.json`, and its `view` arm in `app/draw.rs`.
 Removing a feature reverses those. A feature's Zed crate dependencies
@@ -318,6 +327,14 @@ enter `Cargo.toml` together with the feature.
   newline rules apply.
 - Native grammars are registered as lazy loaders; languages compile their
   queries on first use.
+- Language servers are Zed's: the Project starts an adapter's server when
+  a buffer of its language opens, downloading the binary the way Zed does
+  unless `lsp.<server>.binary.path` in `settings.json` names one. Zed
+  restricts an unknown root while it is added; nothing repository-controlled
+  starts until `TrustWorktree` trusts it for the process, and the verdict
+  is read at draw time into the status row. Requests (completion, hover,
+  locations, rename, code actions, diagnostics) go through `Project`, and
+  their edits are Zed transactions.
 - `zed/editor.rs` holds the helpers that turn Zed entity events into zec
   events, capture display snapshots, and dispatch keystrokes and actions
   into the hidden window.

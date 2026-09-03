@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
-use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use gpui::AsyncApp;
 use ratatui::layout::Position;
 use workspace::searchable::Direction as SearchDirection;
@@ -18,7 +18,10 @@ use super::{
     workspace::{Axis, Direction, DockChange, DockPosition, Focus, ItemId, PaneId, PanelKind},
 };
 use crate::{
-    features::{outline_panel, project_panel},
+    features::{
+        language::{LanguageOutcome, LocationKind},
+        outline_panel, project_panel,
+    },
     terminal::{
         self, clipboard, keys,
         picker::{PickerEntry, PickerList},
@@ -44,6 +47,8 @@ enum OverlayOutcome {
         row: u32,
         column: u32,
     },
+    /// An `Index` entry of a feature-owned picker.
+    Pick(&'static str, usize),
 }
 
 impl App {
@@ -107,6 +112,32 @@ impl App {
             Event::Feature(FeatureEvent::ProjectPanel(event)) => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.project_panel.update(&mut ctx, event, cx);
+                Flow::Continue
+            }
+            Event::Feature(FeatureEvent::Language(event)) => {
+                let outcome = {
+                    let (features, mut ctx) = self.feature_ctx();
+                    features.language.update(&mut ctx, event)
+                };
+                if let LanguageOutcome::Open(hit) = outcome {
+                    self.open_location(hit.path, hit.row, hit.column, cx)
+                        .await?;
+                }
+                Flow::Continue
+            }
+            Event::WorktreeRestricted(path) => {
+                self.status.set(format!(
+                    "{} is restricted; press {} to trust it and start language servers",
+                    directory_name(&path),
+                    self.key_hint(Command::TrustWorktree)
+                ));
+                Flow::Continue
+            }
+            Event::LanguageServer { name, running } => {
+                self.status.set(format!(
+                    "language server {name} {}",
+                    if running { "started" } else { "stopped" }
+                ));
                 Flow::Continue
             }
         };
@@ -260,6 +291,21 @@ impl App {
                 | PromptAction::Previous
                 | PromptAction::Ignored => OverlayOutcome::Consumed,
             },
+            Some(Overlay::Text { rows, first, .. }) => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.overlays.pop();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *first = (*first + 1).min(rows.len().saturating_sub(1));
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => *first = first.saturating_sub(1),
+                    KeyCode::PageDown => *first = (*first + 10).min(rows.len().saturating_sub(1)),
+                    KeyCode::PageUp => *first = first.saturating_sub(10),
+                    _ => {}
+                }
+                OverlayOutcome::Consumed
+            }
             Some(Overlay::Picker {
                 title, query, list, ..
             }) => match query.handle_key(&key) {
@@ -280,6 +326,7 @@ impl App {
                             PickerPayload::Location { path, row, column } => {
                                 OverlayOutcome::OpenLocation { path, row, column }
                             }
+                            PickerPayload::Index(index) => OverlayOutcome::Pick(title, index),
                         },
                         None => OverlayOutcome::Consumed,
                     }
@@ -354,19 +401,17 @@ impl App {
             }
             OverlayOutcome::OpenLocation { path, row, column } => {
                 self.overlays.pop();
-                match self.open_document_at(path, cx).await {
-                    Ok(message) => {
-                        let document = self.active_document_mut();
-                        document.follow.manual_vertical_scroll = false;
-                        zed::editor::place_caret_at_point(
-                            &document.editor,
-                            text::Point::new(row, column),
-                            cx,
-                        )?;
-                        self.status.set(message);
-                    }
-                    Err(error) => self.status.set(format!("open failed: {error:#}")),
-                }
+                self.open_location(path, row, column, cx).await?;
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Pick(title, index) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.pick(&mut ctx, title, index, cx);
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Submit(PromptTarget::Rename, text, _) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.submit_rename(&mut ctx, &text, cx);
                 Ok(Flow::Continue)
             }
             OverlayOutcome::Cancel(label) => {
@@ -494,6 +539,42 @@ impl App {
                 let (features, mut ctx) = self.feature_ctx();
                 features.buffer_search.go_to_line(&mut ctx);
             }
+            Command::ShowCompletions => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.show_completions(&mut ctx, cx);
+            }
+            Command::Hover => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.hover(&mut ctx, cx);
+            }
+            Command::Diagnostics => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.diagnostics(&mut ctx, cx);
+            }
+            Command::GoToDefinition | Command::GoToTypeDefinition | Command::FindReferences => {
+                let kind = match command {
+                    Command::GoToDefinition => LocationKind::Definition,
+                    Command::GoToTypeDefinition => LocationKind::TypeDefinition,
+                    _ => LocationKind::References,
+                };
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.locations(&mut ctx, kind, cx);
+            }
+            Command::RenameSymbol => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.rename(&mut ctx, cx);
+            }
+            Command::CodeActions => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.language.code_actions(&mut ctx, cx);
+            }
+            Command::TrustWorktree => match self.services.trust_root(cx) {
+                Ok(path) => self.status.set(format!(
+                    "trusted {}; language servers may start",
+                    directory_name(&path)
+                )),
+                Err(error) => self.status.set(format!("{error:#}")),
+            },
             Command::SplitRight => self.split(Axis::Horizontal, cx)?,
             Command::SplitDown => self.split(Axis::Vertical, cx)?,
             Command::FocusPaneLeft => self.focus_pane(Direction::Left)?,
@@ -712,6 +793,30 @@ impl App {
             .open(buffer, Some(label), &self.services, &self.events, cx)?;
         self.show_item(item)?;
         self.status.set("new tab");
+        Ok(())
+    }
+
+    /// Opens `path` and places the caret at a buffer point.
+    async fn open_location(
+        &mut self,
+        path: PathBuf,
+        row: u32,
+        column: u32,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        match self.open_document_at(path, cx).await {
+            Ok(message) => {
+                let document = self.active_document_mut();
+                document.follow.manual_vertical_scroll = false;
+                zed::editor::place_caret_at_point(
+                    &document.editor,
+                    text::Point::new(row, column),
+                    cx,
+                )?;
+                self.status.set(message);
+            }
+            Err(error) => self.status.set(format!("open failed: {error:#}")),
+        }
         Ok(())
     }
 
@@ -964,7 +1069,9 @@ impl App {
             return;
         };
         match owner {
-            PickerOwner::Palette | PickerOwner::ProjectSearch => list.filter(query.text()),
+            PickerOwner::Palette | PickerOwner::ProjectSearch | PickerOwner::Language => {
+                list.filter(query.text())
+            }
             PickerOwner::QuickOpen => {
                 let query = query.text().to_owned();
                 let (features, mut ctx) = self.feature_ctx();
@@ -1082,6 +1189,13 @@ fn panel_context(panel: PanelKind) -> &'static str {
         PanelKind::Project => project_panel::KEY_CONTEXT,
         PanelKind::Outline => outline_panel::KEY_CONTEXT,
     }
+}
+
+/// A directory's own name, for messages about the root.
+fn directory_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Prompt paths resolve against the startup directory with no shell

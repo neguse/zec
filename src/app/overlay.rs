@@ -8,7 +8,11 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
     app::command::Command,
-    terminal::{picker::PickerList, prompt::LinePrompt, render::OverlaySnapshot},
+    terminal::{
+        picker::PickerList,
+        prompt::LinePrompt,
+        render::{OverlayRow, OverlaySnapshot},
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +27,8 @@ pub enum PromptTarget {
     Find,
     Replace,
     GoToLine,
+    /// A new name for the symbol a language server prepared.
+    Rename,
     /// A name for a new entry inside `directory`.
     PanelNewFile {
         directory: PathBuf,
@@ -49,6 +55,8 @@ pub enum PickerPayload {
         row: u32,
         column: u32,
     },
+    /// An entry the owning feature resolves by index.
+    Index(usize),
 }
 
 /// Who refreshes a picker's entries when its query changes.
@@ -59,6 +67,9 @@ pub enum PickerOwner {
     QuickOpen,
     /// Fixed entries too: the search ran once, the list filters its hits.
     ProjectSearch,
+    /// Fixed entries from a language server answer; `Index` payloads go
+    /// back to the feature.
+    Language,
 }
 
 #[derive(Debug)]
@@ -74,6 +85,13 @@ pub enum Overlay {
         query: LinePrompt,
         list: PickerList<PickerPayload>,
         owner: PickerOwner,
+    },
+    /// Read-only rows, such as hover documentation; Up and Down scroll,
+    /// Esc closes.
+    Text {
+        title: &'static str,
+        rows: Vec<String>,
+        first: usize,
     },
     /// The same command again executes; any other input dismisses it.
     Confirm { message: String, command: Command },
@@ -126,7 +144,7 @@ impl Overlays {
     pub fn owns_input(&self) -> bool {
         matches!(
             self.stack.last(),
-            Some(Overlay::Prompt { .. } | Overlay::Picker { .. })
+            Some(Overlay::Prompt { .. } | Overlay::Picker { .. } | Overlay::Text { .. })
         )
     }
 
@@ -185,6 +203,26 @@ impl Overlays {
                     status: format!("{prefix}{}", query.text()),
                     cursor_column: prefix.width() + query.text()[..query.cursor()].width(),
                     overlay: Some(list.snapshot(title, row_budget)),
+                }
+            }
+            Some(Overlay::Text { title, rows, first }) => {
+                let first = (*first).min(rows.len().saturating_sub(row_budget));
+                Presentation::Input {
+                    status: format!("{title}  (Esc closes)"),
+                    cursor_column: 0,
+                    overlay: Some(OverlaySnapshot {
+                        title: (*title).to_owned(),
+                        rows: rows
+                            .iter()
+                            .skip(first)
+                            .take(row_budget)
+                            .map(|text| OverlayRow {
+                                text: text.clone(),
+                                enabled: true,
+                            })
+                            .collect(),
+                        selected: None,
+                    }),
                 }
             }
             Some(Overlay::Confirm { message, .. }) => Presentation::Message(message.clone()),

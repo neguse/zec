@@ -1,5 +1,7 @@
 //! The one event type every change to the application passes through.
 
+use std::path::PathBuf;
+
 use crossterm::event::{KeyEvent, MouseEvent};
 
 use super::feature::FeatureEvent;
@@ -21,6 +23,14 @@ pub enum Event {
     Fatal(String),
     Document(DocumentEvent),
     Config(ConfigEvent),
+    /// Zed refused to start repository-controlled processes in the
+    /// worktree until it is trusted.
+    WorktreeRestricted(PathBuf),
+    /// A language server started or stopped.
+    LanguageServer {
+        name: String,
+        running: bool,
+    },
     /// A completion of work a feature spawned.
     Feature(FeatureEvent),
 }
@@ -72,6 +82,8 @@ impl From<zed::Event> for Event {
             zed::Event::ConfigReloaded { kind, result } => {
                 Self::Config(ConfigEvent { kind, result })
             }
+            zed::Event::WorktreeRestricted { path } => Self::WorktreeRestricted(path),
+            zed::Event::LanguageServer { name, running } => Self::LanguageServer { name, running },
         }
     }
 }

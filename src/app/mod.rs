@@ -82,6 +82,8 @@ pub struct App {
     /// Released after the first frame following a resize has been drawn.
     resize: Option<ResizeAcknowledgement>,
     needs_invalidate: bool,
+    /// Trust and language server changes of the project, in directory mode.
+    _watches: Vec<gpui::Subscription>,
 }
 
 struct Startup {
@@ -108,6 +110,7 @@ impl App {
 
         let mut messages = Vec::new();
         let mut root = None;
+        let mut watches = Vec::new();
         let mut documents = Documents::default();
         let mut workspace = None;
         let mut features = Features::default();
@@ -123,6 +126,10 @@ impl App {
             _ => None,
         };
         if let Some(directory) = directory {
+            // Zed decides trust while the root is added; the watch must be
+            // in place first. The verdict stays visible in the status row
+            // for as long as the root is restricted.
+            watches = services.watch(events.clone(), cx);
             services.add_root(&directory, cx).await?;
             features.sessions.bind(&directory);
             if let Some(session) = features.sessions.load() {
@@ -198,6 +205,7 @@ impl App {
             frame: None,
             resize: None,
             needs_invalidate: false,
+            _watches: watches,
         };
         app.check_invariants()?;
         Ok(app)

@@ -69,7 +69,20 @@ rows are Zed's worktree
 snapshot and Zed's buffer outline read on every frame, mutations go
 through `Project::{create,rename,delete}_entry`; the previous filter
 prompts, outline follow-cursor, entry copy, hidden-file toggle, preview
-tabs, mouse dock resizing, and dock state in sessions stay in history.
+tabs, mouse dock resizing, and dock state in sessions stay in history. 4
+as `features/language`: completion, hover, diagnostics, definitions, type
+definitions, references, rename, and code actions through `Project`'s
+LSP requests, each a picker, prompt, or text overlay; the completion menu
+is a zec picker over `Project::completions` (the Editor's own menu has no
+public read access and is disabled in the hidden window), applied through
+the Editor with the server's extra edits from `LspStore`. Zed's worktree
+trust gate is kept: an unknown root shows `[restricted]` until
+`TrustWorktree` trusts it, and Zed downloads server binaries as it does in
+the app unless `settings.json` names a binary. The tests use
+`src/bin/fixture_lsp.rs`, a trimmed transplant, bound as rust-analyzer;
+the failure matrix, `lsp_failures`, MultiBuffer result tabs, and the
+rename preview stay in history. `ZEC_LOG=path` now captures Zed's log
+records.
 
 ## Behavior carried into the core
 

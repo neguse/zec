@@ -15,6 +15,13 @@ debug = "line-tables-only"
 name = "zec"
 path = "src/main.rs"
 
+# A deterministic language server for the PTY tests.
+[[bin]]
+name = "fixture_lsp"
+path = "src/bin/fixture_lsp.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow = "1"
 assets = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
@@ -31,6 +38,7 @@ gpui = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec1
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 gpui_tokio = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 language = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+lsp = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 languages = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40", features = ["load-grammars"] }
 log = "0.4"
 multi_buffer = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
@@ -43,6 +51,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+snippet = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 sha2 = "0.10"
 text = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }

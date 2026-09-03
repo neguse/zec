@@ -35,6 +35,11 @@ which are also listed in the command palette:
 | `Ctrl-F` | Find in the buffer as you type; Enter / Shift-Enter step through matches |
 | `Ctrl-H` | Replace the current match (Enter) or all of them (Shift-Enter) |
 | `Ctrl-G` | Go to `line` or `line:column` |
+| `Ctrl-Space`, `Alt-/` | Completions from the language server |
+| `F2` / `F8` | Hover documentation / Diagnostics |
+| `F12` / `Alt-F12` / `Shift-F12` | Go to definition / type definition / references |
+| `F6` / `Ctrl-.` | Rename symbol / Code actions |
+| `Ctrl-Shift-T` | Trust the root so language servers may start |
 | `Ctrl-S` | Save (Save As is in the palette) |
 | `Ctrl-R` | Reload from disk |
 | `Ctrl-W` | Close Tab |
@@ -60,6 +65,13 @@ read from Zed's configuration directory and reloaded on change.
 (`kitty`, `modifyOtherKeys`, or `legacy`) overrides keyboard protocol
 detection. In directory mode zec remembers the layout and open files per
 root under its data directory and restores them on the next start.
+
+Language servers are Zed's: a server starts when a file of its language
+opens, once the root is trusted (`[restricted]` in the status row until
+then). Zed downloads a server it knows unless `settings.json` names one,
+for example `{"lsp": {"rust-analyzer": {"binary": {"path": "..."}}}}`.
+`ZEC_LOG=path` writes Zed's log records, including language server
+lifecycle, to a file.
 
 ## Building
 

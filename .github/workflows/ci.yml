@@ -97,7 +97,7 @@ jobs:
 
       - name: Build zec
         timeout-minutes: 60
-        run: cargo build --locked --bin zec
+        run: cargo build --locked --bin zec --bin fixture_lsp
 
       - name: Run unit tests
         timeout-minutes: 30
@@ -153,7 +153,7 @@ jobs:
 
       - name: Build zec
         timeout-minutes: 60
-        run: cargo build --locked --bin zec
+        run: cargo build --locked --bin zec --bin fixture_lsp
 
       - name: Run unit tests
         timeout-minutes: 45

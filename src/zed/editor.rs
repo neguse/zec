@@ -50,6 +50,9 @@ pub fn open_window(
         |window, cx| {
             let editor = cx.new(|cx| Editor::for_buffer(buffer, project, window, cx));
             editor.update(cx, |editor, cx| {
+                // The Editor's own completion menu would be invisible here
+                // and Enter would confirm it; completions are a zec picker.
+                editor.set_completion_provider(None);
                 editor.set_soft_wrap_mode(settings::SoftWrap::None, cx);
                 editor
                     .display_map
@@ -140,6 +143,46 @@ pub fn caret_point(window: &WindowHandle<Editor>, cx: &mut AsyncApp) -> Result<t
             editor.selections.newest::<text::Point>(&display).head()
         })
         .context("read caret")
+}
+
+/// Replaces the completion's range with its text, as one undoable
+/// transaction, and leaves the caret after it. A snippet goes through
+/// Zed's snippet insertion so its tabstops work.
+pub fn apply_completion(
+    window: &WindowHandle<Editor>,
+    completion: &project::Completion,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    use multi_buffer::MultiBufferOffset;
+    use text::ToOffset as _;
+
+    window
+        .update(cx, |editor, window, cx| {
+            let Some(buffer) = editor.buffer().read(cx).as_singleton() else {
+                anyhow::bail!("completions apply to a single buffer");
+            };
+            let snapshot = buffer.read(cx).snapshot();
+            let start = completion.replace_range.start.to_offset(&snapshot);
+            let end = completion.replace_range.end.to_offset(&snapshot);
+            let range = MultiBufferOffset(start)..MultiBufferOffset(end);
+            let is_snippet = matches!(
+                &completion.source,
+                project::CompletionSource::Lsp { lsp_completion, .. }
+                    if lsp_completion.insert_text_format == Some(lsp::InsertTextFormat::SNIPPET)
+            );
+            if is_snippet && let Ok(snippet) = snippet::Snippet::parse(&completion.new_text) {
+                return editor.insert_snippet(&[range], snippet, window, cx);
+            }
+            editor.transact(window, cx, |editor, window, cx| {
+                editor.edit([(range, completion.new_text.as_str())], cx);
+                let caret = MultiBufferOffset(start + completion.new_text.len());
+                editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                    selections.select_ranges([caret..caret]);
+                });
+            });
+            Ok(())
+        })
+        .context("apply completion")?
 }
 
 /// Sends a keystroke through the window so Zed's keymap resolves it.

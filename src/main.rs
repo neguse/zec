@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod features;
+mod logging;
 mod terminal;
 mod zed;
 
@@ -8,6 +9,7 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     cli::apply_data_dir_override()?;
+    logging::init_from_env()?;
     match cli::parse(std::env::args_os().skip(1))? {
         cli::Command::Edit(paths) => app::run(paths),
         cli::Command::Smoke => {
