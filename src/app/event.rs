@@ -2,6 +2,7 @@
 
 use crossterm::event::{KeyEvent, MouseEvent};
 
+use super::feature::FeatureEvent;
 use crate::{
     terminal::{self, ResizeAcknowledgement, ScrollDirection},
     zed,
@@ -20,6 +21,8 @@ pub enum Event {
     Fatal(String),
     Document(DocumentEvent),
     Config(ConfigEvent),
+    /// A completion of work a feature spawned.
+    Feature(FeatureEvent),
 }
 
 #[derive(Debug)]

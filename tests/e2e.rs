@@ -48,6 +48,7 @@ const DIAGNOSTIC_TAIL: usize = 8 * 1024;
 const CTRL_A: &[u8] = b"\x01";
 const CTRL_N: &[u8] = b"\x0e";
 const CTRL_O: &[u8] = b"\x0f";
+const CTRL_P: &[u8] = b"\x10";
 const CTRL_Q: &[u8] = b"\x11";
 const CTRL_R: &[u8] = b"\x12";
 const CTRL_S: &[u8] = b"\x13";
@@ -90,6 +91,50 @@ fn edits_save_and_every_exit_path_restores_the_terminal() -> Result<()> {
         suspend_restores_and_resume_reenters_the_terminal(temp.path())?;
     }
     Ok(())
+}
+
+#[test]
+fn quick_open_matches_files_under_the_root() -> Result<()> {
+    const READY: &str = "E2E_QUICK_OPEN_README";
+    const OPENED: &str = "E2E_QUICK_OPEN_BODY";
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("quick-open-repo");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("README.md"), format!("{READY}\n"))?;
+    fs::write(root.join("src/日本 語.rs"), format!("{OPENED}\n"))?;
+    let target = format!("src{}日本 語.rs", std::path::MAIN_SEPARATOR);
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+    session.assert_raw_mode_enabled(&baseline)?;
+
+    session.send(CTRL_P)?;
+    session.wait_for_screen("quick open lists the worktree", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open:") && screen.contains("README.md") && screen.contains(&target)
+    })?;
+    session.paste("日本")?;
+    session.wait_for_screen(
+        "quick open filters by fuzzy match",
+        ACTION_TIMEOUT,
+        |screen| {
+            screen.contains("Quick open: 日本")
+                && screen.contains(&target)
+                && !screen.contains("README.md")
+        },
+    )?;
+    session.send(ENTER)?;
+    session.wait_for_screen("quick open opens the match", ACTION_TIMEOUT, |screen| {
+        screen.contains(OPENED)
+            && screen.contains(&format!("opened {target}"))
+            && screen.contains("2/2")
+    })?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "quick open exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
 }
 
 #[test]

@@ -63,6 +63,7 @@ commands! {
     CommandPalette => "Command Palette",
     NewFile => "New File",
     OpenFile => "Open File",
+    QuickOpen => "Quick Open",
     Save => "Save",
     SaveAs => "Save As",
     Reload => "Reload From Disk",

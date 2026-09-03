@@ -12,7 +12,8 @@ use super::{
     command::Command,
     documents::Document,
     event::{ConfigEvent, DocumentEvent, Event, Input},
-    overlay::{Overlay, PickerPayload, PromptTarget},
+    feature::{Ctx, FeatureEvent, Features},
+    overlay::{Overlay, PickerOwner, PickerPayload, PromptTarget},
     workspace::ItemId,
 };
 use crate::{
@@ -27,9 +28,11 @@ use crate::{
 
 enum OverlayOutcome {
     Consumed,
+    QueryChanged,
     Submit(PromptTarget, String),
     Cancel(&'static str),
     Command(Command),
+    OpenPath(PathBuf),
 }
 
 impl App {
@@ -75,6 +78,11 @@ impl App {
                 }
                 Flow::Continue
             }
+            Event::Feature(FeatureEvent::QuickOpen(event)) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.quick_open.update(&mut ctx, event);
+                Flow::Continue
+            }
         };
         self.check_invariants()?;
         Ok(flow)
@@ -96,11 +104,9 @@ impl App {
                     if let Some(Overlay::Prompt { line, feedback, .. }) = self.overlays.top_mut() {
                         line.handle_paste(&text);
                         *feedback = None;
-                    } else if let Some(Overlay::Picker { query, list, .. }) =
-                        self.overlays.top_mut()
-                    {
+                    } else if let Some(Overlay::Picker { query, .. }) = self.overlays.top_mut() {
                         query.handle_paste(&text);
-                        list.filter(query.text());
+                        self.picker_query_changed(cx);
                     }
                     return Ok(Flow::Continue);
                 }
@@ -200,11 +206,10 @@ impl App {
                 | PromptAction::Previous
                 | PromptAction::Ignored => OverlayOutcome::Consumed,
             },
-            Some(Overlay::Picker { query, list, .. }) => match query.handle_key(&key) {
-                PromptAction::Changed => {
-                    list.filter(query.text());
-                    OverlayOutcome::Consumed
-                }
+            Some(Overlay::Picker {
+                title, query, list, ..
+            }) => match query.handle_key(&key) {
+                PromptAction::Changed => OverlayOutcome::QueryChanged,
                 PromptAction::Next => {
                     list.select_next();
                     OverlayOutcome::Consumed
@@ -217,11 +222,12 @@ impl App {
                     match list.selected().filter(|entry| entry.enabled) {
                         Some(entry) => match entry.payload.clone() {
                             PickerPayload::Command(command) => OverlayOutcome::Command(command),
+                            PickerPayload::Path(path) => OverlayOutcome::OpenPath(path),
                         },
                         None => OverlayOutcome::Consumed,
                     }
                 }
-                PromptAction::Cancel => OverlayOutcome::Cancel("Commands"),
+                PromptAction::Cancel => OverlayOutcome::Cancel(title),
                 PromptAction::CursorMoved | PromptAction::Ignored => OverlayOutcome::Consumed,
             },
             _ => OverlayOutcome::Consumed,
@@ -229,6 +235,18 @@ impl App {
 
         match outcome {
             OverlayOutcome::Consumed => Ok(Flow::Continue),
+            OverlayOutcome::QueryChanged => {
+                self.picker_query_changed(cx);
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::OpenPath(path) => {
+                self.overlays.pop();
+                match self.open_document_at(path, cx).await {
+                    Ok(message) => self.status.set(message),
+                    Err(error) => self.status.set(format!("open failed: {error:#}")),
+                }
+                Ok(Flow::Continue)
+            }
             OverlayOutcome::Cancel(label) => {
                 self.overlays.pop();
                 self.status
@@ -304,6 +322,10 @@ impl App {
             Command::Reload => self.reload(confirmed, cx).await?,
             Command::NewFile => self.new_file(cx).await?,
             Command::OpenFile => self.push_prompt("Open", PromptTarget::OpenFile, ""),
+            Command::QuickOpen => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.quick_open.open(&mut ctx, cx);
+            }
             Command::NextItem | Command::PreviousItem => {
                 if self
                     .workspace
@@ -507,12 +529,12 @@ impl App {
                 .focus_item(item)
                 .context("activate existing tab")?;
             self.item_changed();
-            return Ok(format!("switched to {}", path.display()));
+            return Ok(format!("switched to {}", self.display_path(&path)));
         }
         let document = Document::open(buffer, None, &self.services, &self.events, cx)?;
         let item = self.documents.insert(document);
         self.show_item(item)?;
-        Ok(format!("opened {}", path.display()))
+        Ok(format!("opened {}", self.display_path(&path)))
     }
 
     fn copy(&mut self, cut: bool, cx: &mut AsyncApp) -> Result<()> {
@@ -563,10 +585,63 @@ impl App {
             title: "Commands",
             query: LinePrompt::new(),
             list: PickerList::new(entries),
+            owner: PickerOwner::Palette,
         });
     }
 
+    /// A picker's query changed: the palette filters its fixed entries, a
+    /// feature-owned picker asks its feature for new ones.
+    fn picker_query_changed(&mut self, cx: &mut AsyncApp) {
+        let Some(Overlay::Picker {
+            query, list, owner, ..
+        }) = self.overlays.top_mut()
+        else {
+            return;
+        };
+        match owner {
+            PickerOwner::Palette => list.filter(query.text()),
+            PickerOwner::QuickOpen => {
+                let query = query.text().to_owned();
+                let (features, mut ctx) = self.feature_ctx();
+                features.quick_open.query_changed(&mut ctx, &query, cx);
+            }
+        }
+    }
+
     // ---- helpers ----
+
+    /// Splits the tree into the features and what they may touch.
+    fn feature_ctx(&mut self) -> (&mut Features, Ctx<'_>) {
+        let Self {
+            features,
+            services,
+            root,
+            overlays,
+            status,
+            events,
+            ..
+        } = self;
+        (
+            features,
+            Ctx {
+                services,
+                root: root.as_deref(),
+                overlays,
+                status,
+                events,
+            },
+        )
+    }
+
+    /// Paths in messages are relative to the root when there is one.
+    fn display_path(&self, path: &Path) -> String {
+        self.root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
 
     fn push_prompt(&mut self, label: &'static str, target: PromptTarget, text: &str) {
         self.overlays.clear();

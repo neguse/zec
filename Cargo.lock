@@ -12992,6 +12992,7 @@ dependencies = [
  "editor",
  "fs",
  "futures",
+ "fuzzy_nucleo",
  "gpui",
  "gpui_platform",
  "gpui_tokio",

@@ -47,10 +47,10 @@ one until nothing else works.
 | `src/app/` | `App`, `Event`, `Command`, overlays, documents, the tab list, `update`, `draw`, the loop | everything |
 | `src/terminal/` | raw mode and restore, capability detection, reader thread, key translation, cell widgets, line prompt, picker list, clipboard | Ratatui, Crossterm |
 | `src/zed/` | GPUI boot, `Project` and stores, hidden Editor windows, snapshot capture, subscriptions, keymap lookup, config watchers, `--smoke` | Zed crates |
-| `src/features/<name>/` | one feature (none exist yet) | `app` contract types, `terminal`, `zed` |
+| `src/features/<name>/` | one feature | `app` contract types, `terminal`, `zed` |
 
-`app/update.rs` and `app/draw.rs` are the only files that will name a
-feature. `terminal` and `zed` never import `app` or `features`: their
+`app/feature.rs`, `app/update.rs`, and `app/draw.rs` are the only files
+that name a feature. `terminal` and `zed` never import `app` or `features`: their
 event types are converted with `From` by the `app` sender.
 
 ## The loop
@@ -165,6 +165,8 @@ synchronously, and a channel round-trip would reorder them against later
 input. Overlay owners have no window, so their keys are resolved with
 `Keymap::bindings_for_input` in the `zec_overlay` context; an unbound key
 is offered to the overlay as raw input. The palette lists `Command::ALL`.
+A feature's commands are lines in the same `commands!` block; `execute`
+dispatches them to the feature.
 
 ## Focus and overlays
 
@@ -179,12 +181,15 @@ enum OverlayOutcome { Consumed, Submit(String), Cancel, Command(Command) }
 
 ```rust
 enum Overlay {
-    Prompt  { label, line: LinePrompt, target: PromptTarget, feedback }, // Save As, Open
-    Picker  { title, query: LinePrompt, list: PickerList<PickerPayload> }, // palette
+    Prompt  { label, line: LinePrompt, target: PromptTarget, feedback },        // Save As, Open
+    Picker  { title, query: LinePrompt, list: PickerList<PickerPayload>, owner }, // palette, Quick Open
     Confirm { message, command: Command },
 }
 ```
 
+A picker's `owner` refreshes its entries when the query changes: the
+palette filters its fixed entries in place, and a feature-owned picker
+asks its feature, which replaces the entries when its match completes.
 `Esc` pops the top overlay. Every overlay is bound to the active tab and
 closes when that tab changes. `Confirm` replaces every second-press flag:
 `execute` settles a pending confirmation in one place, so repeating the
@@ -217,29 +222,34 @@ Panes, docks, and a render plan return with feature 6.
 
 ```rust
 // src/features/<name>/mod.rs
-pub struct State;
-pub enum Event;                 // completions and Zed notifications
-pub enum Command;               // user-invocable operations
+#[derive(Default)]
+pub struct <Name>;                      // the feature's state
+pub enum <Name>Event;                   // completions of spawned work, generation-tagged
 
-pub fn commands() -> &'static [CommandSpec];
-pub fn start(ctx: &mut Ctx) -> Result<State>;                        // subscriptions, initial reads
-pub fn update(state: &mut State, ctx: &mut Ctx, event: Event);
-pub fn execute(state: &mut State, ctx: &mut Ctx, command: Command);
-pub fn handle_input(state: &mut State, ctx: &mut Ctx, input: &Input) -> InputOutcome; // if it owns focus
-pub fn view(state: &State, ctx: &ViewCtx, area: Rect, buf: &mut Buffer);            // if it draws
+impl <Name> {
+    pub fn <command>(&mut self, ctx: &mut Ctx, cx: &mut AsyncApp);   // one per command
+    pub fn update(&mut self, ctx: &mut Ctx, event: <Name>Event);
+    pub fn query_changed(&mut self, ctx: &mut Ctx, query: &str, cx: &mut AsyncApp); // if it owns a picker
+}
+
+// src/app/feature.rs
+pub struct Ctx<'a> { services, root, overlays, status, events }
+pub struct Features { pub <name>: <Name>, ... }
+pub enum FeatureEvent { <Name>(<Name>Event), ... }
 ```
 
-`Ctx` is a feature's only access to the rest of zec: `services`,
-`documents`, a read view of `workspace`, `status`, `overlays`, the event
-sender for completions, and `spawn`. A feature never touches another
-feature's `State`; a cross-feature effect is a `Command` dispatched through
-`Ctx`.
+`Ctx` is a feature's only access to the rest of zec. A feature never
+touches another feature's state; a cross-feature effect is a `Command`.
+Work a feature spawns completes as its own event through `events`, tagged
+with the generation that requested it, and `update` drops stale
+generations.
 
-Adding a feature touches exactly: its directory, a `Features` field, a
-`Feature` variant on `Event` and `Command`, and the dispatch tables in
-`app/update.rs` and `app/draw.rs`. Removing it reverses those. A feature's
-Zed crate dependencies enter `Cargo.toml` together with the feature. The
-first returning feature fixes the exact shape of `Ctx` and `CommandSpec`.
+Adding a feature touches exactly: its directory, a line per command in
+`commands!`, a `Features` field, a `FeatureEvent` variant, and the dispatch
+arms in `app/update.rs` (command, event, and picker owner when it has one).
+A feature that draws its own region adds a `view` and an arm in
+`app/draw.rs`. Removing a feature reverses those. A feature's Zed crate
+dependencies enter `Cargo.toml` together with the feature.
 
 ## Terminal boundary
 
@@ -283,4 +293,4 @@ first returning feature fixes the exact shape of `Ctx` and `CommandSpec`.
   binding in the default keymap resolves to a registered command.
 - The actual binary runs through a PTY (`tests/e2e.rs`) for lifecycle (raw
   mode restore, signals, resize, first frame), edit and save, tabs and the
-  palette, and external change handling.
+  palette, external change handling, and one scenario per feature.

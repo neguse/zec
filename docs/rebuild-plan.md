@@ -49,6 +49,10 @@ layout parts of `workspace_model.rs`.
 Old sources and acceptance suites are paths in `f40e791`; the acceptance
 scenarios return into `tests/e2e.rs` or a per-feature test file.
 
+Returned: 1 as `features/quick_open` (Zed's worktree snapshot and
+`fuzzy_nucleo`, the file finder's matcher; the previous `RepositoryIndex`,
+its benchmark, and symlink alias dedupe stay in history).
+
 ## Behavior carried into the core
 
 Non-obvious constraints from the previous tree that the core keeps:

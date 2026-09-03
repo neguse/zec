@@ -61,6 +61,12 @@ impl<T: Clone> PickerList<T> {
         self.selected = 0;
     }
 
+    /// Swaps in entries that are already filtered and ranked.
+    pub fn replace(&mut self, entries: Vec<PickerEntry<T>>) {
+        self.entries = entries;
+        self.filter("");
+    }
+
     pub fn select_next(&mut self) {
         if !self.visible.is_empty() {
             self.selected = (self.selected + 1) % self.visible.len();

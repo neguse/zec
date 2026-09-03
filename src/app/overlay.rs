@@ -23,6 +23,16 @@ pub enum PromptTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PickerPayload {
     Command(Command),
+    /// A file to open in a tab.
+    Path(PathBuf),
+}
+
+/// Who refreshes a picker's entries when its query changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PickerOwner {
+    /// The entries are fixed; the list filters them itself.
+    Palette,
+    QuickOpen,
 }
 
 #[derive(Debug)]
@@ -37,6 +47,7 @@ pub enum Overlay {
         title: &'static str,
         query: LinePrompt,
         list: PickerList<PickerPayload>,
+        owner: PickerOwner,
     },
     /// The same command again executes; any other input dismisses it.
     Confirm { message: String, command: Command },
@@ -129,7 +140,9 @@ impl Overlays {
                     overlay: None,
                 }
             }
-            Some(Overlay::Picker { title, query, list }) => {
+            Some(Overlay::Picker {
+                title, query, list, ..
+            }) => {
                 let prefix = format!("{title}: ");
                 Presentation::Input {
                     status: format!("{prefix}{}", query.text()),

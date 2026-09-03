@@ -4,6 +4,7 @@ pub mod command;
 pub mod documents;
 mod draw;
 pub mod event;
+pub mod feature;
 pub mod overlay;
 pub mod status;
 pub mod tabs;
@@ -37,6 +38,7 @@ use command::Command;
 use documents::{Document, Documents};
 use draw::Frame;
 use event::Event;
+use feature::Features;
 use overlay::Overlays;
 use status::Status;
 use workspace::WorkspaceModel;
@@ -69,6 +71,7 @@ pub struct App {
     documents: Documents,
     overlays: Overlays,
     status: Status,
+    features: Features,
     /// The last drawn frame, for mouse hit testing and scrolling.
     frame: Option<Frame>,
     /// Released after the first frame following a resize has been drawn.
@@ -163,6 +166,7 @@ impl App {
             documents,
             overlays: Overlays::default(),
             status,
+            features: Features::default(),
             frame: None,
             resize: None,
             needs_invalidate: false,

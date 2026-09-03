@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod features;
 mod terminal;
 mod zed;
 
