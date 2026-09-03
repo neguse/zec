@@ -55,7 +55,10 @@ its benchmark, and symlink alias dedupe stay in history). 2 as
 `features/project_search` (`Project::search` with a text `SearchQuery`,
 hits sorted by path and capped at 1000; the previous worker pools, disk
 prefilter, source budgets, benchmark, and 5,000-file / 10,000-range limits
-stay in history).
+stay in history). 3 as `features/buffer_search` (Zed's `SearchableItem` on
+the Editor owns matching, highlights, activation, and the replacement
+transactions; the previous `ActiveSearch` and `GoToLinePrompt` stay in
+history).
 
 ## Behavior carried into the core
 

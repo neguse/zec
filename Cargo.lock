@@ -13018,6 +13018,7 @@ dependencies = [
  "util",
  "vt100",
  "watch",
+ "workspace",
 ]
 
 [[package]]

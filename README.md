@@ -32,6 +32,9 @@ which are also listed in the command palette:
 | `Ctrl-N` / `Ctrl-O` | New File / Open File |
 | `Ctrl-P` | Quick Open, a fuzzy file picker over the root |
 | `Alt-F` | Search Project: literal, case-insensitive, hits open at their line |
+| `Ctrl-F` | Find in the buffer as you type; Enter / Shift-Enter step through matches |
+| `Ctrl-H` | Replace the current match (Enter) or all of them (Shift-Enter) |
+| `Ctrl-G` | Go to `line` or `line:column` |
 | `Ctrl-S` | Save (Save As is in the palette) |
 | `Ctrl-R` | Reload from disk |
 | `Ctrl-W` | Close Tab |

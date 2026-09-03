@@ -19,6 +19,9 @@ pub enum PromptTarget {
     },
     OpenFile,
     ProjectSearch,
+    Find,
+    Replace,
+    GoToLine,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,8 +94,19 @@ impl Overlays {
         self.stack.pop()
     }
 
+    pub fn top(&self) -> Option<&Overlay> {
+        self.stack.last()
+    }
+
     pub fn top_mut(&mut self) -> Option<&mut Overlay> {
         self.stack.last_mut()
+    }
+
+    /// Shows `feedback` after the top prompt's text, if the top is a prompt.
+    pub fn set_feedback(&mut self, feedback: impl Into<String>) {
+        if let Some(Overlay::Prompt { feedback: slot, .. }) = self.stack.last_mut() {
+            *slot = Some(feedback.into());
+        }
     }
 
     /// Whether a prompt or picker currently owns keyboard input.

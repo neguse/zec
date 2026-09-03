@@ -57,6 +57,11 @@ const CTRL_Z: &[u8] = b"\x1a";
 const CTRL_PAGE_DOWN: &[u8] = b"\x1b[6;5~";
 const DOWN: &[u8] = b"\x1b[B";
 const ALT_F: &[u8] = b"\x1bf";
+const CTRL_F: &[u8] = b"\x06";
+const CTRL_G: &[u8] = b"\x07";
+// CSI u forms: a legacy Ctrl-H is indistinguishable from Backspace.
+const CTRL_H: &[u8] = b"\x1b[104;5u";
+const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 const F1: &[u8] = b"\x1bOP";
 const F4: &[u8] = b"\x1bOS";
 const ESC: &[u8] = b"\x1b";
@@ -182,6 +187,81 @@ fn project_search_lists_hits_and_opens_the_selected_location() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "project search exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn find_replace_and_go_to_line_drive_the_active_buffer() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let path = temp.path().join("search.txt");
+    fs::write(&path, "alpha beta\nbeta gamma\ngamma beta\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
+    session.wait_ready()?;
+    session.assert_raw_mode_enabled(&baseline)?;
+
+    session.send(CTRL_F)?;
+    session.wait_for_screen("find prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Find:")
+    })?;
+    session.paste("beta")?;
+    session.wait_for_screen("incremental match count", ACTION_TIMEOUT, |screen| {
+        screen.contains("Find: beta") && screen.contains("1 of 3")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("next match", ACTION_TIMEOUT, |screen| {
+        screen.contains("2 of 3")
+    })?;
+    session.send(SHIFT_ENTER)?;
+    session.wait_for_screen("previous match", ACTION_TIMEOUT, |screen| {
+        screen.contains("1 of 3")
+    })?;
+
+    session.send(CTRL_H)?;
+    session.wait_for_screen(
+        "replace prompt keeps the matches",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("Replace with:") && screen.contains("1 of 3"),
+    )?;
+    session.paste("delta")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("one replacement", ACTION_TIMEOUT, |screen| {
+        screen.contains("alpha delta") && screen.contains("replaced 1; 1 of 2")
+    })?;
+    session.send(SHIFT_ENTER)?;
+    session.wait_for_screen("replace all", ACTION_TIMEOUT, |screen| {
+        screen.contains("delta gamma")
+            && screen.contains("gamma delta")
+            && screen.contains("replaced 2; no matches")
+    })?;
+    session.send(ESC)?;
+    session.wait_for_screen("replace prompt closed", ACTION_TIMEOUT, |screen| {
+        !screen.contains("Replace with:") && screen.contains("search.txt+")
+    })?;
+
+    session.send(CTRL_G)?;
+    session.wait_for_screen("go to line prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Go to line:")
+    })?;
+    session.paste("2:3")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("caret moved", ACTION_TIMEOUT, |screen| {
+        screen.contains("line 2") && !screen.contains("Go to line:")
+    })?;
+    session.paste("X")?;
+    session.wait_for_screen("edit at line 2 column 3", ACTION_TIMEOUT, |screen| {
+        screen.contains("deXlta gamma")
+    })?;
+
+    session.send(CTRL_Q)?;
+    session.wait_for_screen("dirty quit guard", ACTION_TIMEOUT, |screen| {
+        screen.contains("unsaved or deleted tab(s)")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "exit after search failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 

@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use gpui::AsyncApp;
 use ratatui::layout::Position;
+use workspace::searchable::Direction;
 
 use super::{
     App, Flow, OVERLAY_CONTEXT,
@@ -29,8 +30,12 @@ use crate::{
 enum OverlayOutcome {
     Consumed,
     QueryChanged,
-    Submit(PromptTarget, String),
+    /// A prompt's text changed.
+    Changed,
+    /// Enter, or Shift-Enter when the flag is set.
+    Submit(PromptTarget, String, bool),
     Cancel(&'static str),
+    CancelPrompt(PromptTarget, &'static str),
     Command(Command),
     OpenPath(PathBuf),
     OpenLocation {
@@ -93,6 +98,11 @@ impl App {
                 features.project_search.update(&mut ctx, event);
                 Flow::Continue
             }
+            Event::Feature(FeatureEvent::BufferSearch(event)) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.buffer_search.update(&mut ctx, event, cx);
+                Flow::Continue
+            }
         };
         self.check_invariants()?;
         Ok(flow)
@@ -114,6 +124,7 @@ impl App {
                     if let Some(Overlay::Prompt { line, feedback, .. }) = self.overlays.top_mut() {
                         line.handle_paste(&text);
                         *feedback = None;
+                        self.prompt_changed(cx);
                     } else if let Some(Overlay::Picker { query, .. }) = self.overlays.top_mut() {
                         query.handle_paste(&text);
                         self.picker_query_changed(cx);
@@ -205,12 +216,15 @@ impl App {
                     if let PromptTarget::SaveAs { overwrite } = target {
                         *overwrite = None;
                     }
-                    OverlayOutcome::Consumed
+                    OverlayOutcome::Changed
                 }
-                PromptAction::Submit | PromptAction::AlternateSubmit => {
-                    OverlayOutcome::Submit(target.clone(), line.text().to_owned())
+                PromptAction::Submit => {
+                    OverlayOutcome::Submit(target.clone(), line.text().to_owned(), false)
                 }
-                PromptAction::Cancel => OverlayOutcome::Cancel(label),
+                PromptAction::AlternateSubmit => {
+                    OverlayOutcome::Submit(target.clone(), line.text().to_owned(), true)
+                }
+                PromptAction::Cancel => OverlayOutcome::CancelPrompt(target.clone(), label),
                 PromptAction::CursorMoved
                 | PromptAction::Next
                 | PromptAction::Previous
@@ -252,6 +266,43 @@ impl App {
                 self.picker_query_changed(cx);
                 Ok(Flow::Continue)
             }
+            OverlayOutcome::Changed => {
+                self.prompt_changed(cx);
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::CancelPrompt(target, label) => {
+                self.overlays.pop();
+                self.status
+                    .set(format!("{} cancelled", label.to_lowercase()));
+                if matches!(target, PromptTarget::Find | PromptTarget::Replace) {
+                    self.features.buffer_search.cancel(cx);
+                }
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Submit(PromptTarget::Find, _, alternate) => {
+                let direction = if alternate {
+                    Direction::Prev
+                } else {
+                    Direction::Next
+                };
+                let (features, mut ctx) = self.feature_ctx();
+                features.buffer_search.step(&mut ctx, direction, cx);
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Submit(PromptTarget::Replace, text, alternate) => {
+                let (features, mut ctx) = self.feature_ctx();
+                if alternate {
+                    features.buffer_search.replace_all(&mut ctx, &text, cx);
+                } else {
+                    features.buffer_search.replace_current(&mut ctx, &text, cx);
+                }
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Submit(PromptTarget::GoToLine, text, _) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.buffer_search.go_to(&mut ctx, &text, cx);
+                Ok(Flow::Continue)
+            }
             OverlayOutcome::OpenPath(path) => {
                 self.overlays.pop();
                 match self.open_document_at(path, cx).await {
@@ -287,16 +338,16 @@ impl App {
                 self.overlays.pop();
                 self.execute(command, cx).await
             }
-            OverlayOutcome::Submit(PromptTarget::SaveAs { overwrite }, text) => {
+            OverlayOutcome::Submit(PromptTarget::SaveAs { overwrite }, text, _) => {
                 self.submit_save_as(&text, overwrite.as_deref(), cx).await?;
                 Ok(Flow::Continue)
             }
-            OverlayOutcome::Submit(PromptTarget::ProjectSearch, text) => {
+            OverlayOutcome::Submit(PromptTarget::ProjectSearch, text, _) => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.project_search.submit(&mut ctx, &text, cx);
                 Ok(Flow::Continue)
             }
-            OverlayOutcome::Submit(PromptTarget::OpenFile, text) => {
+            OverlayOutcome::Submit(PromptTarget::OpenFile, text, _) => {
                 match resolve_path(&self.cwd, &text) {
                     Ok(path) => match self.open_document_at(path, cx).await {
                         Ok(message) => {
@@ -364,6 +415,18 @@ impl App {
             Command::ProjectSearch => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.project_search.open(&mut ctx);
+            }
+            Command::Find => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.buffer_search.find(&mut ctx, cx);
+            }
+            Command::Replace => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.buffer_search.replace(&mut ctx, cx);
+            }
+            Command::GoToLine => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.buffer_search.go_to_line(&mut ctx);
             }
             Command::NextItem | Command::PreviousItem => {
                 if self
@@ -628,6 +691,22 @@ impl App {
         });
     }
 
+    /// A prompt's text changed, by key or paste: a feature that searches
+    /// as the user types hears about it.
+    fn prompt_changed(&mut self, cx: &mut AsyncApp) {
+        let Some(Overlay::Prompt {
+            target: PromptTarget::Find,
+            line,
+            ..
+        }) = self.overlays.top_mut()
+        else {
+            return;
+        };
+        let text = line.text().to_owned();
+        let (features, mut ctx) = self.feature_ctx();
+        features.buffer_search.query_changed(&mut ctx, &text, cx);
+    }
+
     /// A picker's query changed: the palette filters its fixed entries, a
     /// feature-owned picker asks its feature for new ones.
     fn picker_query_changed(&mut self, cx: &mut AsyncApp) {
@@ -658,13 +737,20 @@ impl App {
             overlays,
             status,
             events,
+            documents,
+            workspace,
             ..
         } = self;
+        let editor = documents
+            .get(workspace.active_item())
+            .expect("the active item always has a document")
+            .editor;
         (
             features,
             Ctx {
                 services,
                 root: root.as_deref(),
+                editor,
                 overlays,
                 status,
                 events,

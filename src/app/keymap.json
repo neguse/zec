@@ -9,6 +9,9 @@
       "ctrl-o": "zec::OpenFile",
       "ctrl-p": "zec::QuickOpen",
       "alt-f": "zec::ProjectSearch",
+      "ctrl-f": "zec::Find",
+      "ctrl-h": "zec::Replace",
+      "ctrl-g": "zec::GoToLine",
       "ctrl-s": "zec::Save",
       "ctrl-r": "zec::Reload",
       "ctrl-w": "zec::CloseItem",
@@ -27,7 +30,9 @@
   {
     "context": "zec_overlay",
     "bindings": {
-      "ctrl-q": "zec::Quit"
+      "ctrl-q": "zec::Quit",
+      "ctrl-f": "zec::Find",
+      "ctrl-h": "zec::Replace"
     }
   }
 ]

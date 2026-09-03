@@ -228,17 +228,19 @@ pub enum <Name>Event;                   // completions of spawned work, generati
 
 impl <Name> {
     pub fn <command>(&mut self, ctx: &mut Ctx, cx: &mut AsyncApp);   // one per command
-    pub fn update(&mut self, ctx: &mut Ctx, event: <Name>Event);
+    pub fn update(&mut self, ctx: &mut Ctx, event: <Name>Event, cx: &mut AsyncApp);
     pub fn query_changed(&mut self, ctx: &mut Ctx, query: &str, cx: &mut AsyncApp); // if it owns a picker
 }
 
 // src/app/feature.rs
-pub struct Ctx<'a> { services, root, overlays, status, events }
+pub struct Ctx<'a> { services, root, editor, overlays, status, events }
 pub struct Features { pub <name>: <Name>, ... }
 pub enum FeatureEvent { <Name>(<Name>Event), ... }
 ```
 
-`Ctx` is a feature's only access to the rest of zec. A feature never
+`Ctx` is a feature's only access to the rest of zec; `editor` is the
+active document's hidden window, so a feature can drive Zed's Editor APIs
+(search, selections) without seeing `Documents`. A feature never
 touches another feature's state; a cross-feature effect is a `Command`.
 Work a feature spawns completes as its own event through `events`, tagged
 with the generation that requested it, and `update` drops stale
