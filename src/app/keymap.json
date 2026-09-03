@@ -8,6 +8,7 @@
       "ctrl-n": "zec::NewFile",
       "ctrl-o": "zec::OpenFile",
       "ctrl-p": "zec::QuickOpen",
+      "alt-f": "zec::ProjectSearch",
       "ctrl-s": "zec::Save",
       "ctrl-r": "zec::Reload",
       "ctrl-w": "zec::CloseItem",

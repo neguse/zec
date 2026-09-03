@@ -9,7 +9,13 @@ use std::path::Path;
 use async_channel::Sender;
 
 use super::{event::Event, overlay::Overlays, status::Status};
-use crate::{features::quick_open::QuickOpen, zed::services::Services};
+use crate::{
+    features::{
+        project_search::{ProjectSearch, ProjectSearchEvent},
+        quick_open::{QuickOpen, QuickOpenEvent},
+    },
+    zed::services::Services,
+};
 
 /// What a feature may touch while it runs.
 pub struct Ctx<'a> {
@@ -26,10 +32,12 @@ pub struct Ctx<'a> {
 #[derive(Default)]
 pub struct Features {
     pub quick_open: QuickOpen,
+    pub project_search: ProjectSearch,
 }
 
 /// One variant per feature, wrapping that feature's own event.
 #[derive(Debug)]
 pub enum FeatureEvent {
-    QuickOpen(crate::features::quick_open::QuickOpenEvent),
+    QuickOpen(QuickOpenEvent),
+    ProjectSearch(ProjectSearchEvent),
 }

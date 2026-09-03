@@ -55,6 +55,8 @@ const CTRL_S: &[u8] = b"\x13";
 const CTRL_W: &[u8] = b"\x17";
 const CTRL_Z: &[u8] = b"\x1a";
 const CTRL_PAGE_DOWN: &[u8] = b"\x1b[6;5~";
+const DOWN: &[u8] = b"\x1b[B";
+const ALT_F: &[u8] = b"\x1bf";
 const F1: &[u8] = b"\x1bOP";
 const F4: &[u8] = b"\x1bOS";
 const ESC: &[u8] = b"\x1b";
@@ -134,6 +136,52 @@ fn quick_open_matches_files_under_the_root() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "quick open exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn project_search_lists_hits_and_opens_the_selected_location() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("search-repo");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("a.txt"), "needle in a\n")?;
+    fs::write(root.join("src/b.txt"), "hay\nhay needle in b\n")?;
+    let second = format!("src{}b.txt", std::path::MAIN_SEPARATOR);
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+    session.assert_raw_mode_enabled(&baseline)?;
+
+    session.send(ALT_F)?;
+    session.wait_for_screen("project search prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Project search:")
+    })?;
+    session.paste("needle")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("project search hits by path", ACTION_TIMEOUT, |screen| {
+        screen.contains("Matches:")
+            && screen.contains("a.txt:1  needle in a")
+            && screen.contains(&format!("{second}:2  hay needle in b"))
+    })?;
+    session.send(DOWN)?;
+    session.send(ENTER)?;
+    session.wait_for_screen("hit opened in a new tab", ACTION_TIMEOUT, |screen| {
+        screen.contains(&format!("opened {second}")) && screen.contains("2/2")
+    })?;
+    session.paste("X")?;
+    session.wait_for_screen("caret placed on the hit", ACTION_TIMEOUT, |screen| {
+        screen.contains("hay Xneedle in b")
+    })?;
+
+    session.send(CTRL_Q)?;
+    session.wait_for_screen("dirty quit guard", ACTION_TIMEOUT, |screen| {
+        screen.contains("unsaved or deleted tab(s)")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "project search exit failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 

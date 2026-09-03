@@ -18,6 +18,7 @@ pub enum PromptTarget {
         overwrite: Option<PathBuf>,
     },
     OpenFile,
+    ProjectSearch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +26,13 @@ pub enum PickerPayload {
     Command(Command),
     /// A file to open in a tab.
     Path(PathBuf),
+    /// A file to open with the caret at a buffer point; `column` is a
+    /// byte offset in the line.
+    Location {
+        path: PathBuf,
+        row: u32,
+        column: u32,
+    },
 }
 
 /// Who refreshes a picker's entries when its query changes.
@@ -33,6 +41,8 @@ pub enum PickerOwner {
     /// The entries are fixed; the list filters them itself.
     Palette,
     QuickOpen,
+    /// Fixed entries too: the search ran once, the list filters its hits.
+    ProjectSearch,
 }
 
 #[derive(Debug)]

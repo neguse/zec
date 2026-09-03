@@ -246,7 +246,10 @@ generations.
 
 Adding a feature touches exactly: its directory, a line per command in
 `commands!`, a `Features` field, a `FeatureEvent` variant, and the dispatch
-arms in `app/update.rs` (command, event, and picker owner when it has one).
+arms in `app/update.rs` (command, event, and the prompt target or picker
+owner when it has one). A feature fills pickers and prompts but never
+opens documents: an accepted entry carries a `PickerPayload` (a command, a
+path, or a location) that the app acts on.
 A feature that draws its own region adds a `view` and an arm in
 `app/draw.rs`. Removing a feature reverses those. A feature's Zed crate
 dependencies enter `Cargo.toml` together with the feature.

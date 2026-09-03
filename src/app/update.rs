@@ -33,6 +33,11 @@ enum OverlayOutcome {
     Cancel(&'static str),
     Command(Command),
     OpenPath(PathBuf),
+    OpenLocation {
+        path: PathBuf,
+        row: u32,
+        column: u32,
+    },
 }
 
 impl App {
@@ -81,6 +86,11 @@ impl App {
             Event::Feature(FeatureEvent::QuickOpen(event)) => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.quick_open.update(&mut ctx, event);
+                Flow::Continue
+            }
+            Event::Feature(FeatureEvent::ProjectSearch(event)) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.project_search.update(&mut ctx, event);
                 Flow::Continue
             }
         };
@@ -223,6 +233,9 @@ impl App {
                         Some(entry) => match entry.payload.clone() {
                             PickerPayload::Command(command) => OverlayOutcome::Command(command),
                             PickerPayload::Path(path) => OverlayOutcome::OpenPath(path),
+                            PickerPayload::Location { path, row, column } => {
+                                OverlayOutcome::OpenLocation { path, row, column }
+                            }
                         },
                         None => OverlayOutcome::Consumed,
                     }
@@ -247,6 +260,23 @@ impl App {
                 }
                 Ok(Flow::Continue)
             }
+            OverlayOutcome::OpenLocation { path, row, column } => {
+                self.overlays.pop();
+                match self.open_document_at(path, cx).await {
+                    Ok(message) => {
+                        let document = self.active_document_mut();
+                        document.follow.manual_vertical_scroll = false;
+                        zed::editor::place_caret_at_point(
+                            &document.editor,
+                            text::Point::new(row, column),
+                            cx,
+                        )?;
+                        self.status.set(message);
+                    }
+                    Err(error) => self.status.set(format!("open failed: {error:#}")),
+                }
+                Ok(Flow::Continue)
+            }
             OverlayOutcome::Cancel(label) => {
                 self.overlays.pop();
                 self.status
@@ -259,6 +289,11 @@ impl App {
             }
             OverlayOutcome::Submit(PromptTarget::SaveAs { overwrite }, text) => {
                 self.submit_save_as(&text, overwrite.as_deref(), cx).await?;
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Submit(PromptTarget::ProjectSearch, text) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.project_search.submit(&mut ctx, &text, cx);
                 Ok(Flow::Continue)
             }
             OverlayOutcome::Submit(PromptTarget::OpenFile, text) => {
@@ -325,6 +360,10 @@ impl App {
             Command::QuickOpen => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.quick_open.open(&mut ctx, cx);
+            }
+            Command::ProjectSearch => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.project_search.open(&mut ctx);
             }
             Command::NextItem | Command::PreviousItem => {
                 if self
@@ -599,7 +638,7 @@ impl App {
             return;
         };
         match owner {
-            PickerOwner::Palette => list.filter(query.text()),
+            PickerOwner::Palette | PickerOwner::ProjectSearch => list.filter(query.text()),
             PickerOwner::QuickOpen => {
                 let query = query.text().to_owned();
                 let (features, mut ctx) = self.feature_ctx();

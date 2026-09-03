@@ -51,7 +51,11 @@ scenarios return into `tests/e2e.rs` or a per-feature test file.
 
 Returned: 1 as `features/quick_open` (Zed's worktree snapshot and
 `fuzzy_nucleo`, the file finder's matcher; the previous `RepositoryIndex`,
-its benchmark, and symlink alias dedupe stay in history).
+its benchmark, and symlink alias dedupe stay in history). 2 as
+`features/project_search` (`Project::search` with a text `SearchQuery`,
+hits sorted by path and capped at 1000; the previous worker pools, disk
+prefilter, source budgets, benchmark, and 5,000-file / 10,000-range limits
+stay in history).
 
 ## Behavior carried into the core
 

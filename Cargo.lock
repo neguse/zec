@@ -13015,6 +13015,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "unicode-width",
+ "util",
  "vt100",
  "watch",
 ]

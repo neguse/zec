@@ -176,6 +176,24 @@ pub fn place_caret(
         .context("place caret")
 }
 
+/// Collapses the selection to the caret at a buffer point, clipped to the
+/// current text.
+pub fn place_caret_at_point(
+    window: &WindowHandle<Editor>,
+    point: text::Point,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    window
+        .update(cx, |editor, window, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let point = snapshot.clip_point(point, Bias::Left);
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_ranges([point..point]);
+            });
+        })
+        .context("place caret at point")
+}
+
 /// Re-resolves a position from the previous frame against the current
 /// snapshot, which an asynchronous reparse or reload may have changed, and
 /// keeps the caret out of inlays.

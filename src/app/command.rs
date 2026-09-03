@@ -64,6 +64,7 @@ commands! {
     NewFile => "New File",
     OpenFile => "Open File",
     QuickOpen => "Quick Open",
+    ProjectSearch => "Search Project",
     Save => "Save",
     SaveAs => "Save As",
     Reload => "Reload From Disk",
