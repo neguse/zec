@@ -12,6 +12,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Widget},
 };
 
+use super::reader::ScrollDirection;
+
 /// A cursor position in the complete document.
 ///
 /// `column` is a terminal-cell column, not a byte, char, or grapheme offset.
@@ -28,35 +30,6 @@ pub struct Cursor {
 pub struct TextPosition {
     pub row: usize,
     pub byte_column: usize,
-}
-
-/// Returns the nearest UTF-8 byte boundary for a terminal-cell column.
-/// Wide graphemes use their midpoint, matching editor mouse hit testing.
-pub fn closest_text_byte_column(line: &str, target_column: usize) -> usize {
-    let mut byte_column = 0usize;
-    let mut terminal_column = 0usize;
-    for grapheme in Span::raw(line).styled_graphemes(Style::default()) {
-        let start_byte = byte_column;
-        byte_column = byte_column.saturating_add(grapheme.symbol.len());
-        let width = usize::from(grapheme.symbol.cell_width());
-        if width == 0 {
-            continue;
-        }
-        let end_column = terminal_column.saturating_add(width);
-        if target_column < end_column {
-            return if target_column
-                .saturating_sub(terminal_column)
-                .saturating_mul(2)
-                < width
-            {
-                start_byte
-            } else {
-                byte_column
-            };
-        }
-        terminal_column = end_column;
-    }
-    line.len()
 }
 
 /// A half-open selection range in terminal-cell coordinates.
@@ -115,6 +88,84 @@ pub struct Viewport {
     pub left_column: usize,
 }
 
+impl Viewport {
+    fn max_top(total_rows: usize, body_height: usize) -> usize {
+        total_rows.saturating_sub(body_height.max(1))
+    }
+
+    /// Keeps the viewport inside the document after it shrank.
+    pub fn clamp(&mut self, total_rows: usize, body_height: usize) {
+        self.top_row = self.top_row.min(Self::max_top(total_rows, body_height));
+    }
+
+    /// Moves the viewport by `amount` rows; returns whether it moved.
+    pub fn scroll(
+        &mut self,
+        total_rows: usize,
+        body_height: usize,
+        direction: ScrollDirection,
+        amount: usize,
+    ) -> bool {
+        if body_height == 0 || amount == 0 {
+            return false;
+        }
+        let max_top = Self::max_top(total_rows, body_height);
+        let previous = self.top_row;
+        let current = self.top_row.min(max_top);
+        self.top_row = match direction {
+            ScrollDirection::Up => current.saturating_sub(amount),
+            ScrollDirection::Down => current.saturating_add(amount).min(max_top),
+        };
+        self.top_row != previous
+    }
+
+    /// Scrolls minimally so the cursor is visible. Vertical follow can be
+    /// suspended by a manual scroll; horizontal follow always applies.
+    pub fn follow_cursor(
+        &mut self,
+        cursor: Cursor,
+        width: u16,
+        height: u16,
+        follow_vertical: bool,
+    ) {
+        let body_height = usize::from(height.saturating_sub(1));
+        if follow_vertical && body_height > 0 {
+            if cursor.row < self.top_row {
+                self.top_row = cursor.row;
+            } else if cursor.row >= self.top_row.saturating_add(body_height) {
+                self.top_row = cursor.row.saturating_add(1).saturating_sub(body_height);
+            }
+        }
+        let width = usize::from(width);
+        if width > 0 {
+            if cursor.column < self.left_column {
+                self.left_column = cursor.column;
+            } else if cursor.column >= self.left_column.saturating_add(width) {
+                self.left_column = cursor.column.saturating_add(1).saturating_sub(width);
+            }
+        }
+    }
+}
+
+/// Whether the viewport follows the cursor vertically. A manual scroll stops
+/// following until the cursor moves again.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Follow {
+    pub manual_vertical_scroll: bool,
+    last_cursor: Option<Cursor>,
+}
+
+impl Follow {
+    /// Records the cursor for this frame and returns whether to follow it.
+    pub fn observe(&mut self, cursor: Cursor) -> bool {
+        if self.last_cursor != Some(cursor) {
+            self.manual_vertical_scroll = false;
+        }
+        self.last_cursor = Some(cursor);
+        !self.manual_vertical_scroll
+    }
+}
+
 /// One presentation-only row in a terminal overlay collection.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OverlayRow {
@@ -128,95 +179,6 @@ pub struct OverlaySnapshot {
     pub title: String,
     pub rows: Vec<OverlayRow>,
     pub selected: Option<usize>,
-}
-
-/// Renders an [`OverlaySnapshot`] as a full workspace dock instead of a
-/// floating editor overlay. The domain model chooses and windows the rows;
-/// this widget only owns terminal-cell presentation and hit testing.
-pub struct OverlayPanelWidget<'a> {
-    snapshot: &'a OverlaySnapshot,
-    focused: bool,
-}
-
-impl<'a> OverlayPanelWidget<'a> {
-    pub fn new(snapshot: &'a OverlaySnapshot, focused: bool) -> Self {
-        Self { snapshot, focused }
-    }
-
-    pub fn row_at(area: Rect, position: Position) -> Option<usize> {
-        let inner = Block::default().borders(Borders::ALL).inner(area);
-        if !inner.contains(position) {
-            return None;
-        }
-        Some(usize::from(position.y.saturating_sub(inner.y)))
-    }
-
-    pub fn row_budget(area: Rect) -> usize {
-        usize::from(Block::default().borders(Borders::ALL).inner(area).height)
-    }
-}
-
-impl Widget for OverlayPanelWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < 3 || area.height < 3 {
-            return;
-        }
-
-        Clear.render(area, buf);
-        let border_style = if self.focused {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(self.snapshot.title.as_str())
-            .border_style(border_style);
-        let inner = block.inner(area);
-        block.render(area, buf);
-        if inner.is_empty() {
-            return;
-        }
-
-        let selected = self
-            .snapshot
-            .selected
-            .filter(|selected| *selected < self.snapshot.rows.len());
-        for (screen_row, row) in self
-            .snapshot
-            .rows
-            .iter()
-            .take(usize::from(inner.height))
-            .enumerate()
-        {
-            let y = inner
-                .y
-                .saturating_add(u16::try_from(screen_row).unwrap_or(inner.height));
-            let row_area = Rect::new(inner.x, y, inner.width, 1);
-            let mut style = Style::default();
-            if selected == Some(screen_row) {
-                style = style.add_modifier(Modifier::REVERSED);
-            } else if !row.enabled {
-                style = style.add_modifier(Modifier::DIM);
-            }
-            buf.set_style(row_area, style);
-            let prefix = if selected == Some(screen_row) {
-                "› "
-            } else {
-                "  "
-            };
-            render_line(
-                &format!("{prefix}{}", row.text),
-                style,
-                &[],
-                y,
-                inner,
-                inner,
-                0,
-                buf,
-            );
-        }
-    }
 }
 
 /// Immutable, Zed-independent input to the terminal renderer.
@@ -1037,8 +999,8 @@ mod tests {
     };
 
     use super::{
-        BackgroundRange, CellDecoration, Cursor, EditorWidget, OverlayPanelWidget, OverlayRow,
-        OverlaySnapshot, RenderSnapshot, SelectionRange, StyleSpan, TextPosition, Viewport,
+        BackgroundRange, CellDecoration, Cursor, EditorWidget, OverlayRow, OverlaySnapshot,
+        RenderSnapshot, SelectionRange, StyleSpan, TextPosition, Viewport,
     };
 
     fn row(buf: &Buffer, y: u16) -> String {
@@ -1924,42 +1886,5 @@ mod tests {
                 .contains(Modifier::REVERSED)
         );
         assert!(row(&buf, 5).contains('└'));
-    }
-
-    #[test]
-    fn overlay_panel_uses_bordered_rows_for_rendering_and_hit_testing() {
-        let snapshot = OverlaySnapshot {
-            title: " Diagnostics ".into(),
-            rows: vec![
-                OverlayRow {
-                    text: "W src/main.rs:1:4 warning".into(),
-                    enabled: true,
-                },
-                OverlayRow {
-                    text: "collecting".into(),
-                    enabled: false,
-                },
-            ],
-            selected: Some(0),
-        };
-        let area = Rect::new(4, 3, 32, 5);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
-
-        OverlayPanelWidget::new(&snapshot, true).render(area, &mut buf);
-
-        assert!(row(&buf, 3).contains("Diagnostics"));
-        assert!(row(&buf, 4).contains("› W src/main.rs:1:4 warning"));
-        assert!(
-            buf.cell((5, 4))
-                .expect("selected diagnostics row")
-                .modifier
-                .contains(Modifier::REVERSED)
-        );
-        assert_eq!(OverlayPanelWidget::row_budget(area), 3);
-        assert_eq!(
-            OverlayPanelWidget::row_at(area, Position::new(10, 4)),
-            Some(0)
-        );
-        assert_eq!(OverlayPanelWidget::row_at(area, Position::new(10, 3)), None);
     }
 }

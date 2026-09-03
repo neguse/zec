@@ -196,9 +196,9 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
 
         gpui_platform::headless().run(move |cx| {
-            crate::init_zed(cx);
+            crate::zed::runtime::init(cx);
             let buffer = cx.new(|cx| Buffer::local("alpha\nomega".to_owned(), cx));
-            let window = crate::open_editor(buffer, cx).expect("open editor");
+            let window = crate::zed::editor::open_window(buffer, None, cx).expect("open editor");
 
             cx.spawn(async move |cx| {
                 let result = window

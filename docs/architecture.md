@@ -21,8 +21,8 @@ one until nothing else works.
    loop locals, closures, or globals.
 3. **One event type, one update, one draw.** Everything that can change
    `App` arrives as an `Event` and passes through `App::update`. Async
-   results and Zed notifications re-enter as events tagged with the
-   generation that requested them; `update` drops stale generations.
+   results and Zed notifications re-enter as events keyed by the entity
+   they belong to; `update` drops the ones zec no longer owns.
 4. **Input routing is explicit.** A focus stack decides who sees an input
    first, and each owner answers `Consumed`, `Ignored`, or a `Command`.
    Nothing is decided by the order of match arms.
@@ -42,14 +42,16 @@ one until nothing else works.
 
 | Path | Owns | May import |
 | --- | --- | --- |
-| `src/main.rs` | CLI parsing, process setup, `--smoke` | `app`, `cli` |
-| `src/app/` | `App`, `Event`, `Command`, focus, overlays, `update`, `draw`, the loop | everything |
-| `src/terminal/` | raw mode and restore, capability detection, reader thread, cell widgets, coordinate conversion, clipboard | Ratatui, Crossterm |
-| `src/zed/` | GPUI boot, `Project` and stores, hidden Editor windows, snapshot capture, subscription helpers | Zed crates |
-| `src/features/<name>/` | one feature | `app` contract types, `terminal`, `zed` |
+| `src/main.rs` | process entry, dispatch of the parsed CLI | `app`, `cli`, `zed` |
+| `src/cli.rs` | argument parsing, `ZEC_DATA_DIR` | `paths` |
+| `src/app/` | `App`, `Event`, `Command`, overlays, documents, the tab list, `update`, `draw`, the loop | everything |
+| `src/terminal/` | raw mode and restore, capability detection, reader thread, key translation, cell widgets, line prompt, picker list, clipboard | Ratatui, Crossterm |
+| `src/zed/` | GPUI boot, `Project` and stores, hidden Editor windows, snapshot capture, subscriptions, keymap lookup, config watchers, `--smoke` | Zed crates |
+| `src/features/<name>/` | one feature (none exist yet) | `app` contract types, `terminal`, `zed` |
 
-`app/update.rs` and `app/draw.rs` are the only files that name a feature.
-`terminal` and `zed` never import `app` or `features`.
+`app/update.rs` and `app/draw.rs` are the only files that will name a
+feature. `terminal` and `zed` never import `app` or `features`: their
+event types are converted with `From` by the `app` sender.
 
 ## The loop
 
@@ -64,118 +66,132 @@ flowchart LR
 ```
 
 ```rust
+app.draw_frame(&mut terminal, cx)?;
 loop {
-    let event = events.recv().await;
-    app.update(event, cx);
-    terminal.try_draw(|frame| app.draw(frame, cx))?;
+    let event = events.recv().await?;
+    match app.update(event, cx).await? {
+        Flow::Continue => {}
+        Flow::Suspend => terminal::suspend_and_resume(&mut terminal, &app.capabilities)?,
+        Flow::Exit => break,
+    }
+    app.draw_frame(&mut terminal, cx)?;
 }
 ```
 
 One draw per event; `Redraw` events coalesce in the channel, so a burst of
 Zed notifications costs one frame. Nothing polls Zed: every Zed-side change
 that should repaint or change zec state is a subscription installed when
-the owning feature starts, forwarding an `Event`.
+the document opens, forwarding an `Event`.
 
 ## State
 
 ```rust
 struct App {
-    terminal: TerminalState,   // capabilities, last known size, last frame plan
-    workspace: WorkspaceModel, // panes, items, docks, base focus; reducer with invariants
-    documents: Documents,      // ItemId -> Document
-    overlays: Overlays,        // stack; the top owns focus while non-empty
-    status: Status,            // one transient message
-    features: Features,        // one field per feature, None until started
+    services: Services,          // Project, BufferStore, WorktreeStore, Fs, languages
+    events: Sender<Event>,       // handed to subscriptions and async tasks
+    pending_commands: Rc<RefCell<Vec<Command>>>, // filled by the GPUI action interceptor
+    keymap: Rc<RefCell<Lookup>>, // Zed keymap for owners without a window
+    capabilities: Capabilities,  // detected at startup, refined by observed input
+    cwd: PathBuf,
+    root: Option<PathBuf>,       // the visible worktree root, when a directory was opened
+    workspace: WorkspaceModel,   // ordered tab list plus the active tab; reducer with invariants
+    documents: Documents,        // ItemId -> Document
+    overlays: Overlays,          // stack; the top owns focus while it is a prompt or picker
+    status: Status,              // one transient message
+    frame: Option<Frame>,        // the last drawn frame, for mouse hit testing and scrolling
+    resize: Option<ResizeAcknowledgement>, // released after the first frame after a resize
+    needs_invalidate: bool,
 }
 
 struct Document {
     buffer: Entity<Buffer>,
-    editor: WindowHandle<Editor>, // one hidden GPUI window per item
-    viewport: Viewport,           // top row, left column, follow state
+    editor: WindowHandle<Editor>, // one hidden GPUI window per tab
+    viewport: Viewport,           // top row, left column
+    follow: Follow,               // whether the viewport follows the cursor
+    untitled: Option<String>,     // label of a scratch buffer
 }
 ```
 
-Two items may show one Buffer (a split); each has its own Editor. Label,
-dirty state, disk state, and save eligibility derive from `Buffer::file()`
-at use time and are never cached. `WorkspaceModel` keeps its reducer and
-invariant check; in debug builds and tests every `update` ends with the
-whole tree checked: layout leaves match the pane map, items are unique,
-focus and overlays reference live ids, every item has a document.
+Label, dirty state, disk state, and save eligibility derive from
+`Buffer::file()` at use time and are never cached. In debug builds every
+`update` ends with the whole tree checked: tab ids are unique, the active
+index is valid, every tab has a document, every overlay references live
+state. Splits (two tabs on one Buffer) and docks return with feature 6 and
+extend `WorkspaceModel` rather than adding a second model.
 
 ## Events
 
 ```rust
 enum Event {
     Input(Input),              // Key, Paste, Mouse, Scroll
-    Resize,
+    Resize(ResizeAcknowledgement),
     Redraw,
     FocusChanged(bool),
     Signal(i32),
-    Command(Command),          // keymap dispatch, palette, or another feature
-    Document(DocumentEvent),   // Reparsed, ReloadFinished, DiskStateChanged, ... keyed by buffer id
-    Feature(FeatureEvent),     // one variant per feature wrapping that feature's Event
+    Fatal(String),             // the reader thread stopped
+    Document(DocumentEvent),   // ReloadFinished { buffer_id, result }
+    Config(ConfigEvent),       // settings or keymap file reloaded
 }
 ```
 
-Every asynchronous completion carries the id and generation of the request
-that produced it. The receiver compares with its current generation and
-drops the rest, so a stale completion can never publish into a newer
-prompt, tab, or search.
+`terminal::Event` and `zed::Event` convert into `Event` with `From`, so
+the reader thread and the Zed subscriptions send through a generic
+`Sender<T>` without knowing `app`. An asynchronous completion carries the
+id of the entity it belongs to; the receiver ignores ids it no longer owns.
+A feature whose completions can outlive a prompt or a tab adds a
+generation to its own event.
 
 ## Commands and keys
 
 ```rust
-enum Command { Quit, Save, SaveAs, Close, NextItem, ..., Feature(FeatureCommand) }
-
-struct CommandSpec {
-    command: Command,
-    action: &'static str,     // GPUI action name in the `zec` namespace
-    label: &'static str,      // palette text
-    available: fn(&App) -> bool,
+commands! {
+    CommandPalette => "Command Palette",
+    NewFile => "New File",
+    ...
 }
+// expands to `enum Command`, `mod actions` (one GPUI action per variant in
+// the `zec` namespace), `Command::ALL`, `action_name()`, `label()`, and
+// `from_action_name()`.
 ```
 
-Every `Command` is a GPUI action. A default keymap in Zed's JSON format is
-compiled into the binary and the user's `keymap.json` overrides it. For a
-document owner the key is dispatched to its hidden window, Zed's keymap
-resolves it, and an interceptor turns a dispatched zec action into
-`Event::Command`. Overlay and panel owners have no window, so their keys
-are resolved with `Keymap::bindings_for_input` in the owner's key context;
-an unbound key is offered to the owner as raw input. The palette is
-`commands()` filtered by `available`. A feature registers commands by
-exposing its `CommandSpec`s; nothing else is needed for palette or keymap.
+Every `Command` is a GPUI action. The default keymap in Zed's JSON format
+(`app/keymap.json`) is compiled into the binary; Zed's own defaults load
+first and the user's `keymap.json` overrides both. For a document owner the
+key is dispatched to its hidden window, Zed's keymap resolves it, and an
+interceptor registered with `cx.on_action` pushes a dispatched zec action
+into `pending_commands`. The queue is drained right after the dispatch
+returns, so a command runs before the next key: GPUI action handlers run
+synchronously, and a channel round-trip would reorder them against later
+input. Overlay owners have no window, so their keys are resolved with
+`Keymap::bindings_for_input` in the `zec_overlay` context; an unbound key
+is offered to the overlay as raw input. The palette lists `Command::ALL`.
 
 ## Focus and overlays
 
-```rust
-enum Focus { Item(ItemId), Dock(PanelKind), Overlay(OverlayId) }
-```
-
-The stack is the workspace base focus (an item or a dock panel) plus the
-overlay stack. Key and paste input goes to the top; mouse input goes to the
-owner of the hit region in the last frame plan. An owner's
-`handle_input` returns:
+The focus stack is the active document plus the overlay stack. Key and
+paste input goes to the top owner; a prompt or picker consumes everything,
+a confirmation consumes nothing. Mouse input goes to the document under
+the last frame. An overlay answers a key with:
 
 ```rust
-enum InputOutcome { Consumed, Ignored, Command(Command) }
+enum OverlayOutcome { Consumed, Submit(String), Cancel, Command(Command) }
 ```
-
-`Ignored` falls through to the next owner. The bottom owner is always a
-document or panel and consumes everything.
 
 ```rust
 enum Overlay {
-    Prompt  { label, line: LinePrompt, target: PromptTarget },             // Save As, Open, Go to line, search query
-    Picker  { query: LinePrompt, list: PickerList, target: PickerTarget }, // palette, Quick Open, themes, tasks
-    Confirm { message, command: Command },                                 // the same command again executes, anything else dismisses
-    Feature(FeatureOverlay),                                               // feature-owned, e.g. completion menu or hover
+    Prompt  { label, line: LinePrompt, target: PromptTarget, feedback }, // Save As, Open
+    Picker  { title, query: LinePrompt, list: PickerList<PickerPayload> }, // palette
+    Confirm { message, command: Command },
 }
 ```
 
-`Esc` pops the top overlay. An overlay bound to an item closes when that
-item changes. `Confirm` replaces every second-press flag: quit and close
-with dirty documents, reload of a dirty document, save over a conflict,
-overwrite on Save As.
+`Esc` pops the top overlay. Every overlay is bound to the active tab and
+closes when that tab changes. `Confirm` replaces every second-press flag:
+`execute` settles a pending confirmation in one place, so repeating the
+confirmed command carries `confirmed = true` and any other command
+dismisses it. Quit and close with dirty documents, reload of a dirty
+document, save over an external change, and overwrite on Save As all use
+it.
 
 ## Draw
 
@@ -183,23 +199,26 @@ overwrite on Save As.
 cursor follow, clipping, and snapshot capture happen in one step and cannot
 race a resize:
 
-1. `workspace_render::render_plan` assigns non-overlapping rects to panes,
-   docks, tab strip, and status; the plan is stored for mouse hit testing.
-2. Each visible document sets the Editor's wrap width to its pane width,
+1. The active document sets the Editor's wrap width to the body width,
    follows the cursor, clamps the viewport, and reads only
    `[top_row, top_row + height)` from Zed's `DisplaySnapshot`. The
    viewport is the only state `draw` mutates and the wrap width the only
    Zed write.
-3. Widgets render document snapshots, feature panels, overlays, and the
-   status row. Everything is projected onto visible cells only; the
-   terminal never recomputes folds, wraps, or highlights.
+2. `EditorWidget` renders the snapshot; the status row shows the tab
+   strip and key hints, or the transient message, or the top overlay's
+   presentation (a prompt line or a bounded picker list).
+3. The frame is stored for mouse hit testing. Everything is projected onto
+   visible cells only; the terminal never recomputes folds, wraps, or
+   highlights.
+
+Panes, docks, and a render plan return with feature 6.
 
 ## Feature contract
 
 ```rust
 // src/features/<name>/mod.rs
 pub struct State;
-pub enum Event;                 // completions and Zed notifications, generation-tagged
+pub enum Event;                 // completions and Zed notifications
 pub enum Command;               // user-invocable operations
 
 pub fn commands() -> &'static [CommandSpec];
@@ -210,28 +229,30 @@ pub fn handle_input(state: &mut State, ctx: &mut Ctx, input: &Input) -> InputOut
 pub fn view(state: &State, ctx: &ViewCtx, area: Rect, buf: &mut Buffer);            // if it draws
 ```
 
-`Ctx` is a feature's only access to the rest of zec: the Zed services
-(`Project`, `BufferStore`, `WorktreeStore`), `documents`, a read view of
-`workspace`, `status`, `overlays`, the event sender for completions, and
-`spawn`. A feature never touches another feature's `State`; a cross-feature
-effect is a `Command` dispatched through `Ctx`.
+`Ctx` is a feature's only access to the rest of zec: `services`,
+`documents`, a read view of `workspace`, `status`, `overlays`, the event
+sender for completions, and `spawn`. A feature never touches another
+feature's `State`; a cross-feature effect is a `Command` dispatched through
+`Ctx`.
 
-Adding a feature touches exactly: its directory, the `Features` field, the
-`FeatureEvent` and `FeatureCommand` variants, and the dispatch tables in
+Adding a feature touches exactly: its directory, a `Features` field, a
+`Feature` variant on `Event` and `Command`, and the dispatch tables in
 `app/update.rs` and `app/draw.rs`. Removing it reverses those. A feature's
-Zed crate dependencies enter `Cargo.toml` together with the feature.
+Zed crate dependencies enter `Cargo.toml` together with the feature. The
+first returning feature fixes the exact shape of `Ctx` and `CommandSpec`.
 
 ## Terminal boundary
 
-- The session enters raw mode, the alternate screen, mouse capture,
-  bracketed paste, and the detected keyboard protocol at startup, and
-  restores all of them on every exit path. Restoration attempts every step
-  even when one fails and reports the failures. Signal handlers set an
-  atomic flag; the reader thread turns it into `Event::Signal`.
+- The session enters raw mode, the alternate screen, mouse capture, focus
+  events, bracketed paste, and the detected keyboard protocol at startup,
+  and restores all of them on every exit path. Restoration attempts every
+  step even when one fails and reports the first failure. Signal handlers
+  set an atomic flag; the reader thread turns it into `Event::Signal`, and
+  `SIGTSTP` becomes `Flow::Suspend`.
 - The reader thread does blocking Crossterm reads and starts only after raw
   mode is active. Input events apply backpressure to preserve order;
-  `Redraw` uses `try_send`. The reader also polls the size at low frequency
-  for PTYs that miss resize events.
+  `Redraw` uses `try_send`. The reader coalesces resize bursts and polls
+  the size at low frequency for PTYs that miss resize events.
 - Exactly one layer converts Zed's UTF-8 byte columns to grapheme cell
   widths; the mouse hit test is its inverse.
 - The clipboard is OSC 52 only: copy payloads come from Zed's public
@@ -244,19 +265,22 @@ Zed crate dependencies enter `Cargo.toml` together with the feature.
 - Files go through `RealFs -> WorktreeStore -> BufferStore` under one
   `Project::local`; zec never writes files itself. Repository mode has one
   visible worktree; direct file mode uses invisible worktrees so external
-  renames stay tracked.
+  renames stay tracked. Save formats through `Project::format` with the
+  save trigger first, as Zed's editor does, so on-save whitespace and
+  newline rules apply.
 - Native grammars are registered as lazy loaders; languages compile their
   queries on first use.
-- `zed/subscriptions.rs` holds the helpers that turn Zed entity events into
-  zec events; features call them in `start`.
+- `zed/editor.rs` holds the helpers that turn Zed entity events into zec
+  events, capture display snapshots, and dispatch keystrokes and actions
+  into the hidden window.
 
 ## Verification
 
-- `App::update`, feature `update`, and `execute` run under headless GPUI
-  with real Buffers and a captured event sender, without a PTY. Tree
-  invariants are asserted after every update.
-- Contract tests: every `Command` has a spec, every default binding
-  resolves to a registered action, and the palette lists every available
-  command.
-- The actual binary runs through a PTY for lifecycle (raw mode restore,
-  signals, resize, first frame) and one scenario per feature.
+- `Services`, the editor helpers, and the clipboard run under headless
+  GPUI with real Buffers and no PTY. Tree invariants are asserted after
+  every update in debug builds.
+- Contract tests: action names are unique and round-trip, and every zec
+  binding in the default keymap resolves to a registered command.
+- The actual binary runs through a PTY (`tests/e2e.rs`) for lifecycle (raw
+  mode restore, signals, resize, first frame), edit and save, tabs and the
+  palette, and external change handling.

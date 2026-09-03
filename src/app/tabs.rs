@@ -1,26 +1,3 @@
-/// Direction used when moving between open tabs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Direction {
-    Previous,
-    Next,
-}
-
-/// Returns the adjacent tab index, wrapping at either end.
-///
-/// An empty tab list or an invalid current index has no adjacent tab.
-pub fn adjacent_index(current: usize, len: usize, direction: Direction) -> Option<usize> {
-    if len == 0 || current >= len {
-        return None;
-    }
-
-    match direction {
-        Direction::Previous if current == 0 => Some(len - 1),
-        Direction::Previous => Some(current - 1),
-        Direction::Next if current + 1 == len => Some(0),
-        Direction::Next => Some(current + 1),
-    }
-}
-
 /// Display-only state for one tab.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TabLabel {
@@ -88,24 +65,6 @@ mod tests {
             dirty,
             conflict,
         }
-    }
-
-    #[test]
-    fn adjacent_index_wraps_in_both_directions() {
-        assert_eq!(adjacent_index(0, 3, Direction::Previous), Some(2));
-        assert_eq!(adjacent_index(1, 3, Direction::Previous), Some(0));
-        assert_eq!(adjacent_index(1, 3, Direction::Next), Some(2));
-        assert_eq!(adjacent_index(2, 3, Direction::Next), Some(0));
-        assert_eq!(adjacent_index(0, 1, Direction::Previous), Some(0));
-        assert_eq!(adjacent_index(0, 1, Direction::Next), Some(0));
-    }
-
-    #[test]
-    fn adjacent_index_rejects_empty_and_out_of_range_state() {
-        assert_eq!(adjacent_index(0, 0, Direction::Previous), None);
-        assert_eq!(adjacent_index(0, 0, Direction::Next), None);
-        assert_eq!(adjacent_index(3, 3, Direction::Previous), None);
-        assert_eq!(adjacent_index(usize::MAX, 3, Direction::Next), None);
     }
 
     #[test]

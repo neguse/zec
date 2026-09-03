@@ -1,0 +1,31 @@
+[
+  {
+    "context": "Editor",
+    "bindings": {
+      "f1": "zec::CommandPalette",
+      "ctrl-shift-p": "zec::CommandPalette",
+      "f4": "zec::ShowTerminalCapabilities",
+      "ctrl-n": "zec::NewFile",
+      "ctrl-o": "zec::OpenFile",
+      "ctrl-s": "zec::Save",
+      "ctrl-r": "zec::Reload",
+      "ctrl-w": "zec::CloseItem",
+      "ctrl-pageup": "zec::PreviousItem",
+      "ctrl-pagedown": "zec::NextItem",
+      "ctrl-c": "zec::Copy",
+      "ctrl-x": "zec::Cut",
+      "ctrl-,": "zec::OpenSettings",
+      "ctrl-alt-,": "zec::OpenKeymap",
+      "ctrl-q": "zec::Quit",
+      "ctrl-z": "editor::Undo",
+      "ctrl-y": "editor::Redo",
+      "alt-z": "editor::ToggleSoftWrap"
+    }
+  },
+  {
+    "context": "zec_overlay",
+    "bindings": {
+      "ctrl-q": "zec::Quit"
+    }
+  }
+]

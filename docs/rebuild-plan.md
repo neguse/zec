@@ -1,18 +1,18 @@
 # Rebuild plan
 
-Status: in progress. This document is temporary and is deleted when the
-last row of the return table is done.
+Status: core in place; features returning. This document is temporary and
+is deleted when the last row of the return table is done.
 
 ## Approach
 
 The `rebuild` branch replaces the previous tree instead of refactoring it.
 The last complete tree is commit `f40e791`; its `docs/` describe every
 feature's behavior and its `tests/` are the acceptance criteria for
-bringing a feature back. The first commit removes `src/main.rs`, every
+bringing a feature back. The first commit removed `src/main.rs`, every
 feature module, the e2e binaries under `src/bin/`, their docs, and the e2e
-workflows, then builds the core on `docs/architecture.md`. Features return
-one at a time as `src/features/<name>/`. Returning a feature is also the
-moment to decide whether zec wants it; one that is not wanted stays in
+workflows; the second built the core on `docs/architecture.md`. Features
+return one at a time as `src/features/<name>/`. Returning a feature is also
+the moment to decide whether zec wants it; one that is not wanted stays in
 history.
 
 ## Core
@@ -24,11 +24,10 @@ command palette; status row; terminal lifecycle; `--smoke`.
 
 Transplanted with trimming: `terminal.rs` (split into session,
 capabilities, reader), `render.rs`, `clipboard.rs`, `prompt.rs`, `tabs.rs`,
-`workspace_model.rs`, `workspace_render.rs`, `cli.rs`, the palette search
-from `actions.rs`. Rewritten: everything that lived in `main.rs`.
-
-Done when: no `let mut` state in the loop, the contract tests pass, and the
-PTY lifecycle and edit/save scenarios pass on Linux and Windows.
+`workspace_model.rs` (reduced to a tab list), `cli.rs`, the palette search
+from `actions.rs`. Rewritten: everything that lived in `main.rs`. Left in
+history for feature 6: `workspace_render.rs` and the pane, dock, and
+layout parts of `workspace_model.rs`.
 
 ## Return order
 
@@ -39,7 +38,7 @@ PTY lifecycle and edit/save scenarios pass on Linux and Windows.
 | 3 | buffer search and replace, go to line | core | `ActiveSearch`, `GoToLinePrompt` | `e2e_tui` |
 | 4 | LSP: completion, hover, diagnostics, locations, rename, code actions | 1 | `LanguageOverlay`, six `*Prompt`s, `fixture_lsp` | `language_service`, `lsp_failures`, `e2e_language` |
 | 5 | project panel, outline panel | 1 | `project_panel.rs`, `outline_panel.rs` | `project_panel`, `e2e_tui` |
-| 6 | splits, docks, sessions | core | `workspace_session.rs` | `workspace_*`, `e2e_workspace` |
+| 6 | splits, docks, layout, sessions | core | `workspace_model.rs`, `workspace_render.rs`, `workspace_session.rs` | `workspace_*`, `e2e_workspace` |
 | 7 | git, terminal, tasks, debugger | 1 | `git_panel.rs`, `terminal_panel.rs`, `task_picker.rs`, `debugger_panel.rs` | development-loop scenarios |
 | 8 | extensions, themes, update | core | `extension_picker.rs`, `theme_picker.rs`, `update.rs` | `update_cli`, `settings_reload` |
 | 9 | markdown, images, large files | core | `rich_content.rs` | `e2e_tui` |
@@ -47,9 +46,12 @@ PTY lifecycle and edit/save scenarios pass on Linux and Windows.
 | 11 | agent, inline assistant, edit prediction | 1 | `agent_panel.rs`, `inline_assistant.rs`, `edit_prediction.rs`, `fixture_acp` | `e2e_tui` |
 | 12 | collaboration, notebook | 1 | `collaboration_panel.rs`, `notebook.rs` | `e2e_tui` |
 
-## Behavior to carry into the core
+Old sources and acceptance suites are paths in `f40e791`; the acceptance
+scenarios return into `tests/e2e.rs` or a per-feature test file.
 
-Non-obvious constraints from the previous tree that the core must keep:
+## Behavior carried into the core
+
+Non-obvious constraints from the previous tree that the core keeps:
 
 - Start the reader thread after raw mode is active; starting earlier races
   fast session restores and swallows the first keystroke.
@@ -59,6 +61,9 @@ Non-obvious constraints from the previous tree that the core must keep:
   even when an earlier step fails; remove signal handlers last.
 - Repaint cost is bounded by the viewport, not the document (100k lines).
 - `Ctrl-S` is handled by zec; Zed's binding is a Workspace action.
+- Save formats through `Project::format` with the save trigger before the
+  write, like Zed's editor; a formatter failure is logged and the write
+  still happens.
 - Save As resolves relative to the startup cwd with no shell expansion,
   overwrites a regular file only on a confirmed second submit, refuses
   directories and special files, and refuses to bind two Buffers to one
@@ -82,6 +87,6 @@ doc section that describes it.
 ```sh
 cargo fmt --all -- --check
 cargo test --locked --bin zec -- --test-threads=1
-cargo test --locked --test e2e_tui -- --test-threads=1
+cargo test --locked --test e2e -- --test-threads=1
 ./target/debug/zec --smoke
 ```
