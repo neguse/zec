@@ -1,8 +1,9 @@
 //! Which items are open, how they are arranged, and which one is active.
 //!
 //! Zed owns everything inside an item. This model owns the pane tree, each
-//! pane's ordered tab list, and the active pane and tab, and checks its own
-//! invariants after every transition.
+//! pane's ordered tab list, the active pane and tab, the docks and their
+//! panels, and which of those has focus, and checks its own invariants
+//! after every transition.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -41,6 +42,43 @@ impl Direction {
             Self::Down => "below",
         }
     }
+}
+
+/// A dock edge. The bottom dock returns with the first panel that uses it.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum DockPosition {
+    Left,
+    Right,
+}
+
+/// A feature that draws into a dock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PanelKind {
+    Project,
+    Outline,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dock {
+    pub visible: bool,
+    /// Width in cells.
+    pub size: u16,
+    pub panel: PanelKind,
+}
+
+/// Who receives keys below the overlay stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Focus {
+    Pane,
+    Dock(DockPosition),
+}
+
+/// What a dock toggle did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DockChange {
+    Shown,
+    Focused,
+    Hidden,
 }
 
 /// Split ratios are thousandths of the extent given to the first child.
@@ -184,6 +222,8 @@ pub struct WorkspaceModel {
     panes: BTreeMap<PaneId, Pane>,
     active_pane: PaneId,
     next_pane: u64,
+    docks: BTreeMap<DockPosition, Dock>,
+    focus: Focus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,6 +236,8 @@ pub enum WorkspaceError {
     InvalidActiveIndex(PaneId),
     InvalidRatio(u16),
     LayoutMismatch,
+    UnknownDock(DockPosition),
+    HiddenDock(DockPosition),
 }
 
 impl fmt::Display for WorkspaceError {
@@ -213,6 +255,10 @@ impl fmt::Display for WorkspaceError {
             Self::LayoutMismatch => {
                 write!(formatter, "layout leaves and panes do not match one to one")
             }
+            Self::UnknownDock(position) => write!(formatter, "no {position:?} dock"),
+            Self::HiddenDock(position) => {
+                write!(formatter, "the focused {position:?} dock is hidden")
+            }
         }
     }
 }
@@ -227,6 +273,8 @@ impl WorkspaceModel {
             panes: BTreeMap::from([(pane, Pane::new(vec![first], 0))]),
             active_pane: pane,
             next_pane: 2,
+            docks: default_docks(),
+            focus: Focus::Pane,
         }
     }
 
@@ -242,6 +290,8 @@ impl WorkspaceModel {
             panes,
             active_pane,
             next_pane,
+            docks: default_docks(),
+            focus: Focus::Pane,
         };
         model.validate()?;
         Ok(model)
@@ -305,6 +355,7 @@ impl WorkspaceModel {
         let pane = self.active_mut();
         pane.items.push(item);
         pane.active = pane.items.len() - 1;
+        self.focus = Focus::Pane;
         self.validate()
     }
 
@@ -319,6 +370,7 @@ impl WorkspaceModel {
             .iter()
             .position(|candidate| *candidate == item)
             .expect("pane_of found the item");
+        self.focus = Focus::Pane;
         self.validate()
     }
 
@@ -327,7 +379,75 @@ impl WorkspaceModel {
             return Err(WorkspaceError::UnknownPane(pane));
         }
         self.active_pane = pane;
+        self.focus = Focus::Pane;
         self.validate()
+    }
+
+    // ---- docks and focus ----
+
+    pub fn docks(&self) -> impl Iterator<Item = (DockPosition, &Dock)> {
+        self.docks.iter().map(|(position, dock)| (*position, dock))
+    }
+
+    pub fn dock(&self, position: DockPosition) -> Option<&Dock> {
+        self.docks.get(&position)
+    }
+
+    pub fn dock_for_panel(&self, panel: PanelKind) -> Option<DockPosition> {
+        self.docks()
+            .find(|(_, dock)| dock.panel == panel)
+            .map(|(position, _)| position)
+    }
+
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    /// The focused dock and its panel, when a dock has focus.
+    pub fn focused_dock(&self) -> Option<(DockPosition, PanelKind)> {
+        match self.focus {
+            Focus::Pane => None,
+            Focus::Dock(position) => self.docks.get(&position).map(|dock| (position, dock.panel)),
+        }
+    }
+
+    /// A hidden dock is shown and focused; a visible unfocused one is
+    /// focused; a focused one is hidden and focus returns to the pane.
+    pub fn toggle_dock(&mut self, position: DockPosition) -> Result<DockChange, WorkspaceError> {
+        let dock = self
+            .docks
+            .get_mut(&position)
+            .ok_or(WorkspaceError::UnknownDock(position))?;
+        let change = if !dock.visible {
+            dock.visible = true;
+            self.focus = Focus::Dock(position);
+            DockChange::Shown
+        } else if self.focus == Focus::Dock(position) {
+            dock.visible = false;
+            self.focus = Focus::Pane;
+            DockChange::Hidden
+        } else {
+            self.focus = Focus::Dock(position);
+            DockChange::Focused
+        };
+        self.validate()?;
+        Ok(change)
+    }
+
+    pub fn focus_dock(&mut self, position: DockPosition) -> Result<(), WorkspaceError> {
+        let dock = self
+            .docks
+            .get(&position)
+            .ok_or(WorkspaceError::UnknownDock(position))?;
+        if !dock.visible {
+            return Err(WorkspaceError::HiddenDock(position));
+        }
+        self.focus = Focus::Dock(position);
+        self.validate()
+    }
+
+    pub fn focus_editor(&mut self) {
+        self.focus = Focus::Pane;
     }
 
     /// Removes an item; the neighbour toward the front becomes active when
@@ -402,6 +522,7 @@ impl WorkspaceModel {
         self.root.replace_pane(self.active_pane, split);
         self.panes.insert(pane, Pane::new(vec![item], 0));
         self.active_pane = pane;
+        self.focus = Focus::Pane;
         self.validate()?;
         Ok(pane)
     }
@@ -428,6 +549,7 @@ impl WorkspaceModel {
         pane.items.push(item);
         pane.active = pane.items.len() - 1;
         self.active_pane = target;
+        self.focus = Focus::Pane;
         self.validate()?;
         Ok(true)
     }
@@ -461,8 +583,37 @@ impl WorkspaceModel {
                 }
             }
         }
+        if let Focus::Dock(position) = self.focus {
+            match self.docks.get(&position) {
+                None => return Err(WorkspaceError::UnknownDock(position)),
+                Some(dock) if !dock.visible => return Err(WorkspaceError::HiddenDock(position)),
+                Some(_) => {}
+            }
+        }
         validate_ratios(&self.root)
     }
+}
+
+/// Every dock starts hidden; a panel toggle shows it.
+fn default_docks() -> BTreeMap<DockPosition, Dock> {
+    BTreeMap::from([
+        (
+            DockPosition::Left,
+            Dock {
+                visible: false,
+                size: 32,
+                panel: PanelKind::Project,
+            },
+        ),
+        (
+            DockPosition::Right,
+            Dock {
+                visible: false,
+                size: 36,
+                panel: PanelKind::Outline,
+            },
+        ),
+    ])
 }
 
 fn validate_ratios(node: &LayoutNode) -> Result<(), WorkspaceError> {
@@ -546,6 +697,40 @@ mod tests {
         assert_eq!(workspace.pane(below), None);
         assert_eq!(workspace.active_pane(), PaneId(1));
         assert_eq!(workspace.active_item(), ItemId(2));
+    }
+
+    #[test]
+    fn dock_toggles_move_focus_and_never_leave_a_hidden_dock_focused() {
+        let mut workspace = WorkspaceModel::new(ItemId(1));
+        assert_eq!(workspace.focus(), Focus::Pane);
+        assert_eq!(
+            workspace.toggle_dock(DockPosition::Left).unwrap(),
+            DockChange::Shown
+        );
+        assert_eq!(
+            workspace.focused_dock(),
+            Some((DockPosition::Left, PanelKind::Project))
+        );
+        workspace.focus_editor();
+        assert_eq!(
+            workspace.toggle_dock(DockPosition::Left).unwrap(),
+            DockChange::Focused
+        );
+        assert_eq!(
+            workspace.toggle_dock(DockPosition::Left).unwrap(),
+            DockChange::Hidden
+        );
+        assert_eq!(workspace.focus(), Focus::Pane);
+        assert_eq!(
+            workspace.focus_dock(DockPosition::Left),
+            Err(WorkspaceError::HiddenDock(DockPosition::Left))
+        );
+
+        // Showing an item takes focus back to the pane.
+        workspace.toggle_dock(DockPosition::Right).unwrap();
+        workspace.open_item(ItemId(2)).unwrap();
+        assert_eq!(workspace.focus(), Focus::Pane);
+        assert!(workspace.dock(DockPosition::Right).unwrap().visible);
     }
 
     #[test]

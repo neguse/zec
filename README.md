@@ -43,13 +43,18 @@ which are also listed in the command palette:
 | `Ctrl-Alt-Arrow` | Focus the pane in that direction |
 | `Ctrl-Alt-Shift-Arrow` | Move the tab to the pane in that direction |
 | `Ctrl-Alt-=` / `Ctrl-Alt--` | Grow / Shrink Pane |
+| `F7` / `Ctrl-Shift-E` | Toggle the project panel (left dock) |
+| `F9` / `Ctrl-Shift-O` | Toggle the outline panel (right dock) |
 | `Ctrl-C` / `Ctrl-X` | Copy / Cut through OSC 52 |
 | `Ctrl-,` / `Ctrl-Alt-,` | Open Settings / Open Keymap |
 | `F4` | Show Terminal Capabilities |
 | `Ctrl-Q` | Quit |
 
 A command that would discard work asks for the same key again; any other
-input dismisses the question. Zed's `settings.json` and `keymap.json` are
+input dismisses the question. Inside a panel, arrows move and expand or
+collapse, Enter opens or jumps, Esc returns to the editor, and the project
+panel adds `n` / `N` (new file / directory), `F2` (rename), `Delete`, `r`
+(reveal the active file), and `i` (show ignored entries). Zed's `settings.json` and `keymap.json` are
 read from Zed's configuration directory and reloaded on change.
 `ZEC_DATA_DIR` moves that directory, and `ZEC_KEYBOARD_PROTOCOL`
 (`kitty`, `modifyOtherKeys`, or `legacy`) overrides keyboard protocol

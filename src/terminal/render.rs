@@ -32,6 +32,99 @@ pub struct TextPosition {
     pub byte_column: usize,
 }
 
+/// The first of `len` rows shown when `budget` rows fit and `selected` must
+/// stay visible.
+pub fn window_start(len: usize, selected: Option<usize>, budget: usize) -> usize {
+    if budget == 0 {
+        return 0;
+    }
+    selected
+        .unwrap_or(0)
+        .saturating_sub(budget.saturating_sub(1))
+        .min(len.saturating_sub(budget))
+}
+
+/// Renders an [`OverlaySnapshot`] as a bordered dock panel. The feature
+/// chooses the rows and the selection; this widget owns terminal-cell
+/// presentation and hit testing.
+pub struct PanelWidget<'a> {
+    snapshot: &'a OverlaySnapshot,
+    focused: bool,
+}
+
+impl<'a> PanelWidget<'a> {
+    pub fn new(snapshot: &'a OverlaySnapshot, focused: bool) -> Self {
+        Self { snapshot, focused }
+    }
+
+    fn inner(area: Rect) -> Rect {
+        Block::default().borders(Borders::ALL).inner(area)
+    }
+
+    /// Rows the panel body holds.
+    pub fn row_budget(area: Rect) -> usize {
+        usize::from(Self::inner(area).height)
+    }
+
+    /// The body row under `position`, counted from the first visible row.
+    pub fn row_at(area: Rect, position: Position) -> Option<usize> {
+        let inner = Self::inner(area);
+        inner
+            .contains(position)
+            .then(|| usize::from(position.y.saturating_sub(inner.y)))
+    }
+}
+
+impl Widget for PanelWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 3 || area.height < 3 {
+            return;
+        }
+        Clear.render(area, buf);
+        let border_style = if self.focused {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(self.snapshot.title.as_str())
+            .border_style(border_style);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.is_empty() {
+            return;
+        }
+
+        let rows = &self.snapshot.rows;
+        let selected = self
+            .snapshot
+            .selected
+            .filter(|selected| *selected < rows.len());
+        let first = window_start(rows.len(), selected, usize::from(inner.height));
+        for (screen_row, (index, row)) in rows
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(usize::from(inner.height))
+            .enumerate()
+        {
+            let y = inner
+                .y
+                .saturating_add(u16::try_from(screen_row).unwrap_or(inner.height));
+            let row_area = Rect::new(inner.x, y, inner.width, 1);
+            let mut style = Style::default();
+            if selected == Some(index) {
+                style = style.add_modifier(Modifier::REVERSED);
+            } else if !row.enabled {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            buf.set_style(row_area, style);
+            render_line(&row.text, style, &[], y, inner, inner, 0, buf);
+        }
+    }
+}
+
 /// A half-open selection range in terminal-cell coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectionRange {
@@ -1000,7 +1093,8 @@ mod tests {
 
     use super::{
         BackgroundRange, CellDecoration, Cursor, EditorWidget, OverlayRow, OverlaySnapshot,
-        RenderSnapshot, SelectionRange, StyleSpan, TextPosition, Viewport,
+        PanelWidget, RenderSnapshot, SelectionRange, StyleSpan, TextPosition, Viewport,
+        window_start,
     };
 
     fn row(buf: &Buffer, y: u16) -> String {
@@ -1886,5 +1980,36 @@ mod tests {
                 .contains(Modifier::REVERSED)
         );
         assert!(row(&buf, 5).contains('└'));
+    }
+    #[test]
+    fn panel_widget_windows_rows_and_hit_tests_its_body() {
+        let snapshot = OverlaySnapshot {
+            title: " Project ".into(),
+            rows: (0..5)
+                .map(|index| OverlayRow {
+                    text: format!("row {index}"),
+                    enabled: true,
+                })
+                .collect(),
+            selected: Some(4),
+        };
+        let area = Rect::new(2, 1, 12, 5);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 16, 8));
+        PanelWidget::new(&snapshot, true).render(area, &mut buf);
+        assert!(row(&buf, 1).contains("Project"));
+        assert!(row(&buf, 2).contains("row 2"));
+        assert!(row(&buf, 4).contains("row 4"));
+        assert!(
+            buf.cell((3, 4))
+                .expect("selected row cell")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(PanelWidget::row_budget(area), 3);
+        assert_eq!(PanelWidget::row_at(area, Position::new(5, 2)), Some(0));
+        assert_eq!(PanelWidget::row_at(area, Position::new(5, 1)), None);
+        assert_eq!(window_start(5, Some(4), 3), 2);
+        assert_eq!(window_start(5, None, 3), 0);
+        assert_eq!(window_start(2, Some(1), 3), 0);
     }
 }

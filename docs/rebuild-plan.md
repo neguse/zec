@@ -62,8 +62,14 @@ click focuses a pane; divider dragging, preview and pinned tabs, tab
 reordering, and navigation history stay in history) plus
 `features/sessions` (one JSON per root under the data directory, written
 when the tab set or layout changes and at exit; generations, recovery
-blobs, leases, quarantine, and `ZEC_SESSION_DIR` stay in history). Docks
-wait for feature 5, the first panel.
+blobs, leases, quarantine, and `ZEC_SESSION_DIR` stay in history). 5 as
+`features/project_panel` and `features/outline_panel` on docks in the core
+(left and right; the bottom dock arrives with the first bottom panel):
+rows are Zed's worktree
+snapshot and Zed's buffer outline read on every frame, mutations go
+through `Project::{create,rename,delete}_entry`; the previous filter
+prompts, outline follow-cursor, entry copy, hidden-file toggle, preview
+tabs, mouse dock resizing, and dock state in sessions stay in history.
 
 ## Behavior carried into the core
 

@@ -1,9 +1,12 @@
-//! The render plan: non-overlapping rects for panes and dividers, derived
-//! from the layout tree for one frame and kept for mouse hit testing.
+//! The render plan: non-overlapping rects for docks, panes, and dividers,
+//! derived from the workspace for one frame and kept for mouse hit testing.
 
 use ratatui::layout::{Position, Rect};
 
-use super::workspace::{Axis, Direction, LayoutNode, PaneId, WorkspaceModel};
+use super::workspace::{Axis, Direction, DockPosition, LayoutNode, PaneId, WorkspaceModel};
+
+/// The fewest cells a dock leaves the editor along its axis.
+const MIN_EDITOR_EXTENT: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaneArea {
@@ -17,13 +20,27 @@ pub struct Divider {
     pub area: Rect,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DockArea {
+    pub position: DockPosition,
+    pub area: Rect,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderPlan {
     pub panes: Vec<PaneArea>,
     pub dividers: Vec<Divider>,
+    pub docks: Vec<DockArea>,
 }
 
 impl RenderPlan {
+    pub fn dock_at(&self, position: Position) -> Option<DockArea> {
+        self.docks
+            .iter()
+            .copied()
+            .find(|candidate| candidate.area.contains(position))
+    }
+
     pub fn area_of(&self, pane: PaneId) -> Option<Rect> {
         self.panes
             .iter()
@@ -80,14 +97,45 @@ fn columns_overlap(left: Rect, right: Rect) -> bool {
     left.x < right.right() && right.x < left.right()
 }
 
-/// Assigns `area` to the pane tree. A split needs three cells along its
-/// axis (one per child plus the divider); a narrower split shows only the
-/// branch holding the active pane, so no pane is ever zero cells wide.
+/// Assigns `area` to the docks and the pane tree. Visible docks take their
+/// edges first, each with a one-cell divider, and a dock that would leave
+/// the editor fewer than [`MIN_EDITOR_EXTENT`] cells stays off this frame.
+/// A split needs three cells along its axis (one per child plus the
+/// divider); a narrower split shows only the branch holding the active
+/// pane, so no pane is ever zero cells wide.
 pub fn plan(workspace: &WorkspaceModel, area: Rect) -> RenderPlan {
-    // Docks reserve their edges of `area` here, before the pane tree is
-    // placed, when the first panel returns.
     let mut plan = RenderPlan::default();
-    place(workspace.root(), area, workspace.active_pane(), &mut plan);
+    let mut editor = area;
+    for (position, dock) in workspace.docks().filter(|(_, dock)| dock.visible) {
+        let size = dock.size.max(1);
+        if editor.width < size + 1 + MIN_EDITOR_EXTENT {
+            continue;
+        }
+        let (dock_area, divider) = match position {
+            DockPosition::Left => {
+                let dock_area = Rect::new(editor.x, editor.y, size, editor.height);
+                let divider = Rect::new(editor.x + size, editor.y, 1, editor.height);
+                editor.x += size + 1;
+                editor.width -= size + 1;
+                (dock_area, divider)
+            }
+            DockPosition::Right => {
+                let dock_area = Rect::new(editor.right() - size, editor.y, size, editor.height);
+                let divider = Rect::new(editor.right() - size - 1, editor.y, 1, editor.height);
+                editor.width -= size + 1;
+                (dock_area, divider)
+            }
+        };
+        plan.docks.push(DockArea {
+            position,
+            area: dock_area,
+        });
+        plan.dividers.push(Divider {
+            axis: Axis::Horizontal,
+            area: divider,
+        });
+    }
+    place(workspace.root(), editor, workspace.active_pane(), &mut plan);
     plan
 }
 
@@ -173,6 +221,31 @@ mod tests {
         let rendered = plan(&workspace, Rect::new(0, 0, 3, 1));
         assert_eq!(rendered.area_of(PaneId(1)).map(|area| area.width), Some(1));
         assert_eq!(rendered.area_of(right).map(|area| area.width), Some(1));
+    }
+
+    #[test]
+    fn docks_take_their_edges_first_and_yield_when_the_editor_would_vanish() {
+        let mut workspace = WorkspaceModel::new(ItemId(1));
+        workspace.toggle_dock(DockPosition::Left).unwrap();
+        workspace.toggle_dock(DockPosition::Right).unwrap();
+        let rendered = plan(&workspace, Rect::new(0, 0, 100, 10));
+        assert_eq!(
+            rendered
+                .dock_at(Position::new(3, 3))
+                .map(|dock| dock.position),
+            Some(DockPosition::Left)
+        );
+        assert_eq!(rendered.docks[0].area, Rect::new(0, 0, 32, 10));
+        assert_eq!(rendered.docks[1].area, Rect::new(64, 0, 36, 10));
+        assert_eq!(rendered.area_of(PaneId(1)), Some(Rect::new(33, 0, 30, 10)));
+        assert_eq!(rendered.dividers.len(), 2);
+
+        // Too narrow for both: the right dock stays off, the pane keeps
+        // its minimum.
+        let rendered = plan(&workspace, Rect::new(0, 0, 40, 10));
+        assert_eq!(rendered.docks.len(), 1);
+        assert_eq!(rendered.area_of(PaneId(1)), Some(Rect::new(33, 0, 7, 10)));
+        assert_eq!(rendered.dock_at(Position::new(39, 1)), None);
     }
 
     #[test]

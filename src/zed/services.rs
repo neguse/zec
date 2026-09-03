@@ -12,11 +12,12 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use async_channel::Sender;
 use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Entity};
 use language::{Buffer, LanguageNotFound, LanguageRegistry};
 use project::{
-    LocalProjectFlags, Project, ProjectPath, Worktree,
+    LocalProjectFlags, Project, ProjectEntryId, ProjectPath, Worktree,
     buffer_store::BufferStore,
     lsp_store::{FormatTrigger, LspFormatTarget},
     worktree_store::WorktreeStore,
@@ -77,6 +78,63 @@ impl Services {
             .await
             .with_context(|| format!("could not open {} as a worktree", directory.display()))?;
         Ok(worktree)
+    }
+
+    /// The visible worktree, when zec opened a directory.
+    pub fn visible_worktree(&self, cx: &AsyncApp) -> Option<Entity<Worktree>> {
+        self.worktree_store
+            .read_with(cx, |store, cx| store.visible_worktrees(cx).next())
+    }
+
+    /// Creates a file or directory at `path` through the project, so the
+    /// worktree learns about it at once.
+    pub async fn create_entry(
+        &self,
+        path: &Path,
+        is_directory: bool,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let project_path = self.project_path_in_worktree(path, cx)?;
+        self.project
+            .update(cx, |project, cx| {
+                project.create_entry(project_path, is_directory, cx)
+            })
+            .await
+            .with_context(|| format!("could not create {}", path.display()))?;
+        Ok(())
+    }
+
+    pub async fn rename_entry(
+        &self,
+        entry: ProjectEntryId,
+        path: &Path,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let project_path = self.project_path_in_worktree(path, cx)?;
+        self.project
+            .update(cx, |project, cx| {
+                project.rename_entry(entry, project_path, cx)
+            })
+            .await
+            .with_context(|| format!("could not rename to {}", path.display()))?;
+        Ok(())
+    }
+
+    pub async fn delete_entry(&self, entry: ProjectEntryId, cx: &mut AsyncApp) -> Result<()> {
+        self.project
+            .update(cx, |project, cx| project.delete_entry(entry, cx))
+            .context("entry is not in a worktree")?
+            .await
+            .context("could not delete the entry")
+    }
+
+    /// The project path of `path` inside an existing worktree.
+    fn project_path_in_worktree(&self, path: &Path, cx: &AsyncApp) -> Result<ProjectPath> {
+        self.worktree_store
+            .read_with(cx, |store, cx| {
+                store.project_path_for_absolute_path(path, cx)
+            })
+            .with_context(|| format!("{} is outside the project", path.display()))
     }
 
     pub async fn metadata(&self, path: &Path) -> Result<Option<Metadata>> {
@@ -308,6 +366,52 @@ pub fn buffer_state(buffer: &Entity<Buffer>, cx: &AsyncApp) -> BufferState {
             conflict: buffer.has_conflict(),
             deleted,
         }
+    })
+}
+
+/// Forwards every change of the worktree's entries as a redraw for as long
+/// as the subscription lives.
+pub fn watch_worktree<T>(
+    worktree: &Entity<Worktree>,
+    sender: Sender<T>,
+    cx: &mut AsyncApp,
+) -> gpui::Subscription
+where
+    T: From<super::Event> + Send + 'static,
+{
+    cx.update(|cx| {
+        cx.subscribe(worktree, move |_, _event, _| {
+            let _ = sender.try_send(super::Event::Redraw.into());
+        })
+    })
+}
+
+/// One symbol of a buffer's outline, in document order.
+pub struct OutlineRow {
+    pub depth: usize,
+    pub text: String,
+    /// Where the symbol's name starts.
+    pub point: text::Point,
+}
+
+/// Zed's outline of `buffer`, empty when its language has no outline
+/// query or the buffer has not been parsed yet.
+pub fn outline(buffer: &Entity<Buffer>, cx: &AsyncApp) -> Vec<OutlineRow> {
+    buffer.read_with(cx, |buffer, _| {
+        let snapshot = buffer.snapshot();
+        snapshot
+            .outline(None)
+            .items
+            .iter()
+            .map(|item| {
+                let item = item.to_point(&snapshot);
+                OutlineRow {
+                    depth: item.depth,
+                    text: item.text.to_string(),
+                    point: item.selection_range.start,
+                }
+            })
+            .collect()
     })
 }
 

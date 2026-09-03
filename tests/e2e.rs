@@ -63,6 +63,11 @@ const CTRL_ALT_SHIFT_LEFT: &[u8] = b"\x1b[1;8D";
 const CTRL_ALT_SHIFT_UP: &[u8] = b"\x1b[1;8A";
 const CTRL_ALT_EQUALS: &[u8] = b"\x1b[61;7u";
 const DOWN: &[u8] = b"\x1b[B";
+const F2: &[u8] = b"\x1bOQ";
+const F7: &[u8] = b"\x1b[18~";
+const F9: &[u8] = b"\x1b[20~";
+const DELETE: &[u8] = b"\x1b[3~";
+const CTRL_U: &[u8] = b"\x15";
 const ALT_F: &[u8] = b"\x1bf";
 const CTRL_F: &[u8] = b"\x06";
 const CTRL_G: &[u8] = b"\x07";
@@ -441,6 +446,154 @@ fn sessions_restore_split_layout_and_tabs() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "restored session exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn project_panel_browses_opens_and_mutates_the_tree() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("panel-repo");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("README.md"), "readme\n")?;
+    fs::write(root.join("src/main.rs"), "fn main() {}\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+
+    // The panel opens focused on the tree: directories first, collapsed.
+    session.send(F7)?;
+    session.wait_for_screen("project panel shown", ACTION_TIMEOUT, |screen| {
+        screen.contains("project panel shown")
+            && screen.contains("▸ src")
+            && screen.contains("README.md")
+            && !screen.contains("main.rs")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("directory expanded", ACTION_TIMEOUT, |screen| {
+        screen.contains("▾ src") && screen.contains("main.rs")
+    })?;
+    session.send(DOWN)?;
+    session.send(ENTER)?;
+    session.wait_for_screen("file opened from the panel", ACTION_TIMEOUT, |screen| {
+        screen.contains("fn main() {}")
+            && screen.contains("opened src/main.rs")
+            && screen.contains("[main.rs]")
+    })?;
+
+    // Opening returned focus to the editor; the toggle focuses the panel
+    // again, where a new file goes next to the selected one.
+    session.send(F7)?;
+    session.wait_for_screen("project panel focused", ACTION_TIMEOUT, |screen| {
+        screen.contains("project panel focused")
+    })?;
+    session.send(b"n")?;
+    session.wait_for_screen("new file prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("New file:")
+    })?;
+    session.paste("created.txt")?;
+    session.send(ENTER)?;
+    session.wait_for_screen(
+        "file created through the project",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("created src/created.txt") && screen.contains("created.txt"),
+    )?;
+    ensure!(
+        root.join("src/created.txt").is_file(),
+        "the project did not create src/created.txt"
+    );
+
+    session.send(F2)?;
+    session.wait_for_screen("rename prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Rename: created.txt")
+    })?;
+    session.send(CTRL_U)?;
+    session.paste("renamed.txt")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("entry renamed", ACTION_TIMEOUT, |screen| {
+        screen.contains("renamed to src/renamed.txt") && screen.contains("renamed.txt")
+    })?;
+    ensure!(
+        root.join("src/renamed.txt").is_file() && !root.join("src/created.txt").exists(),
+        "the project did not rename the entry"
+    );
+
+    session.send(DELETE)?;
+    session.wait_for_screen("delete confirmation", ACTION_TIMEOUT, |screen| {
+        screen.contains("delete renamed.txt? press Delete again to confirm")
+    })?;
+    session.send(DELETE)?;
+    session.wait_for_screen("entry deleted", ACTION_TIMEOUT, |screen| {
+        screen.contains("deleted renamed.txt") && !screen.contains("renamed.txt [")
+    })?;
+    session.wait_until("entry gone from disk", ACTION_TIMEOUT, |_| {
+        !root.join("src/renamed.txt").exists()
+    })?;
+
+    session.send(ESC)?;
+    session.wait_for_screen("editor focused", ACTION_TIMEOUT, |screen| {
+        screen.contains("editor focused")
+    })?;
+    session.send(F7)?;
+    session.send(F7)?;
+    session.wait_for_screen("project panel hidden", ACTION_TIMEOUT, |screen| {
+        screen.contains("project panel hidden") && !screen.contains("README.md")
+    })?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "project panel exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn outline_panel_lists_symbols_and_jumps_to_them() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let path = temp.path().join("lib.rs");
+    fs::write(&path, "fn alpha() {}\n\nfn beta() {}\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
+    session.wait_ready()?;
+
+    session.send(F9)?;
+    session.wait_for_screen("outline panel shown", ACTION_TIMEOUT, |screen| {
+        // The symbols appear once the buffer is parsed: in the panel, next
+        // to their source lines.
+        screen.contains("outline panel shown")
+            && screen.contains("Outline lib.rs")
+            && screen.matches("fn alpha").count() == 2
+            && screen.matches("fn beta").count() == 2
+    })?;
+    session.send(DOWN)?;
+    session.send(ENTER)?;
+    session.wait_for_screen("jumped to the symbol", ACTION_TIMEOUT, |screen| {
+        screen.contains("jumped to fn beta")
+    })?;
+    // The caret sits on the symbol's name and the editor has focus again.
+    session.paste("x")?;
+    session.wait_for_screen("edit lands at the symbol", ACTION_TIMEOUT, |screen| {
+        screen.contains("fn xbeta() {}") && screen.contains("fn xbeta")
+    })?;
+
+    session.send(F9)?;
+    session.wait_for_screen("outline panel focused", ACTION_TIMEOUT, |screen| {
+        screen.contains("outline panel focused")
+    })?;
+    session.send(F9)?;
+    session.wait_for_screen("outline panel hidden", ACTION_TIMEOUT, |screen| {
+        screen.contains("outline panel hidden") && !screen.contains("Outline lib.rs")
+    })?;
+
+    session.send(CTRL_Q)?;
+    session.wait_for_screen("dirty quit confirmation", ACTION_TIMEOUT, |screen| {
+        screen.contains("unsaved or deleted tab(s)")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "outline panel exit failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 

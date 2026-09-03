@@ -94,7 +94,7 @@ struct App {
     capabilities: Capabilities,  // detected at startup, refined by observed input
     cwd: PathBuf,
     root: Option<PathBuf>,       // the visible worktree root, when a directory was opened
-    workspace: WorkspaceModel,   // pane tree, each pane's tabs, the active pane and tab; reducer with invariants
+    workspace: WorkspaceModel,   // pane tree, tabs, docks, and focus; reducer with invariants
     documents: Documents,        // ItemId -> Document
     overlays: Overlays,          // stack; the top owns focus while it is a prompt or picker
     status: Status,              // one transient message
@@ -119,8 +119,13 @@ whole tree checked: the leaves and the pane map match one to one, no pane
 is empty, tab ids are unique across panes, active indices are valid, and
 every tab has a document. A split is two tabs on one Buffer, each with its
 own Editor; the Buffer is watched once for as long as any tab shows it.
-Docks return with feature 5, the first panel, and extend `WorkspaceModel`
-rather than adding a second model.
+
+`WorkspaceModel` also owns the docks: one per edge (`Left`, `Right`; the
+bottom dock arrives with the first panel that uses it), each with a
+visibility, a width, and the `PanelKind` it shows, and the `Focus`, which
+is the active pane or a visible dock. A dock toggle shows and focuses a
+hidden dock, focuses a visible one, and hides a focused one; showing a tab
+returns focus to the pane. `validate` refuses a focused hidden dock.
 
 ## Events
 
@@ -173,10 +178,14 @@ dispatches them to the feature.
 
 ## Focus and overlays
 
-The focus stack is the active document plus the overlay stack. Key and
-paste input goes to the top owner; a prompt or picker consumes everything,
-a confirmation consumes nothing. Mouse input goes to the document under
-the last frame. An overlay answers a key with:
+The focus stack is the workspace focus (the active document or a dock
+panel) plus the overlay stack. Key and paste input goes to the top owner;
+a prompt or picker consumes everything, a confirmation consumes nothing.
+A focused panel has no window: its keys resolve with the keymap `Lookup`
+in the shared `zec_panel` context plus the panel's own (`zec_project_panel`,
+`zec_outline_panel`) into commands, and unbound keys are ignored. Mouse
+input goes to the pane or dock under the last frame. An overlay answers a
+key with:
 
 ```rust
 enum OverlayOutcome { Consumed, Submit(String), Cancel, Command(Command) }
@@ -207,10 +216,12 @@ it.
 cursor follow, clipping, and snapshot capture happen in one step and cannot
 race a resize:
 
-1. `layout::plan` assigns non-overlapping rects to the panes of the tree
-   with a one-cell divider per split. A split narrower than three cells
-   shows only the branch holding the active pane, so no pane is ever zero
-   cells. Docks will reserve their edges here first.
+1. `layout::plan` reserves the visible docks' edges first, each with a
+   one-cell divider, keeping the editor at least three cells wide (a dock
+   that would not fit stays off that frame), then assigns non-overlapping
+   rects to the panes of the tree with a one-cell divider per split. A
+   split narrower than three cells shows only the branch holding the
+   active pane, so no pane is ever zero cells.
 2. Each visible pane's document sets its Editor's wrap width to the pane
    body width, follows the cursor, clamps the viewport, and reads only
    `[top_row, top_row + height)` from Zed's `DisplaySnapshot`. The
@@ -219,12 +230,15 @@ race a resize:
 3. `EditorWidget` renders each pane. The focused pane's status row shows
    the tab strip and key hints, or the transient message, or the top
    overlay's presentation (a prompt line or a bounded picker list); the
-   other panes' rows show their tab strip.
+   other panes' rows show their tab strip. Each visible dock asks its
+   panel feature for a `view` (title, rows, selection) and renders it with
+   `PanelWidget`, bold-bordered when focused. The terminal cursor is shown
+   only while the editor or a prompt has focus.
 4. The plan and every pane's snapshot are stored as the frame for mouse
    hit testing: a click focuses the pane under the pointer and places the
-   caret there. Dividers move by keyboard only. Everything is projected
-   onto visible cells; the terminal never recomputes folds, wraps, or
-   highlights.
+   caret there, or focuses the dock and selects the row under the pointer.
+   Dividers move by keyboard only. Everything is projected onto visible
+   cells; the terminal never recomputes folds, wraps, or highlights.
 
 ## Feature contract
 
@@ -238,19 +252,28 @@ impl <Name> {
     pub fn <command>(&mut self, ctx: &mut Ctx, cx: &mut AsyncApp);   // one per command
     pub fn update(&mut self, ctx: &mut Ctx, event: <Name>Event, cx: &mut AsyncApp);
     pub fn query_changed(&mut self, ctx: &mut Ctx, query: &str, cx: &mut AsyncApp); // if it owns a picker
+    // a dock panel:
+    pub const KEY_CONTEXT: &str;
+    pub fn execute(&mut self, ctx: &mut Ctx, command: Command, cx: &mut AsyncApp) -> PanelOutcome;
+    pub fn view(&mut self, ctx: &mut Ctx, row_budget: usize, cx: &mut AsyncApp) -> OverlaySnapshot;
+    pub fn click(&mut self, ctx: &mut Ctx, row: usize, cx: &mut AsyncApp);
 }
 
 // src/app/feature.rs
-pub struct Ctx<'a> { services, root, editor, workspace, documents, overlays, status, events }
+pub struct Ctx<'a> { services, root, editor, workspace, documents, overlays, status, events, keymap }
+pub enum PanelOutcome { Consumed, Open(PathBuf), Jump { point, label } }
 pub struct Features { pub <name>: <Name>, ... }
 pub enum FeatureEvent { <Name>(<Name>Event), ... }
 ```
 
 `Ctx` is a feature's only access to the rest of zec; `editor` is the
 active document's hidden window, so a feature can drive Zed's Editor APIs
-(search, selections), and `workspace` and `documents` are read views for
-a feature that records the tree. A feature never
-touches another feature's state; a cross-feature effect is a `Command`.
+(search, selections), `workspace` and `documents` are read views for a
+feature that records the tree or reads the active buffer, and `keymap`
+names keys in messages. A feature never touches another feature's state;
+a cross-feature effect is a `Command`. A panel feature receives the
+`Panel*` commands while its dock has focus and answers with a
+`PanelOutcome`; opening a file or moving the caret stays with the app.
 Work a feature spawns completes as its own event through `events`, tagged
 with the generation that requested it, and `update` drops stale
 generations.
@@ -261,9 +284,10 @@ arms in `app/update.rs` (command, event, and the prompt target or picker
 owner when it has one). A feature fills pickers and prompts but never
 opens documents: an accepted entry carries a `PickerPayload` (a command, a
 path, or a location) that the app acts on.
-A feature that draws its own region adds a `view` and an arm in
-`app/draw.rs`. Removing a feature reverses those. A feature's Zed crate
-dependencies enter `Cargo.toml` together with the feature.
+A dock panel adds a `PanelKind` variant, a dock in `WorkspaceModel`, its
+key context section in `keymap.json`, and its `view` arm in `app/draw.rs`.
+Removing a feature reverses those. A feature's Zed crate dependencies
+enter `Cargo.toml` together with the feature.
 
 ## Terminal boundary
 
@@ -305,6 +329,8 @@ dependencies enter `Cargo.toml` together with the feature.
   every update in debug builds.
 - Contract tests: action names are unique and round-trip, and every zec
   binding in the default keymap resolves to a registered command.
+- Contract tests also check that the panel bindings resolve in the shared
+  and per-panel key contexts.
 - The actual binary runs through a PTY (`tests/e2e.rs`) for lifecycle (raw
   mode restore, signals, resize, first frame), edit and save, tabs and the
   palette, external change handling, and one scenario per feature.

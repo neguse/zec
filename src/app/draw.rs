@@ -1,5 +1,5 @@
-//! One frame: the render plan, one capture per visible pane inside the
-//! draw callback, then widgets.
+//! One frame: the render plan, one view per visible dock, one capture per
+//! visible pane inside the draw callback, then widgets.
 
 use std::collections::BTreeMap;
 
@@ -16,12 +16,12 @@ use super::{
     layout::{self, RenderPlan},
     overlay::Presentation,
     tabs::{self, TabLabel},
-    workspace::{Axis, PaneId},
+    workspace::{Axis, Focus, PaneId, PanelKind},
 };
 use crate::{
     terminal::{
         self, Terminal,
-        render::{EditorWidget, RenderSnapshot},
+        render::{EditorWidget, PanelWidget, RenderSnapshot},
     },
     zed::editor::{self, StatusRow},
 };
@@ -86,7 +86,26 @@ impl App {
         let plan = layout::plan(&self.workspace, area);
         let row_budget = usize::from(area.height.saturating_sub(2)).min(OVERLAY_ROW_LIMIT);
         let active_pane = self.workspace.active_pane();
+        // The terminal cursor belongs to the editor unless a dock has focus
+        // and no prompt is open.
+        let cursor_in_editor = self.workspace.focus() == Focus::Pane || self.overlays.owns_input();
         let mut panes = BTreeMap::new();
+
+        let mut dock_views = Vec::with_capacity(plan.docks.len());
+        for dock in &plan.docks {
+            let panel = self
+                .workspace
+                .dock(dock.position)
+                .map(|dock| dock.panel)
+                .context("planned dock is not in the workspace")?;
+            let budget = PanelWidget::row_budget(dock.area);
+            let (features, mut ctx) = self.feature_ctx();
+            let view = match panel {
+                PanelKind::Project => features.project_panel.view(&mut ctx, budget, cx),
+                PanelKind::Outline => features.outline_panel.view(&mut ctx, budget, cx),
+            };
+            dock_views.push((*dock, view));
+        }
 
         for pane_area in &plan.panes {
             let focused = pane_area.pane == active_pane;
@@ -121,7 +140,10 @@ impl App {
             let widget = EditorWidget::new(&capture.snapshot);
             let cursor = widget.cursor_position(pane_area.area);
             frame.render_widget(widget, pane_area.area);
-            if focused && let Some(cursor) = cursor {
+            if focused
+                && cursor_in_editor
+                && let Some(cursor) = cursor
+            {
                 frame.set_cursor_position(cursor);
             }
             panes.insert(
@@ -131,6 +153,12 @@ impl App {
                     snapshot: capture.snapshot,
                 },
             );
+        }
+
+        let focused_dock = self.workspace.focused_dock().map(|(position, _)| position);
+        for (dock, view) in &dock_views {
+            let widget = PanelWidget::new(view, focused_dock == Some(dock.position));
+            frame.render_widget(widget, dock.area);
         }
 
         let buffer = frame.buffer_mut();

@@ -51,6 +51,10 @@ const DEFAULT_KEYMAP: &str = include_str!("keymap.json");
 /// The key context in which prompts and pickers resolve keys.
 pub const OVERLAY_CONTEXT: &str = "zec_overlay";
 
+/// The key context every focused dock panel resolves keys in, together
+/// with its own.
+pub const PANEL_CONTEXT: &str = "zec_panel";
+
 /// What the loop does after an update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Flow {
@@ -331,5 +335,48 @@ mod tests {
             }
         }
         assert!(zec_bindings > 0, "the default keymap binds no zec command");
+    }
+
+    #[test]
+    fn panel_keys_resolve_in_the_shared_and_own_contexts() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        crate::zed::runtime::application().run(move |cx| {
+            crate::zed::runtime::init(cx);
+            let lookup = zed::keymap::apply(DEFAULT_KEYMAP, Vec::new(), cx).expect("keymap");
+            let resolve = |key: &str, context: &str| {
+                lookup
+                    .resolve(&gpui::Keystroke::parse(key).expect("keystroke"), context)
+                    .into_iter()
+                    .find_map(Command::from_action_name)
+            };
+            let outline = format!(
+                "{PANEL_CONTEXT} {}",
+                crate::features::outline_panel::KEY_CONTEXT
+            );
+            let project = format!(
+                "{PANEL_CONTEXT} {}",
+                crate::features::project_panel::KEY_CONTEXT
+            );
+            let results = (
+                resolve("down", &outline),
+                resolve("enter", &outline),
+                resolve("n", &outline),
+                resolve("n", &project),
+                resolve("shift-n", &project),
+                resolve("escape", &project),
+            );
+            let _ = sender.send(results);
+            cx.spawn(async move |cx| {
+                let _ = cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+        let results = receiver.recv().expect("results");
+        assert_eq!(results.0, Some(Command::PanelSelectNext));
+        assert_eq!(results.1, Some(Command::PanelActivate));
+        assert_eq!(results.2, None);
+        assert_eq!(results.3, Some(Command::PanelNewFile));
+        assert_eq!(results.4, Some(Command::PanelNewDirectory));
+        assert_eq!(results.5, Some(Command::FocusEditor));
     }
 }

@@ -4,24 +4,31 @@
 //! of zec only through [`Ctx`]. This file and the dispatch arms in
 //! `update.rs` are the only places that name a feature.
 
-use std::path::Path;
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use async_channel::Sender;
 use editor::Editor;
 use gpui::WindowHandle;
 
 use super::{
-    documents::Documents, event::Event, overlay::Overlays, status::Status,
+    command::Command, documents::Documents, event::Event, overlay::Overlays, status::Status,
     workspace::WorkspaceModel,
 };
 use crate::{
     features::{
         buffer_search::{BufferSearch, BufferSearchEvent},
+        outline_panel::OutlinePanel,
+        project_panel::{ProjectPanel, ProjectPanelEvent},
         project_search::{ProjectSearch, ProjectSearchEvent},
         quick_open::{QuickOpen, QuickOpenEvent},
         sessions::Sessions,
     },
-    zed::services::Services,
+    terminal::keys,
+    zed::{keymap::Lookup, services::Services},
 };
 
 /// What a feature may touch while it runs.
@@ -39,6 +46,35 @@ pub struct Ctx<'a> {
     pub status: &'a mut Status,
     /// For completions of work a feature spawned.
     pub events: &'a Sender<Event>,
+    /// The live keymap, for naming keys in messages.
+    pub keymap: &'a Rc<RefCell<Lookup>>,
+}
+
+impl Ctx<'_> {
+    /// The key currently bound to `command`, as the status row shows it.
+    pub fn key_hint(&self, command: Command) -> String {
+        key_hint(&self.keymap.borrow(), command)
+    }
+}
+
+/// The key bound to `command`, or its label in backticks when unbound.
+pub fn key_hint(keymap: &Lookup, command: Command) -> String {
+    keymap
+        .keystroke_for(command.action_name())
+        .map(|keystroke| keys::display_keystroke(&keystroke))
+        .unwrap_or_else(|| format!("`{}`", command.label()))
+}
+
+/// What a panel command asks the app to do afterwards.
+pub enum PanelOutcome {
+    Consumed,
+    /// Open a file in the active pane.
+    Open(PathBuf),
+    /// Move the caret of the active document and return focus to it.
+    Jump {
+        point: text::Point,
+        label: String,
+    },
 }
 
 /// One field per feature.
@@ -48,6 +84,8 @@ pub struct Features {
     pub project_search: ProjectSearch,
     pub buffer_search: BufferSearch,
     pub sessions: Sessions,
+    pub project_panel: ProjectPanel,
+    pub outline_panel: OutlinePanel,
 }
 
 /// One variant per feature, wrapping that feature's own event.
@@ -56,4 +94,5 @@ pub enum FeatureEvent {
     QuickOpen(QuickOpenEvent),
     ProjectSearch(ProjectSearchEvent),
     BufferSearch(BufferSearchEvent),
+    ProjectPanel(ProjectPanelEvent),
 }

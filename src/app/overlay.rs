@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use project::ProjectEntryId;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
@@ -22,6 +23,18 @@ pub enum PromptTarget {
     Find,
     Replace,
     GoToLine,
+    /// A name for a new entry inside `directory`.
+    PanelNewFile {
+        directory: PathBuf,
+    },
+    PanelNewDirectory {
+        directory: PathBuf,
+    },
+    /// A new name for `entry`, which lives in `directory`.
+    PanelRename {
+        entry: ProjectEntryId,
+        directory: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

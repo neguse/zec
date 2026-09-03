@@ -9,20 +9,21 @@ use ratatui::layout::Position;
 use workspace::searchable::Direction as SearchDirection;
 
 use super::{
-    App, Flow, OVERLAY_CONTEXT,
+    App, Flow, OVERLAY_CONTEXT, PANEL_CONTEXT,
     command::Command,
     documents::Document,
     event::{ConfigEvent, DocumentEvent, Event, Input},
-    feature::{Ctx, FeatureEvent, Features},
+    feature::{self, Ctx, FeatureEvent, Features, PanelOutcome},
     overlay::{Overlay, PickerOwner, PickerPayload, PromptTarget},
-    workspace::{Axis, Direction, ItemId, PaneId},
+    workspace::{Axis, Direction, DockChange, DockPosition, Focus, ItemId, PaneId, PanelKind},
 };
 use crate::{
+    features::{outline_panel, project_panel},
     terminal::{
         self, clipboard, keys,
         picker::{PickerEntry, PickerList},
         prompt::{LinePrompt, PromptAction},
-        render::EditorWidget,
+        render::{EditorWidget, PanelWidget},
     },
     zed,
 };
@@ -103,6 +104,11 @@ impl App {
                 features.buffer_search.update(&mut ctx, event, cx);
                 Flow::Continue
             }
+            Event::Feature(FeatureEvent::ProjectPanel(event)) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.project_panel.update(&mut ctx, event, cx);
+                Flow::Continue
+            }
         };
         self.check_invariants()?;
         let (features, mut ctx) = self.feature_ctx();
@@ -131,6 +137,9 @@ impl App {
                         query.handle_paste(&text);
                         self.picker_query_changed(cx);
                     }
+                    return Ok(Flow::Continue);
+                }
+                if self.workspace.focused_dock().is_some() {
                     return Ok(Flow::Continue);
                 }
                 zed::editor::paste(&self.active_document().editor, &text, cx)?;
@@ -187,6 +196,21 @@ impl App {
         let Some(keystroke) = keys::to_gpui_keystroke(key) else {
             return Ok(Flow::Continue);
         };
+        // A focused panel has no window: its keys resolve in the shared
+        // panel context plus its own, and unbound keys are ignored.
+        if let Some((_, panel)) = self.workspace.focused_dock() {
+            let context = format!("{PANEL_CONTEXT} {}", panel_context(panel));
+            let command = self
+                .keymap
+                .borrow()
+                .resolve(&keystroke, &context)
+                .into_iter()
+                .find_map(Command::from_action_name);
+            return match command {
+                Some(command) => self.execute(command, cx).await,
+                None => Ok(Flow::Continue),
+            };
+        }
         zed::editor::dispatch_keystroke(&self.active_document().editor, keystroke, cx)?;
         let commands = std::mem::take(&mut *self.pending_commands.borrow_mut());
         if commands.is_empty() {
@@ -309,6 +333,17 @@ impl App {
                 features.buffer_search.go_to(&mut ctx, &text, cx);
                 Ok(Flow::Continue)
             }
+            OverlayOutcome::Submit(
+                target @ (PromptTarget::PanelNewFile { .. }
+                | PromptTarget::PanelNewDirectory { .. }
+                | PromptTarget::PanelRename { .. }),
+                text,
+                _,
+            ) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.project_panel.submit(&mut ctx, &target, &text, cx);
+                Ok(Flow::Continue)
+            }
             OverlayOutcome::OpenPath(path) => {
                 self.overlays.pop();
                 match self.open_document_at(path, cx).await {
@@ -380,6 +415,19 @@ impl App {
         let Some(frame) = self.frame.as_ref() else {
             return Ok(());
         };
+        if let Some(dock) = frame.plan.dock_at(position) {
+            let row = PanelWidget::row_at(dock.area, position);
+            if self.workspace.focus() != Focus::Dock(dock.position) {
+                self.workspace
+                    .focus_dock(dock.position)
+                    .context("focus the clicked dock")?;
+            }
+            if let Some(row) = row {
+                self.panel_click(dock.position, row, cx);
+            }
+            self.overlays.dismiss_confirmation();
+            return Ok(());
+        }
         let Some(pane) = frame.plan.pane_at(position) else {
             return Ok(());
         };
@@ -458,6 +506,23 @@ impl App {
             Command::MoveTabDown => self.move_tab(Direction::Down)?,
             Command::GrowPane => self.resize_pane(50),
             Command::ShrinkPane => self.resize_pane(-50),
+            Command::ToggleProjectPanel => self.toggle_panel(PanelKind::Project, cx)?,
+            Command::ToggleOutlinePanel => self.toggle_panel(PanelKind::Outline, cx)?,
+            Command::FocusEditor => {
+                self.workspace.focus_editor();
+                self.status.set("editor focused");
+            }
+            Command::PanelSelectNext
+            | Command::PanelSelectPrevious
+            | Command::PanelExpand
+            | Command::PanelCollapse
+            | Command::PanelActivate
+            | Command::PanelNewFile
+            | Command::PanelNewDirectory
+            | Command::PanelRename
+            | Command::PanelDelete
+            | Command::PanelRevealActive
+            | Command::PanelToggleIgnored => self.panel_command(command, confirmed, cx).await?,
             Command::NextItem | Command::PreviousItem => {
                 if self
                     .workspace
@@ -769,6 +834,85 @@ impl App {
         }
     }
 
+    // ---- docks ----
+
+    fn toggle_panel(&mut self, panel: PanelKind, cx: &mut AsyncApp) -> Result<()> {
+        let position = self
+            .workspace
+            .dock_for_panel(panel)
+            .context("panel has no dock")?;
+        let change = self
+            .workspace
+            .toggle_dock(position)
+            .context("toggle the dock")?;
+        self.overlays.clear();
+        if change == DockChange::Shown && panel == PanelKind::Project {
+            let (features, mut ctx) = self.feature_ctx();
+            features.project_panel.shown(&mut ctx, cx);
+        }
+        let name = match panel {
+            PanelKind::Project => "project panel",
+            PanelKind::Outline => "outline panel",
+        };
+        self.status.set(format!(
+            "{name} {}",
+            match change {
+                DockChange::Shown => "shown",
+                DockChange::Focused => "focused",
+                DockChange::Hidden => "hidden",
+            }
+        ));
+        Ok(())
+    }
+
+    /// Runs a panel command on the focused panel and acts on its outcome.
+    async fn panel_command(
+        &mut self,
+        command: Command,
+        confirmed: bool,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let Some((_, panel)) = self.workspace.focused_dock() else {
+            self.status.set("no panel focused");
+            return Ok(());
+        };
+        let outcome = {
+            let (features, mut ctx) = self.feature_ctx();
+            match panel {
+                PanelKind::Project => features
+                    .project_panel
+                    .execute(&mut ctx, command, confirmed, cx),
+                PanelKind::Outline => features.outline_panel.execute(&mut ctx, command, cx),
+            }
+        };
+        match outcome {
+            PanelOutcome::Consumed => {}
+            PanelOutcome::Open(path) => match self.open_document_at(path, cx).await {
+                Ok(message) => self.status.set(message),
+                Err(error) => self.status.set(format!("open failed: {error:#}")),
+            },
+            PanelOutcome::Jump { point, label } => {
+                let document = self.active_document_mut();
+                document.follow.manual_vertical_scroll = false;
+                zed::editor::place_caret_at_point(&document.editor, point, cx)?;
+                self.workspace.focus_editor();
+                self.status.set(format!("jumped to {label}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn panel_click(&mut self, position: DockPosition, row: usize, cx: &mut AsyncApp) {
+        let Some(panel) = self.workspace.dock(position).map(|dock| dock.panel) else {
+            return;
+        };
+        let (features, mut ctx) = self.feature_ctx();
+        match panel {
+            PanelKind::Project => features.project_panel.click(&mut ctx, row, cx),
+            PanelKind::Outline => features.outline_panel.click(&mut ctx, row, cx),
+        }
+    }
+
     fn push_palette(&mut self, cx: &mut AsyncApp) {
         let has_file = self.active_document().state(cx).path.is_some();
         let entries = Command::ALL
@@ -832,7 +976,7 @@ impl App {
     // ---- helpers ----
 
     /// Splits the tree into the features and what they may touch.
-    fn feature_ctx(&mut self) -> (&mut Features, Ctx<'_>) {
+    pub(super) fn feature_ctx(&mut self) -> (&mut Features, Ctx<'_>) {
         let Self {
             features,
             services,
@@ -842,6 +986,7 @@ impl App {
             events,
             documents,
             workspace,
+            keymap,
             ..
         } = self;
         let editor = documents
@@ -859,6 +1004,7 @@ impl App {
                 overlays,
                 status,
                 events,
+                keymap: &*keymap,
             },
         )
     }
@@ -926,11 +1072,15 @@ impl App {
 
     /// The key currently bound to `command`, as the status row shows it.
     pub(super) fn key_hint(&self, command: Command) -> String {
-        self.keymap
-            .borrow()
-            .keystroke_for(command.action_name())
-            .map(|keystroke| keys::display_keystroke(&keystroke))
-            .unwrap_or_else(|| format!("`{}`", command.label()))
+        feature::key_hint(&self.keymap.borrow(), command)
+    }
+}
+
+/// The key context a panel adds to [`PANEL_CONTEXT`].
+fn panel_context(panel: PanelKind) -> &'static str {
+    match panel {
+        PanelKind::Project => project_panel::KEY_CONTEXT,
+        PanelKind::Outline => outline_panel::KEY_CONTEXT,
     }
 }
 
