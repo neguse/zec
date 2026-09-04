@@ -308,6 +308,9 @@ one edge share the dock and take turns), its key context section in
 Zed entities with processes, such as terminals, drops them in `shutdown`.
 Removing a feature reverses those. A feature's Zed crate dependencies
 enter `Cargo.toml` together with the feature.
+A feature that must register with GPUI before any window exists (the edit
+prediction provider registry) exposes `init(cx)`, called once from `run`
+right after `runtime::init`.
 
 ## Terminal boundary
 

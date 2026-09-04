@@ -55,6 +55,8 @@ which are also listed in the command palette:
 | `Ctrl-Shift-B` / `Ctrl-Alt-B` | Run a task from `.zed/tasks.json` / rerun the last one |
 | `Ctrl-C` / `Ctrl-X` | Copy / Cut through OSC 52 |
 | `Ctrl-,` / `Ctrl-Alt-,` | Open Settings / Open Keymap |
+| `Ctrl-Alt-T` | Select Theme, applied live and saved to settings |
+| `Alt-\` / `Alt-L` / `Alt-K` / `Alt-J` | Show / accept an edit prediction, accept its next word / line |
 | `F4` | Show Terminal Capabilities |
 | `Ctrl-Q` | Quit |
 

@@ -74,6 +74,8 @@ pub enum PickerOwner {
     Language,
     /// Fixed entries from the task inventory; `Index` payloads run a task.
     Tasks,
+    /// Fixed entries from the theme registry; `Index` payloads apply one.
+    Theme,
 }
 
 #[derive(Debug)]

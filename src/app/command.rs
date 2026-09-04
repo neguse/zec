@@ -124,6 +124,7 @@ commands! {
     Cut => "Cut",
     OpenSettings => "Open Settings File",
     OpenKeymap => "Open Keymap File",
+    SelectTheme => "Select Theme",
     ShowTerminalCapabilities => "Show Terminal Capabilities",
     Quit => "Quit",
 }

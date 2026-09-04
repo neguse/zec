@@ -85,6 +85,9 @@ const CTRL_U: &[u8] = b"\x15";
 const ALT_F: &[u8] = b"\x1bf";
 const CTRL_F: &[u8] = b"\x06";
 const CTRL_G: &[u8] = b"\x07";
+const CTRL_ALT_T: &[u8] = b"\x1b[116;7u";
+const ALT_BACKSLASH: &[u8] = b"\x1b\\";
+const ALT_L: &[u8] = b"\x1bl";
 // CSI u forms: a legacy Ctrl-H is indistinguishable from Backspace.
 const CTRL_H: &[u8] = b"\x1b[104;5u";
 const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
@@ -972,6 +975,210 @@ fn tasks_run_in_the_terminal_panel() -> Result<()> {
 }
 
 #[test]
+fn theme_picker_applies_and_persists_a_theme() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let path = temp.path().join("theme.txt");
+    fs::write(&path, "theme sample\n")?;
+    let data_dir = tempfile::tempdir().context("create isolated data directory")?;
+    let data_path = data_dir.path().to_path_buf();
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session =
+        PtySession::spawn_with_data_dir(pair, &[path.as_os_str()], &data_path, Some(data_dir))?;
+    session.wait_ready()?;
+    session.wait_for_screen("file text", ACTION_TIMEOUT, |screen| {
+        screen.contains("theme sample")
+    })?;
+    let before = session.cell_background(0, 3);
+
+    session.send(CTRL_ALT_T)?;
+    session.wait_for_screen("theme picker", ACTION_TIMEOUT, |screen| {
+        screen.contains("Themes:") && screen.contains("One Dark") && screen.contains("(dark)")
+    })?;
+    session.paste("One Dark")?;
+    session.wait_for_screen("theme filtered", ACTION_TIMEOUT, |screen| {
+        screen.contains("› One Dark")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("theme applied", ACTION_TIMEOUT, |screen| {
+        screen.contains("theme: One Dark")
+    })?;
+    let after = session.cell_background(0, 3);
+    ensure!(
+        before.is_some() && before != after,
+        "editor background did not change: {before:?} -> {after:?}"
+    );
+
+    // Zed writes the settings file from a background task.
+    let settings = data_path.join("config").join("settings.json");
+    let deadline = Instant::now() + ACTION_TIMEOUT;
+    loop {
+        let text = fs::read_to_string(&settings).unwrap_or_default();
+        if text.contains("One Dark") {
+            break;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "settings.json was not updated with the theme: {text}"
+        );
+        thread::sleep(EVENT_POLL);
+    }
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "theme picker exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn edit_predictions_show_and_accept_through_zed() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let path = temp.path().join("predict.txt");
+    fs::write(&path, "fn main\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn_with_env(
+        pair,
+        &[path.as_os_str()],
+        &[("ZEC_EDIT_PREDICTION_FIXTURE", "PREDICTED_")],
+    )?;
+    session.wait_ready()?;
+
+    session.send(ALT_BACKSLASH)?;
+    session.wait_for_screen("prediction shown as ghost text", ACTION_TIMEOUT, |screen| {
+        screen.contains("PREDICTED_fn main")
+    })?;
+    ensure!(
+        fs::read_to_string(&path)? == "fn main\n",
+        "a shown prediction must not change the file"
+    );
+
+    session.send(ALT_L)?;
+    session.send(CTRL_S)?;
+    session.wait_for_screen("prediction accepted and saved", ACTION_TIMEOUT, |screen| {
+        screen.contains("saved  |  zec")
+    })?;
+    ensure!(
+        fs::read_to_string(&path)? == "PREDICTED_fn main\n",
+        "accepting the prediction did not reach disk"
+    );
+
+    session.send(CTRL_Z)?;
+    session.wait_for_screen("undo clears the saved status", ACTION_TIMEOUT, |screen| {
+        !screen.contains("saved  |  zec")
+    })?;
+    session.send(CTRL_S)?;
+    session.wait_for_screen("undo saved", ACTION_TIMEOUT, |screen| {
+        screen.contains("saved  |  zec")
+    })?;
+    ensure!(
+        fs::read_to_string(&path)? == "fn main\n",
+        "undoing the accepted prediction did not reach disk"
+    );
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "edit prediction exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn large_file_opens_navigates_edits_and_saves() -> Result<()> {
+    use std::fmt::Write as _;
+    const TOTAL_LINES: usize = 100_000;
+    const LONG_LINE: usize = 50_000;
+    const LONG_LINE_BYTES: usize = 64 * 1024;
+    const LONG_PREFIX: &str = "E2E_LARGE_FILE_LONG_LINE";
+    const BOTTOM: &str = "E2E_LARGE_FILE_BOTTOM";
+
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let path = temp.path().join("large.txt");
+    let mut content = String::with_capacity(TOTAL_LINES * 12 + LONG_LINE_BYTES);
+    for line in 1..=TOTAL_LINES {
+        if line == LONG_LINE {
+            content.push_str(LONG_PREFIX);
+            content.extend(std::iter::repeat_n(
+                'x',
+                LONG_LINE_BYTES - LONG_PREFIX.len(),
+            ));
+        } else if line == TOTAL_LINES {
+            content.push_str(BOTTOM);
+        } else {
+            write!(content, "line {line}")?;
+        }
+        content.push('\n');
+    }
+    fs::write(&path, &content)?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let started = Instant::now();
+    let mut session = PtySession::spawn(pair, &[path.as_os_str()])?;
+    session.wait_ready()?;
+    session.wait_for_screen("first frame of the large file", ACTION_TIMEOUT, |screen| {
+        screen.contains("line 1") && screen.contains("large.txt")
+    })?;
+    let first_frame = started.elapsed();
+    ensure!(
+        first_frame <= Duration::from_secs(15),
+        "first frame took {first_frame:?}"
+    );
+
+    session.send(CTRL_G)?;
+    session.wait_for_screen("go to line prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Go to line:")
+    })?;
+    session.paste(&LONG_LINE.to_string())?;
+    session.send(ENTER)?;
+    session.wait_for_screen("the 64 KiB line is visible", ACTION_TIMEOUT, |screen| {
+        screen.contains(LONG_PREFIX)
+    })?;
+
+    session.send(CTRL_G)?;
+    session.wait_for_screen("go to line prompt again", ACTION_TIMEOUT, |screen| {
+        screen.contains("Go to line:")
+    })?;
+    session.paste(&TOTAL_LINES.to_string())?;
+    session.send(ENTER)?;
+    session.wait_for_screen("the last line is visible", ACTION_TIMEOUT, |screen| {
+        screen.contains(BOTTOM) && !screen.contains("Go to line:")
+    })?;
+    session.paste("EDIT-")?;
+    session.wait_for_screen("edit at the bottom", ACTION_TIMEOUT, |screen| {
+        screen.contains("EDIT-E2E_LARGE_FILE_BOTTOM")
+    })?;
+    session.send(CTRL_S)?;
+    session.wait_for_screen("large file saved", ACTION_TIMEOUT, |screen| {
+        screen.contains("saved  |  zec")
+    })?;
+    let expected = content.replace(BOTTOM, "EDIT-E2E_LARGE_FILE_BOTTOM");
+    ensure!(fs::read_to_string(&path)? == expected, "saved bytes differ");
+
+    #[cfg(target_os = "linux")]
+    {
+        let pid = session.pid().context("zec pid")?;
+        let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+        let hwm_kib = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|rest| rest.trim().split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .context("VmHWM missing from /proc status")?;
+        ensure!(
+            hwm_kib <= 1024 * 1024,
+            "peak resident memory {hwm_kib} KiB exceeds 1 GiB"
+        );
+    }
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "large file exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
 fn tabs_open_switch_close_and_the_palette_runs_commands() -> Result<()> {
     let temp = tempfile::tempdir().context("create PTY fixture")?;
     let first = temp.path().join("first.txt");
@@ -1381,6 +1588,23 @@ impl PtySession {
         data_dir: &Path,
         owned: Option<tempfile::TempDir>,
     ) -> Result<Self> {
+        Self::spawn_inner(pair, arguments, data_dir, owned, &[])
+    }
+
+    /// Extra environment for the zec process, on top of the isolation.
+    fn spawn_with_env(pair: PtyPair, arguments: &[&OsStr], env: &[(&str, &str)]) -> Result<Self> {
+        let data_dir = tempfile::tempdir().context("create isolated data directory")?;
+        let path = data_dir.path().to_path_buf();
+        Self::spawn_inner(pair, arguments, &path, Some(data_dir), env)
+    }
+
+    fn spawn_inner(
+        pair: PtyPair,
+        arguments: &[&OsStr],
+        data_dir: &Path,
+        owned: Option<tempfile::TempDir>,
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
         let PtyPair { slave, master } = pair;
         let mut reader = master.try_clone_reader().context("clone PTY reader")?;
         let writer = master.take_writer().context("take PTY writer")?;
@@ -1437,6 +1661,9 @@ impl PtySession {
         command.env("XDG_DATA_HOME", data_dir.join("data"));
         let log_path = data_dir.join("zec.log");
         command.env("ZEC_LOG", &log_path);
+        for (key, value) in env {
+            command.env(key, value);
+        }
         let child = slave
             .spawn_command(command)
             .context("spawn the actual zec binary")?;
@@ -1500,6 +1727,18 @@ impl PtySession {
             );
         }
         Ok(())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.child.as_ref().and_then(|child| child.process_id())
+    }
+
+    /// The background color of one screen cell, for theme checks.
+    fn cell_background(&self, row: u16, column: u16) -> Option<vt100::Color> {
+        self.parser
+            .screen()
+            .cell(row, column)
+            .map(|cell| cell.bgcolor())
     }
 
     fn ensure_running(&mut self, description: &str) -> Result<()> {

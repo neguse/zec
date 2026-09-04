@@ -30,6 +30,7 @@ use crate::{
         sessions::Sessions,
         tasks::{Tasks, TasksEvent},
         terminal_panel::{TerminalPanel, TerminalPanelEvent},
+        theme_picker::ThemePicker,
     },
     terminal::keys,
     zed::{keymap::Lookup, services::Services},
@@ -94,6 +95,7 @@ pub struct Features {
     pub git_panel: GitPanel,
     pub terminal_panel: TerminalPanel,
     pub tasks: Tasks,
+    pub theme_picker: ThemePicker,
 }
 
 /// One variant per feature, wrapping that feature's own event.

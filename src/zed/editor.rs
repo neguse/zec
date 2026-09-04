@@ -463,6 +463,22 @@ fn synchronize_wrap(
         .update(cx, |map, cx| map.set_wrap_width(wrap_width, cx));
 }
 
+/// Re-reads the theme into the Editor's cached style. Zed's element does
+/// this on every paint, and hidden windows never paint.
+pub fn refresh_style(editor: &WindowHandle<Editor>, cx: &mut AsyncApp) -> Result<()> {
+    editor.update(cx, |editor, window, cx| {
+        let theme = cx.theme().clone();
+        let mut style = editor.style(cx).clone();
+        style.background = theme.colors().editor_background;
+        style.border = theme.colors().border;
+        style.local_player = theme.players().local();
+        style.text.color = theme.colors().editor_foreground;
+        style.syntax = theme.syntax().clone();
+        style.status = theme.status().clone();
+        editor.set_style(style, window, cx);
+    })
+}
+
 fn line_styles(
     display: &DisplaySnapshot,
     editor_style: &EditorStyle,

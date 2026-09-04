@@ -453,6 +453,11 @@ impl App {
                 self.open_location(path, row, column, cx).await?;
                 Ok(Flow::Continue)
             }
+            OverlayOutcome::Pick(PickerOwner::Theme, _, index) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.theme_picker.pick(&mut ctx, index, cx);
+                Ok(Flow::Continue)
+            }
             OverlayOutcome::Pick(PickerOwner::Tasks, _, index) => {
                 let terminal = {
                     let (features, mut ctx) = self.feature_ctx();
@@ -665,6 +670,10 @@ impl App {
                     Some(number) => self.status.set(format!("terminal {number}")),
                     None => self.status.set("no other terminal"),
                 }
+            }
+            Command::SelectTheme => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.theme_picker.open(&mut ctx, cx);
             }
             Command::RunTask => {
                 let (features, mut ctx) = self.feature_ctx();
@@ -1213,7 +1222,8 @@ impl App {
             PickerOwner::Palette
             | PickerOwner::ProjectSearch
             | PickerOwner::Language
-            | PickerOwner::Tasks => list.filter(query.text()),
+            | PickerOwner::Tasks
+            | PickerOwner::Theme => list.filter(query.text()),
             PickerOwner::QuickOpen => {
                 let query = query.text().to_owned();
                 let (features, mut ctx) = self.feature_ctx();

@@ -44,6 +44,9 @@ pub fn init(cx: &mut App) {
         release_channel::ReleaseChannel::Stable,
         cx,
     );
+    // Zed's app database, under the data directory; the edit prediction
+    // store and other Zed services keep their state there.
+    cx.set_global(db::AppDatabase::new());
     gpui_tokio::init(cx);
     settings::init(cx);
     theme_settings::init(theme::LoadThemes::All(Box::new(assets::Assets)), cx);

@@ -173,6 +173,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai_onboarding"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "client",
+ "cloud_api_types",
+ "component",
+ "gpui",
+ "language_model",
+ "serde",
+ "smallvec",
+ "telemetry",
+ "ui",
+ "zed_actions",
+]
+
+[[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
 source = "git+https://github.com/zed-industries/alacritty?rev=4c129667ce56611becdc82de6e28218c80e2e88f#4c129667ce56611becdc82de6e28218c80e2e88f"
@@ -277,6 +294,24 @@ dependencies = [
  "anstyle",
  "once_cell_polyfill",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "anthropic"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "futures",
+ "http_client",
+ "language_model_core",
+ "log",
+ "serde",
+ "serde_json",
+ "strum 0.27.2",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1470,6 +1505,7 @@ dependencies = [
  "serde_json",
  "strum 0.27.2",
  "uuid",
+ "zeta_prompt",
 ]
 
 [[package]]
@@ -1571,6 +1607,17 @@ checksum = "1b60b5124979fccd9addd89d8b97a1d6eebb4950694520c75ddd722535ea443f"
 dependencies = [
  "nix 0.31.3",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "command_palette_hooks"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "collections",
+ "derive_more",
+ "gpui",
+ "workspace",
 ]
 
 [[package]]
@@ -1727,6 +1774,77 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
 dependencies = [
  "unicode-segmentation",
+]
+
+[[package]]
+name = "copilot"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "collections",
+ "command_palette_hooks",
+ "copilot_chat",
+ "edit_prediction_types",
+ "fs",
+ "futures",
+ "gpui",
+ "icons",
+ "language",
+ "log",
+ "lsp",
+ "node_runtime",
+ "parking_lot",
+ "paths",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "sum_tree",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "copilot_chat"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anthropic",
+ "anyhow",
+ "collections",
+ "credentials_provider",
+ "futures",
+ "gpui",
+ "http_client",
+ "language_model",
+ "log",
+ "serde",
+ "serde_json",
+ "util",
+]
+
+[[package]]
+name = "copilot_ui"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "copilot",
+ "copilot_chat",
+ "gpui",
+ "language",
+ "log",
+ "lsp",
+ "menu",
+ "project",
+ "release_channel",
+ "serde_json",
+ "settings",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -2584,6 +2702,107 @@ name = "ec4rs"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b31a881d38439026e3d5dd938ab20328d36e23caca8fd5981c42e4b677f5842"
+
+[[package]]
+name = "edit_prediction"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "ai_onboarding",
+ "anyhow",
+ "buffer_diff",
+ "client",
+ "clock",
+ "cloud_api_client",
+ "cloud_api_types",
+ "cloud_llm_client",
+ "collections",
+ "copilot",
+ "copilot_ui",
+ "credentials_provider",
+ "db",
+ "edit_prediction_context",
+ "edit_prediction_metrics",
+ "edit_prediction_types",
+ "feature_flags",
+ "fs",
+ "futures",
+ "git",
+ "gpui",
+ "heapless",
+ "indoc",
+ "itertools 0.14.0",
+ "language",
+ "language_model",
+ "log",
+ "lsp",
+ "menu",
+ "open_ai",
+ "postage",
+ "pretty_assertions",
+ "project",
+ "pulldown-cmark 0.13.4",
+ "rand 0.9.5",
+ "regex",
+ "release_channel",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "strum 0.27.2",
+ "telemetry",
+ "telemetry_events",
+ "text",
+ "thiserror 2.0.20",
+ "time",
+ "toml 0.8.23",
+ "ui",
+ "util",
+ "uuid",
+ "workspace",
+ "worktree",
+ "zed_actions",
+ "zed_credentials_provider",
+ "zeta_prompt",
+ "zstd",
+]
+
+[[package]]
+name = "edit_prediction_context"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "clock",
+ "collections",
+ "futures",
+ "gpui",
+ "language",
+ "log",
+ "lsp",
+ "parking_lot",
+ "project",
+ "serde",
+ "smallvec",
+ "telemetry",
+ "text",
+ "tree-sitter",
+ "util",
+ "zeta_prompt",
+]
+
+[[package]]
+name = "edit_prediction_metrics"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "imara-diff",
+ "serde",
+ "serde_json",
+ "similar",
+ "tree-sitter",
+ "zeta_prompt",
+]
 
 [[package]]
 name = "edit_prediction_types"
@@ -6685,6 +6904,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "open_ai"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed.git?rev=cef06d351bec10d0fb6176018ce8624e97baeb40#cef06d351bec10d0fb6176018ce8624e97baeb40"
+dependencies = [
+ "anyhow",
+ "collections",
+ "futures",
+ "http_client",
+ "language_model_core",
+ "log",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "strum 0.27.2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9497,6 +9734,12 @@ checksum = "95890f873bec569a0362c235787f3aca6e1e887302ba4840839bcc6459c42da6"
 dependencies = [
  "quote",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simplecss"
@@ -12988,7 +13231,11 @@ dependencies = [
  "async-channel 2.5.0",
  "client",
  "collections",
+ "copilot",
  "crossterm",
+ "db",
+ "edit_prediction",
+ "edit_prediction_types",
  "editor",
  "fs",
  "futures",
@@ -12997,6 +13244,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "gpui_tokio",
+ "icons",
  "language",
  "languages",
  "log",

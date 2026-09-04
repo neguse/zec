@@ -253,6 +253,7 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
 
     runtime::application().run(move |cx| {
         runtime::init(cx);
+        crate::features::edit_prediction::init(cx);
         let pending_commands = Rc::new(RefCell::new(Vec::new()));
         Command::intercept(pending_commands.clone(), cx);
         let keymap = match zed::keymap::apply(DEFAULT_KEYMAP, Vec::new(), cx) {

@@ -94,6 +94,16 @@ inventory resolved against the root and the active buffer, run through
 deferred, decided with rows 8 to 12; the previous diff view, terminal
 search, and task-log scenarios stay in history.
 
+Returned in part: 8 as `features/theme_picker` (Zed's `ThemeRegistry`,
+applied live through `GlobalTheme` and saved through Zed's settings file;
+icon themes, the extension picker, and the update CLI are decided with the
+remaining rows). 11 as `features/edit_prediction` (Zed's providers on the
+hidden Editors, chosen from Zed's language settings; ghost text and
+acceptance are the Editor's own; Codestral, the agent panel, and the
+inline assistant are decided with the remaining rows). 9 as the large-file
+PTY scenario only: no special casing exists, the normal Buffer and Editor
+path carries a 100,000-line file with a 64 KiB line.
+
 ## Behavior carried into the core
 
 Non-obvious constraints from the previous tree that the core keeps:
