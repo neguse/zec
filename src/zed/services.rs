@@ -17,8 +17,9 @@ use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Entity};
 use language::{Buffer, LanguageNotFound, LanguageRegistry};
 use project::{
-    LocalProjectFlags, Project, ProjectEntryId, ProjectPath, Worktree,
+    Inventory, LocalProjectFlags, Project, ProjectEntryId, ProjectPath, Worktree,
     buffer_store::BufferStore,
+    git_store::{GitStoreEvent, Repository},
     lsp_store::{FormatTrigger, LspFormatTarget},
     trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent},
     worktree_store::WorktreeStore,
@@ -134,6 +135,36 @@ impl Services {
             })
         }));
         subscriptions
+    }
+
+    /// The repository Zed considers active, when a worktree is inside one.
+    pub fn active_repository(&self, cx: &AsyncApp) -> Option<Entity<Repository>> {
+        self.project.read_with(cx, |project, cx| {
+            project.git_store().read(cx).active_repository()
+        })
+    }
+
+    /// Forwards every change of the project's repositories as a redraw for
+    /// as long as the subscription lives.
+    pub fn watch_git_store<T>(&self, sender: Sender<T>, cx: &mut AsyncApp) -> gpui::Subscription
+    where
+        T: From<super::Event> + Send + 'static,
+    {
+        let git_store = self
+            .project
+            .read_with(cx, |project, _| project.git_store().clone());
+        cx.update(|cx| {
+            cx.subscribe(&git_store, move |_, _event: &GitStoreEvent, _| {
+                let _ = sender.try_send(super::Event::Redraw.into());
+            })
+        })
+    }
+
+    /// Zed's task inventory: discovery and resolution of tasks.
+    pub fn task_inventory(&self, cx: &AsyncApp) -> Option<Entity<Inventory>> {
+        self.project.read_with(cx, |project, cx| {
+            project.task_store().read(cx).task_inventory().cloned()
+        })
     }
 
     /// The visible root, when Zed has marked it restricted. Zed decides

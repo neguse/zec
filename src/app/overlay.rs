@@ -41,6 +41,8 @@ pub enum PromptTarget {
         entry: ProjectEntryId,
         directory: PathBuf,
     },
+    /// The message for a commit of the staged changes.
+    GitCommit,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,6 +72,8 @@ pub enum PickerOwner {
     /// Fixed entries from a language server answer; `Index` payloads go
     /// back to the feature.
     Language,
+    /// Fixed entries from the task inventory; `Index` payloads run a task.
+    Tasks,
 }
 
 #[derive(Debug)]

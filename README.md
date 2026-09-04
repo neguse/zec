@@ -50,6 +50,9 @@ which are also listed in the command palette:
 | `Ctrl-Alt-=` / `Ctrl-Alt--` | Grow / Shrink Pane |
 | `F7` / `Ctrl-Shift-E` | Toggle the project panel (left dock) |
 | `F9` / `Ctrl-Shift-O` | Toggle the outline panel (right dock) |
+| `Ctrl-Shift-G` | Toggle the git panel (left dock): Space stages or unstages, `a` / `u` all, `c` commits |
+| `F3` / `` Ctrl-` `` | Toggle the terminal panel (bottom dock); `` Ctrl-~ `` opens another shell |
+| `Ctrl-Shift-B` / `Ctrl-Alt-B` | Run a task from `.zed/tasks.json` / rerun the last one |
 | `Ctrl-C` / `Ctrl-X` | Copy / Cut through OSC 52 |
 | `Ctrl-,` / `Ctrl-Alt-,` | Open Settings / Open Keymap |
 | `F4` | Show Terminal Capabilities |

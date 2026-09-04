@@ -82,7 +82,17 @@ the app unless `settings.json` names a binary. The tests use
 `src/bin/fixture_lsp.rs`, a trimmed transplant, bound as rust-analyzer;
 the failure matrix, `lsp_failures`, MultiBuffer result tabs, and the
 rename preview stay in history. `ZEC_LOG=path` now captures Zed's log
-records.
+records. 7 minus the debugger: `features/git_panel` (Zed's active
+repository snapshot sectioned on every frame; stage, unstage, and commit
+through `Repository`; commit uses the repository's own identity and fails
+rather than prompting for a password), the bottom dock in the core with
+`features/terminal_panel` (Zed's `terminal` entities; keys the keymap does
+not claim go to the shell as Zed's escape sequences or bytes, the grid is
+synced and projected every frame), and `features/tasks` (Zed's task
+inventory resolved against the root and the active buffer, run through
+`Project::create_terminal_task` into the terminal panel). The debugger is
+deferred, decided with rows 8 to 12; the previous diff view, terminal
+search, and task-log scenarios stay in history.
 
 ## Behavior carried into the core
 

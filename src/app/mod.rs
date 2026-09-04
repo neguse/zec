@@ -365,6 +365,11 @@ mod tests {
                 "{PANEL_CONTEXT} {}",
                 crate::features::project_panel::KEY_CONTEXT
             );
+            let git = format!(
+                "{PANEL_CONTEXT} {}",
+                crate::features::git_panel::KEY_CONTEXT
+            );
+            let terminal = crate::features::terminal_panel::KEY_CONTEXT;
             let results = (
                 resolve("down", &outline),
                 resolve("enter", &outline),
@@ -372,6 +377,10 @@ mod tests {
                 resolve("n", &project),
                 resolve("shift-n", &project),
                 resolve("escape", &project),
+                resolve("space", &git),
+                resolve("down", terminal),
+                resolve("f3", terminal),
+                resolve("ctrl-~", terminal),
             );
             let _ = sender.send(results);
             cx.spawn(async move |cx| {
@@ -386,5 +395,10 @@ mod tests {
         assert_eq!(results.3, Some(Command::PanelNewFile));
         assert_eq!(results.4, Some(Command::PanelNewDirectory));
         assert_eq!(results.5, Some(Command::FocusEditor));
+        assert_eq!(results.6, Some(Command::GitToggleStaged));
+        // The shell keeps the shared panel keys.
+        assert_eq!(results.7, None);
+        assert_eq!(results.8, Some(Command::ToggleTerminalPanel));
+        assert_eq!(results.9, Some(Command::NewTerminal));
     }
 }

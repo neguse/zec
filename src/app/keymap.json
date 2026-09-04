@@ -43,6 +43,12 @@
       "ctrl-shift-e": "zec::ToggleProjectPanel",
       "f9": "zec::ToggleOutlinePanel",
       "ctrl-shift-o": "zec::ToggleOutlinePanel",
+      "ctrl-shift-g": "zec::ToggleGitPanel",
+      "f3": "zec::ToggleTerminalPanel",
+      "ctrl-`": "zec::ToggleTerminalPanel",
+      "ctrl-~": "zec::NewTerminal",
+      "ctrl-shift-b": "zec::RunTask",
+      "ctrl-alt-b": "zec::RerunTask",
       "ctrl-c": "zec::Copy",
       "ctrl-x": "zec::Cut",
       "ctrl-,": "zec::OpenSettings",
@@ -77,6 +83,12 @@
       "ctrl-shift-e": "zec::ToggleProjectPanel",
       "f9": "zec::ToggleOutlinePanel",
       "ctrl-shift-o": "zec::ToggleOutlinePanel",
+      "ctrl-shift-g": "zec::ToggleGitPanel",
+      "f3": "zec::ToggleTerminalPanel",
+      "ctrl-`": "zec::ToggleTerminalPanel",
+      "ctrl-~": "zec::NewTerminal",
+      "ctrl-shift-b": "zec::RunTask",
+      "ctrl-alt-b": "zec::RerunTask",
       "ctrl-q": "zec::Quit"
     }
   },
@@ -89,6 +101,37 @@
       "delete": "zec::PanelDelete",
       "r": "zec::PanelRevealActive",
       "i": "zec::PanelToggleIgnored"
+    }
+  },
+  {
+    "context": "zec_git_panel",
+    "bindings": {
+      "space": "zec::GitToggleStaged",
+      "a": "zec::GitStageAll",
+      "u": "zec::GitUnstageAll",
+      "c": "zec::GitCommit"
+    }
+  },
+  {
+    "context": "zec_terminal_panel",
+    "bindings": {
+      "f1": "zec::CommandPalette",
+      "ctrl-shift-p": "zec::CommandPalette",
+      "ctrl-p": "zec::QuickOpen",
+      "ctrl-q": "zec::Quit",
+      "f3": "zec::ToggleTerminalPanel",
+      "ctrl-`": "zec::ToggleTerminalPanel",
+      "ctrl-~": "zec::NewTerminal",
+      "ctrl-pageup": "zec::PreviousTerminal",
+      "ctrl-pagedown": "zec::NextTerminal",
+      "ctrl-alt-up": "zec::FocusEditor",
+      "f7": "zec::ToggleProjectPanel",
+      "ctrl-shift-e": "zec::ToggleProjectPanel",
+      "f9": "zec::ToggleOutlinePanel",
+      "ctrl-shift-o": "zec::ToggleOutlinePanel",
+      "ctrl-shift-g": "zec::ToggleGitPanel",
+      "ctrl-shift-b": "zec::RunTask",
+      "ctrl-alt-b": "zec::RerunTask"
     }
   }
 ]

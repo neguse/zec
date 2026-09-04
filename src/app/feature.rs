@@ -21,12 +21,15 @@ use super::{
 use crate::{
     features::{
         buffer_search::{BufferSearch, BufferSearchEvent},
+        git_panel::{GitPanel, GitPanelEvent},
         language::{Language, LanguageEvent},
         outline_panel::OutlinePanel,
         project_panel::{ProjectPanel, ProjectPanelEvent},
         project_search::{ProjectSearch, ProjectSearchEvent},
         quick_open::{QuickOpen, QuickOpenEvent},
         sessions::Sessions,
+        tasks::{Tasks, TasksEvent},
+        terminal_panel::{TerminalPanel, TerminalPanelEvent},
     },
     terminal::keys,
     zed::{keymap::Lookup, services::Services},
@@ -88,6 +91,9 @@ pub struct Features {
     pub project_panel: ProjectPanel,
     pub outline_panel: OutlinePanel,
     pub language: Language,
+    pub git_panel: GitPanel,
+    pub terminal_panel: TerminalPanel,
+    pub tasks: Tasks,
 }
 
 /// One variant per feature, wrapping that feature's own event.
@@ -98,4 +104,7 @@ pub enum FeatureEvent {
     BufferSearch(BufferSearchEvent),
     ProjectPanel(ProjectPanelEvent),
     Language(LanguageEvent),
+    GitPanel(GitPanelEvent),
+    TerminalPanel(TerminalPanelEvent),
+    Tasks(TasksEvent),
 }

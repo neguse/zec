@@ -185,9 +185,12 @@ panel) plus the overlay stack. Key and paste input goes to the top owner;
 a prompt or picker consumes everything, a confirmation consumes nothing.
 A focused panel has no window: its keys resolve with the keymap `Lookup`
 in the shared `zec_panel` context plus the panel's own (`zec_project_panel`,
-`zec_outline_panel`) into commands, and unbound keys are ignored. Mouse
-input goes to the pane or dock under the last frame. An overlay answers a
-key with:
+`zec_outline_panel`, `zec_git_panel`) into commands, and unbound keys are
+ignored. The terminal panel resolves in `zec_terminal_panel` alone, so the
+shared arrows, Enter, and Esc reach the shell: a key its context does not
+bind is forwarded to Zed's terminal as input, and paste and scroll follow.
+Mouse input goes to the pane or dock under the last frame. An overlay
+answers a key with:
 
 ```rust
 enum OverlayOutcome { Consumed, Submit(String), Cancel, Command(Command) }
@@ -222,12 +225,13 @@ it.
 cursor follow, clipping, and snapshot capture happen in one step and cannot
 race a resize:
 
-1. `layout::plan` reserves the visible docks' edges first, each with a
-   one-cell divider, keeping the editor at least three cells wide (a dock
-   that would not fit stays off that frame), then assigns non-overlapping
-   rects to the panes of the tree with a one-cell divider per split. A
-   split narrower than three cells shows only the branch holding the
-   active pane, so no pane is ever zero cells.
+1. `layout::plan` reserves the visible docks' edges first, the bottom
+   dock across the full width and then the sides, each with a one-cell
+   divider, keeping the editor at least three cells along each axis (a
+   dock that would not fit stays off that frame), then assigns
+   non-overlapping rects to the panes of the tree with a one-cell divider
+   per split. A split narrower than three cells shows only the branch
+   holding the active pane, so no pane is ever zero cells.
 2. Each visible pane's document sets its Editor's wrap width to the pane
    body width, follows the cursor, clamps the viewport, and reads only
    `[top_row, top_row + height)` from Zed's `DisplaySnapshot`. The
@@ -237,9 +241,11 @@ race a resize:
    the tab strip and key hints, or the transient message, or the top
    overlay's presentation (a prompt line or a bounded picker list); the
    other panes' rows show their tab strip. Each visible dock asks its
-   panel feature for a `view` (title, rows, selection) and renders it with
-   `PanelWidget`, bold-bordered when focused. The terminal cursor is shown
-   only while the editor or a prompt has focus.
+   panel feature for a `view`: rows (title, rows, selection) rendered with
+   `PanelWidget`, or for the terminal panel the synced grid of Zed's
+   terminal, resized to the dock body first and rendered with
+   `TerminalPanelWidget`; both are bold-bordered when focused. The hardware
+   cursor follows the editor, a prompt, or the focused terminal.
 4. The plan and every pane's snapshot are stored as the frame for mouse
    hit testing: a click focuses the pane under the pointer and places the
    caret there, or focuses the dock and selects the row under the pointer.
@@ -264,6 +270,9 @@ impl <Name> {
     pub fn execute(&mut self, ctx: &mut Ctx, command: Command, cx: &mut AsyncApp) -> PanelOutcome;
     pub fn view(&mut self, ctx: &mut Ctx, row_budget: usize, cx: &mut AsyncApp) -> OverlaySnapshot;
     pub fn click(&mut self, ctx: &mut Ctx, row: usize, cx: &mut AsyncApp);
+    // a panel that draws cells instead of rows (the terminal):
+    pub fn view(&mut self, ctx: &mut Ctx, area: Rect, cx: &mut AsyncApp) -> Result<TerminalPanelSnapshot>;
+    pub fn key(&mut self, keystroke: &Keystroke, cx: &mut AsyncApp) -> bool; // raw input the keymap left
 }
 
 // src/app/feature.rs
@@ -293,8 +302,10 @@ opens documents: an accepted entry carries a `PickerPayload` (a command, a
 path, a location, or an index the feature resolves) that the app acts on,
 and a feature's `update` may answer with an outcome the app performs, such
 as opening a location.
-A dock panel adds a `PanelKind` variant, a dock in `WorkspaceModel`, its
-key context section in `keymap.json`, and its `view` arm in `app/draw.rs`.
+A dock panel adds a `PanelKind` variant naming its dock edge (panels on
+one edge share the dock and take turns), its key context section in
+`keymap.json`, and its `view` arm in `app/draw.rs`. A feature that owns
+Zed entities with processes, such as terminals, drops them in `shutdown`.
 Removing a feature reverses those. A feature's Zed crate dependencies
 enter `Cargo.toml` together with the feature.
 

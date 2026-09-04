@@ -73,6 +73,12 @@ const ALT_SLASH: &[u8] = b"\x1b/";
 const CTRL_PERIOD: &[u8] = b"\x1b[46;5u";
 const CTRL_SHIFT_T: &[u8] = b"\x1b[116;6u";
 const CTRL_PAGE_UP: &[u8] = b"\x1b[5;5~";
+const F3: &[u8] = b"\x1bOR";
+const CTRL_TILDE: &[u8] = b"\x1b[126;5u";
+const CTRL_SHIFT_G: &[u8] = b"\x1b[103;6u";
+const CTRL_SHIFT_B: &[u8] = b"\x1b[98;6u";
+const CTRL_ALT_B: &[u8] = b"\x1b[98;7u";
+const SPACE: &[u8] = b" ";
 const END: &[u8] = b"\x1b[F";
 const DELETE: &[u8] = b"\x1b[3~";
 const CTRL_U: &[u8] = b"\x15";
@@ -768,6 +774,200 @@ fn outline_panel_lists_symbols_and_jumps_to_them() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "outline panel exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_panel_runs_shells_in_the_bottom_dock() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("terminal-repo");
+    fs::create_dir_all(&root)?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+
+    // The first toggle starts a shell in the root; keys go to it.
+    session.send(F3)?;
+    session.wait_for_screen("terminal 1 shown", ACTION_TIMEOUT, |screen| {
+        screen.contains("Terminal 1") && screen.contains("terminal 1  |")
+    })?;
+    session.send(b"printf 'TERM_%s_OK\\n' E2E\r")?;
+    session.wait_for_screen("shell ran the command", ACTION_TIMEOUT, |screen| {
+        screen.contains("TERM_E2E_OK")
+    })?;
+
+    session.send(CTRL_TILDE)?;
+    session.wait_for_screen("terminal 2 opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("Terminal 2") && screen.contains("terminal 2  |")
+    })?;
+    session.send(CTRL_PAGE_UP)?;
+    session.wait_for_screen("switched back to terminal 1", ACTION_TIMEOUT, |screen| {
+        screen.contains("Terminal 1") && screen.contains("TERM_E2E_OK")
+    })?;
+
+    // The toggle hides a focused dock and shows it again.
+    session.send(F3)?;
+    session.wait_for_screen("terminal panel hidden", ACTION_TIMEOUT, |screen| {
+        screen.contains("terminal panel hidden") && !screen.contains("TERM_E2E_OK")
+    })?;
+    session.send(F3)?;
+    session.wait_for_screen("terminal panel shown", ACTION_TIMEOUT, |screen| {
+        screen.contains("terminal panel shown") && screen.contains("TERM_E2E_OK")
+    })?;
+
+    // Exiting a shell closes its terminal; the last one hides the dock.
+    session.send(b"exit\r")?;
+    session.wait_for_screen("terminal 1 closed", ACTION_TIMEOUT, |screen| {
+        screen.contains("Terminal 2") && !screen.contains("TERM_E2E_OK")
+    })?;
+    session.send(b"exit\r")?;
+    session.wait_for_screen("last terminal closed", ACTION_TIMEOUT, |screen| {
+        screen.contains("terminal closed") && !screen.contains("Terminal 2")
+    })?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "terminal panel exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[cfg(unix)]
+#[test]
+fn git_panel_stages_and_commits_through_zed() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("git-repo");
+    fs::create_dir_all(&root)?;
+    let git = |arguments: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&root)
+            .output()
+            .context("run git")?;
+        ensure!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    git(&["init", "-q"])?;
+    git(&["config", "user.email", "e2e@example.com"])?;
+    git(&["config", "user.name", "E2E"])?;
+    git(&["config", "commit.gpgsign", "false"])?;
+    fs::write(root.join("tracked.txt"), "one\n")?;
+    git(&["add", "tracked.txt"])?;
+    git(&["commit", "-q", "-m", "init"])?;
+    fs::write(root.join("tracked.txt"), "one\ntwo\n")?;
+    fs::write(root.join("untracked.txt"), "new\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+
+    session.send(CTRL_SHIFT_G)?;
+    session.wait_for_screen("git panel shows the status", ACTION_TIMEOUT, |screen| {
+        screen.contains("git panel shown")
+            && screen.contains("Git · git-repo ·")
+            && screen.contains("Changes")
+            && screen.contains("M tracked.txt")
+            && screen.contains("Untracked Files")
+            && screen.contains("? untracked.txt")
+    })?;
+    session.send(SPACE)?;
+    session.wait_for_screen("entry staged", ACTION_TIMEOUT, |screen| {
+        screen.contains("staged tracked.txt") && screen.contains("Staged Changes")
+    })?;
+    session.wait_until("index updated", ACTION_TIMEOUT, |_| {
+        git(&["diff", "--cached", "--name-only"]).is_ok_and(|staged| staged == "tracked.txt")
+    })?;
+
+    session.send(b"c")?;
+    session.wait_for_screen("commit prompt", ACTION_TIMEOUT, |screen| {
+        screen.contains("Commit message:")
+    })?;
+    session.paste("e2e commit")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("committed", ACTION_TIMEOUT, |screen| {
+        screen.contains("committed: e2e commit") && !screen.contains("Staged Changes")
+    })?;
+    ensure!(
+        git(&["log", "-1", "--format=%s"])? == "e2e commit",
+        "the commit did not reach the repository"
+    );
+
+    session.send(ESC)?;
+    session.wait_for_screen("editor focused", ACTION_TIMEOUT, |screen| {
+        screen.contains("editor focused")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "git panel exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[cfg(unix)]
+#[test]
+fn tasks_run_in_the_terminal_panel() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("task-repo");
+    fs::create_dir_all(root.join(".zed"))?;
+    fs::write(root.join("notes.txt"), "notes\n")?;
+    let marker = root.join("marker.txt");
+    fs::write(
+        root.join(".zed/tasks.json"),
+        format!(
+            r#"[{{"label": "E2E Task", "command": "sh", "args": ["-c", "printf done > {}"]}}]"#,
+            marker.display()
+        ),
+    )?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+
+    // Repository tasks are repository-controlled: Zed reads them once the
+    // root is trusted.
+    session.send(CTRL_SHIFT_T)?;
+    session.wait_for_screen("root trusted", ACTION_TIMEOUT, |screen| {
+        screen.contains("trusted task-repo")
+    })?;
+    let mut listed = false;
+    for _ in 0..20 {
+        session.send(CTRL_SHIFT_B)?;
+        session.wait_for_screen("task picker or none", ACTION_TIMEOUT, |screen| {
+            screen.contains("Tasks:") || screen.contains("no tasks;")
+        })?;
+        if session.screen().contains("E2E Task") {
+            listed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    ensure!(listed, "the task from .zed/tasks.json was never listed");
+    session.send(ENTER)?;
+    session.wait_for_screen("task ran in the dock", ACTION_TIMEOUT, |screen| {
+        screen.contains("task E2E Task finished") && screen.contains("Terminal 1 · E2E Task")
+    })?;
+    ensure!(
+        fs::read_to_string(&marker)? == "done",
+        "the task did not write its marker"
+    );
+
+    fs::remove_file(&marker)?;
+    session.send(CTRL_ALT_B)?;
+    session.wait_for_screen("task rerun in a new terminal", ACTION_TIMEOUT, |screen| {
+        screen.contains("Terminal 2 · E2E Task")
+    })?;
+    session.wait_until("marker rewritten", ACTION_TIMEOUT, |_| marker.is_file())?;
+
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "tasks exit failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 

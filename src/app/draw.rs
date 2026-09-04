@@ -1,5 +1,6 @@
-//! One frame: the render plan, one view per visible dock, one capture per
-//! visible pane inside the draw callback, then widgets.
+//! One frame: the render plan, one view per visible dock (rows from a
+//! panel, or the synced grid of a terminal), one capture per visible pane
+//! inside the draw callback, then widgets.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +22,10 @@ use super::{
 use crate::{
     terminal::{
         self, Terminal,
-        render::{EditorWidget, PanelWidget, RenderSnapshot},
+        render::{
+            EditorWidget, OverlayRow, OverlaySnapshot, PanelWidget, RenderSnapshot,
+            TerminalPanelSnapshot, TerminalPanelWidget,
+        },
     },
     zed::editor::{self, StatusRow},
 };
@@ -39,6 +43,12 @@ const HINTS: &[(Command, &str)] = &[
 
 /// Rows a picker may use above the status row.
 const OVERLAY_ROW_LIMIT: usize = 12;
+
+/// What a dock draws this frame.
+enum DockView {
+    Rows(OverlaySnapshot),
+    Terminal(TerminalPanelSnapshot),
+}
 
 /// What one pane showed in the last frame.
 pub struct PaneFrame {
@@ -101,8 +111,29 @@ impl App {
             let budget = PanelWidget::row_budget(dock.area);
             let (features, mut ctx) = self.feature_ctx();
             let view = match panel {
-                PanelKind::Project => features.project_panel.view(&mut ctx, budget, cx),
-                PanelKind::Outline => features.outline_panel.view(&mut ctx, budget, cx),
+                PanelKind::Project => {
+                    DockView::Rows(features.project_panel.view(&mut ctx, budget, cx))
+                }
+                PanelKind::Outline => {
+                    DockView::Rows(features.outline_panel.view(&mut ctx, budget, cx))
+                }
+                PanelKind::Git => DockView::Rows(features.git_panel.view(&mut ctx, budget, cx)),
+                PanelKind::Terminal if features.terminal_panel.is_empty() => {
+                    DockView::Rows(OverlaySnapshot {
+                        title: " Terminal ".to_owned(),
+                        rows: vec![OverlayRow {
+                            text: format!(
+                                "no terminal; {} opens one",
+                                ctx.key_hint(Command::NewTerminal)
+                            ),
+                            enabled: false,
+                        }],
+                        selected: None,
+                    })
+                }
+                PanelKind::Terminal => {
+                    DockView::Terminal(features.terminal_panel.view(&mut ctx, dock.area, cx)?)
+                }
             };
             dock_views.push((*dock, view));
         }
@@ -157,8 +188,23 @@ impl App {
 
         let focused_dock = self.workspace.focused_dock().map(|(position, _)| position);
         for (dock, view) in &dock_views {
-            let widget = PanelWidget::new(view, focused_dock == Some(dock.position));
-            frame.render_widget(widget, dock.area);
+            let focused = focused_dock == Some(dock.position);
+            match view {
+                DockView::Rows(snapshot) => {
+                    frame.render_widget(PanelWidget::new(snapshot, focused), dock.area);
+                }
+                DockView::Terminal(snapshot) => {
+                    let widget = TerminalPanelWidget::new(snapshot, focused);
+                    let cursor = widget.cursor_position(dock.area);
+                    frame.render_widget(widget, dock.area);
+                    if focused
+                        && !cursor_in_editor
+                        && let Some(cursor) = cursor
+                    {
+                        frame.set_cursor_position(cursor);
+                    }
+                }
+            }
         }
 
         let buffer = frame.buffer_mut();

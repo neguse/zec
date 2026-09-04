@@ -3,6 +3,8 @@
 
 use ratatui::layout::{Position, Rect};
 
+#[cfg(test)]
+use super::workspace::PanelKind;
 use super::workspace::{Axis, Direction, DockPosition, LayoutNode, PaneId, WorkspaceModel};
 
 /// The fewest cells a dock leaves the editor along its axis.
@@ -98,32 +100,50 @@ fn columns_overlap(left: Rect, right: Rect) -> bool {
 }
 
 /// Assigns `area` to the docks and the pane tree. Visible docks take their
-/// edges first, each with a one-cell divider, and a dock that would leave
-/// the editor fewer than [`MIN_EDITOR_EXTENT`] cells stays off this frame.
-/// A split needs three cells along its axis (one per child plus the
-/// divider); a narrower split shows only the branch holding the active
-/// pane, so no pane is ever zero cells wide.
+/// edges first, the bottom dock across the full width and then the sides,
+/// each with a one-cell divider; a dock that would leave the editor fewer
+/// than [`MIN_EDITOR_EXTENT`] cells stays off this frame. A split needs
+/// three cells along its axis (one per child plus the divider); a narrower
+/// split shows only the branch holding the active pane, so no pane is ever
+/// zero cells wide.
 pub fn plan(workspace: &WorkspaceModel, area: Rect) -> RenderPlan {
     let mut plan = RenderPlan::default();
     let mut editor = area;
-    for (position, dock) in workspace.docks().filter(|(_, dock)| dock.visible) {
+    for position in [
+        DockPosition::Bottom,
+        DockPosition::Left,
+        DockPosition::Right,
+    ] {
+        let Some(dock) = workspace.dock(position).filter(|dock| dock.visible) else {
+            continue;
+        };
         let size = dock.size.max(1);
-        if editor.width < size + 1 + MIN_EDITOR_EXTENT {
+        let extent = match position {
+            DockPosition::Bottom => editor.height,
+            DockPosition::Left | DockPosition::Right => editor.width,
+        };
+        if extent < size + 1 + MIN_EDITOR_EXTENT {
             continue;
         }
-        let (dock_area, divider) = match position {
+        let (dock_area, divider, axis) = match position {
+            DockPosition::Bottom => {
+                let dock_area = Rect::new(editor.x, editor.bottom() - size, editor.width, size);
+                let divider = Rect::new(editor.x, editor.bottom() - size - 1, editor.width, 1);
+                editor.height -= size + 1;
+                (dock_area, divider, Axis::Vertical)
+            }
             DockPosition::Left => {
                 let dock_area = Rect::new(editor.x, editor.y, size, editor.height);
                 let divider = Rect::new(editor.x + size, editor.y, 1, editor.height);
                 editor.x += size + 1;
                 editor.width -= size + 1;
-                (dock_area, divider)
+                (dock_area, divider, Axis::Horizontal)
             }
             DockPosition::Right => {
                 let dock_area = Rect::new(editor.right() - size, editor.y, size, editor.height);
                 let divider = Rect::new(editor.right() - size - 1, editor.y, 1, editor.height);
                 editor.width -= size + 1;
-                (dock_area, divider)
+                (dock_area, divider, Axis::Horizontal)
             }
         };
         plan.docks.push(DockArea {
@@ -131,7 +151,7 @@ pub fn plan(workspace: &WorkspaceModel, area: Rect) -> RenderPlan {
             area: dock_area,
         });
         plan.dividers.push(Divider {
-            axis: Axis::Horizontal,
+            axis,
             area: divider,
         });
     }
@@ -224,10 +244,34 @@ mod tests {
     }
 
     #[test]
+    fn the_bottom_dock_spans_the_width_below_the_side_docks() {
+        let mut workspace = WorkspaceModel::new(ItemId(1));
+        workspace.toggle_panel(PanelKind::Terminal).unwrap();
+        workspace.toggle_panel(PanelKind::Project).unwrap();
+        let rendered = plan(&workspace, Rect::new(0, 0, 100, 30));
+        assert_eq!(rendered.docks[0].area, Rect::new(0, 18, 100, 12));
+        assert_eq!(rendered.docks[1].area, Rect::new(0, 0, 32, 17));
+        assert_eq!(rendered.dividers[0].area, Rect::new(0, 17, 100, 1));
+        assert_eq!(rendered.dividers[0].axis, Axis::Vertical);
+        assert_eq!(rendered.area_of(PaneId(1)), Some(Rect::new(33, 0, 67, 17)));
+        assert_eq!(
+            rendered
+                .dock_at(Position::new(50, 20))
+                .map(|dock| dock.position),
+            Some(DockPosition::Bottom)
+        );
+
+        // Too short for the bottom dock: it stays off, the side dock shows.
+        let rendered = plan(&workspace, Rect::new(0, 0, 100, 10));
+        assert_eq!(rendered.docks.len(), 1);
+        assert_eq!(rendered.docks[0].position, DockPosition::Left);
+    }
+
+    #[test]
     fn docks_take_their_edges_first_and_yield_when_the_editor_would_vanish() {
         let mut workspace = WorkspaceModel::new(ItemId(1));
-        workspace.toggle_dock(DockPosition::Left).unwrap();
-        workspace.toggle_dock(DockPosition::Right).unwrap();
+        workspace.toggle_panel(PanelKind::Project).unwrap();
+        workspace.toggle_panel(PanelKind::Outline).unwrap();
         let rendered = plan(&workspace, Rect::new(0, 0, 100, 10));
         assert_eq!(
             rendered

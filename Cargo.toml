@@ -34,6 +34,7 @@ util = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec1
 workspace = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 fuzzy_nucleo = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 futures = "0.3"
+git = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 gpui_tokio = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
@@ -53,11 +54,13 @@ serde_json = "1"
 settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 snippet = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 sha2 = "0.10"
+task = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 text = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 theme_settings = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 unicode-width = "0.2"
 watch = { git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
+zed_terminal = { package = "terminal", git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 zed_fs = { package = "fs", git = "https://github.com/zed-industries/zed.git", rev = "cef06d351bec10d0fb6176018ce8624e97baeb40" }
 
 [target.'cfg(unix)'.dependencies]

@@ -19,8 +19,10 @@ use super::{
 };
 use crate::{
     features::{
+        git_panel,
         language::{LanguageOutcome, LocationKind},
         outline_panel, project_panel,
+        terminal_panel::{self, TerminalOutcome},
     },
     terminal::{
         self, clipboard, keys,
@@ -48,7 +50,7 @@ enum OverlayOutcome {
         column: u32,
     },
     /// An `Index` entry of a feature-owned picker.
-    Pick(&'static str, usize),
+    Pick(PickerOwner, &'static str, usize),
 }
 
 impl App {
@@ -125,6 +127,31 @@ impl App {
                 }
                 Flow::Continue
             }
+            Event::Feature(FeatureEvent::GitPanel(event)) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.git_panel.update(&mut ctx, event);
+                Flow::Continue
+            }
+            Event::Feature(FeatureEvent::TerminalPanel(event)) => {
+                if let TerminalOutcome::Emptied = self.features.terminal_panel.update(event) {
+                    let showing = self
+                        .workspace
+                        .dock(DockPosition::Bottom)
+                        .is_some_and(|dock| dock.visible && dock.panel == PanelKind::Terminal);
+                    if showing {
+                        self.workspace
+                            .hide_dock(DockPosition::Bottom)
+                            .context("hide the emptied terminal dock")?;
+                    }
+                    self.status.set("terminal closed");
+                }
+                Flow::Continue
+            }
+            Event::Feature(FeatureEvent::Tasks(event)) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.tasks.update(&mut ctx, event);
+                Flow::Continue
+            }
             Event::WorktreeRestricted(path) => {
                 self.status.set(format!(
                     "{} is restricted; press {} to trust it and start language servers",
@@ -150,6 +177,7 @@ impl App {
     pub(super) fn shutdown(&mut self, cx: &mut AsyncApp) {
         let (features, mut ctx) = self.feature_ctx();
         features.sessions.finish(&mut ctx, cx);
+        self.features.terminal_panel.close_all();
         self.documents.close_all(cx);
     }
 
@@ -170,7 +198,10 @@ impl App {
                     }
                     return Ok(Flow::Continue);
                 }
-                if self.workspace.focused_dock().is_some() {
+                if let Some((_, panel)) = self.workspace.focused_dock() {
+                    if panel == PanelKind::Terminal {
+                        self.features.terminal_panel.paste(&text, cx);
+                    }
                     return Ok(Flow::Continue);
                 }
                 zed::editor::paste(&self.active_document().editor, &text, cx)?;
@@ -184,6 +215,10 @@ impl App {
             }
             Input::Scroll(direction) => {
                 if self.overlays.owns_input() {
+                    return Ok(Flow::Continue);
+                }
+                if let Some((_, PanelKind::Terminal)) = self.workspace.focused_dock() {
+                    self.features.terminal_panel.scroll(direction, cx);
                     return Ok(Flow::Continue);
                 }
                 let Some(pane) = self
@@ -227,10 +262,11 @@ impl App {
         let Some(keystroke) = keys::to_gpui_keystroke(key) else {
             return Ok(Flow::Continue);
         };
-        // A focused panel has no window: its keys resolve in the shared
-        // panel context plus its own, and unbound keys are ignored.
+        // A focused panel has no window: its keys resolve in its key
+        // context into commands. Unbound keys are ignored, except in the
+        // terminal, whose shell gets them as input.
         if let Some((_, panel)) = self.workspace.focused_dock() {
-            let context = format!("{PANEL_CONTEXT} {}", panel_context(panel));
+            let context = key_context(panel);
             let command = self
                 .keymap
                 .borrow()
@@ -239,7 +275,15 @@ impl App {
                 .find_map(Command::from_action_name);
             return match command {
                 Some(command) => self.execute(command, cx).await,
-                None => Ok(Flow::Continue),
+                None => {
+                    if panel == PanelKind::Terminal
+                        && self.features.terminal_panel.key(&keystroke, cx)
+                    {
+                        self.overlays.dismiss_confirmation();
+                        self.status.clear();
+                    }
+                    Ok(Flow::Continue)
+                }
             };
         }
         zed::editor::dispatch_keystroke(&self.active_document().editor, keystroke, cx)?;
@@ -307,7 +351,10 @@ impl App {
                 OverlayOutcome::Consumed
             }
             Some(Overlay::Picker {
-                title, query, list, ..
+                title,
+                query,
+                list,
+                owner,
             }) => match query.handle_key(&key) {
                 PromptAction::Changed => OverlayOutcome::QueryChanged,
                 PromptAction::Next => {
@@ -326,7 +373,9 @@ impl App {
                             PickerPayload::Location { path, row, column } => {
                                 OverlayOutcome::OpenLocation { path, row, column }
                             }
-                            PickerPayload::Index(index) => OverlayOutcome::Pick(title, index),
+                            PickerPayload::Index(index) => {
+                                OverlayOutcome::Pick(*owner, title, index)
+                            }
                         },
                         None => OverlayOutcome::Consumed,
                     }
@@ -404,9 +453,24 @@ impl App {
                 self.open_location(path, row, column, cx).await?;
                 Ok(Flow::Continue)
             }
-            OverlayOutcome::Pick(title, index) => {
+            OverlayOutcome::Pick(PickerOwner::Tasks, _, index) => {
+                let terminal = {
+                    let (features, mut ctx) = self.feature_ctx();
+                    features.tasks.pick(&mut ctx, index, cx).await
+                };
+                if let Some(terminal) = terminal {
+                    self.show_task_terminal(terminal, cx)?;
+                }
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Pick(_, title, index) => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.language.pick(&mut ctx, title, index, cx);
+                Ok(Flow::Continue)
+            }
+            OverlayOutcome::Submit(PromptTarget::GitCommit, text, _) => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.git_panel.submit_commit(&mut ctx, &text, cx);
                 Ok(Flow::Continue)
             }
             OverlayOutcome::Submit(PromptTarget::Rename, text, _) => {
@@ -589,6 +653,36 @@ impl App {
             Command::ShrinkPane => self.resize_pane(-50),
             Command::ToggleProjectPanel => self.toggle_panel(PanelKind::Project, cx)?,
             Command::ToggleOutlinePanel => self.toggle_panel(PanelKind::Outline, cx)?,
+            Command::ToggleGitPanel => self.toggle_panel(PanelKind::Git, cx)?,
+            Command::ToggleTerminalPanel => self.toggle_terminal(cx).await?,
+            Command::NewTerminal => self.new_terminal(cx).await?,
+            Command::NextTerminal | Command::PreviousTerminal => {
+                match self
+                    .features
+                    .terminal_panel
+                    .select_adjacent(command == Command::NextTerminal)
+                {
+                    Some(number) => self.status.set(format!("terminal {number}")),
+                    None => self.status.set("no other terminal"),
+                }
+            }
+            Command::RunTask => {
+                let (features, mut ctx) = self.feature_ctx();
+                features.tasks.run(&mut ctx, cx).await;
+            }
+            Command::RerunTask => {
+                let terminal = {
+                    let (features, mut ctx) = self.feature_ctx();
+                    features.tasks.rerun(&mut ctx, cx).await
+                };
+                if let Some(terminal) = terminal {
+                    self.show_task_terminal(terminal, cx)?;
+                }
+            }
+            Command::GitToggleStaged
+            | Command::GitStageAll
+            | Command::GitUnstageAll
+            | Command::GitCommit => self.panel_command(command, confirmed, cx).await?,
             Command::FocusEditor => {
                 self.workspace.focus_editor();
                 self.status.set("editor focused");
@@ -942,31 +1036,74 @@ impl App {
     // ---- docks ----
 
     fn toggle_panel(&mut self, panel: PanelKind, cx: &mut AsyncApp) -> Result<()> {
-        let position = self
-            .workspace
-            .dock_for_panel(panel)
-            .context("panel has no dock")?;
         let change = self
             .workspace
-            .toggle_dock(position)
+            .toggle_panel(panel)
             .context("toggle the dock")?;
         self.overlays.clear();
-        if change == DockChange::Shown && panel == PanelKind::Project {
-            let (features, mut ctx) = self.feature_ctx();
-            features.project_panel.shown(&mut ctx, cx);
-        }
-        let name = match panel {
-            PanelKind::Project => "project panel",
-            PanelKind::Outline => "outline panel",
-        };
         self.status.set(format!(
-            "{name} {}",
+            "{} {}",
+            panel.label(),
             match change {
                 DockChange::Shown => "shown",
                 DockChange::Focused => "focused",
                 DockChange::Hidden => "hidden",
             }
         ));
+        if change == DockChange::Shown {
+            let (features, mut ctx) = self.feature_ctx();
+            match panel {
+                PanelKind::Project => features.project_panel.shown(&mut ctx, cx),
+                PanelKind::Git => features.git_panel.shown(&mut ctx, cx),
+                PanelKind::Outline | PanelKind::Terminal => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The terminal dock toggles like any other once a terminal exists;
+    /// before that, the toggle starts the first shell.
+    async fn toggle_terminal(&mut self, cx: &mut AsyncApp) -> Result<()> {
+        if self.features.terminal_panel.is_empty() {
+            return self.new_terminal(cx).await;
+        }
+        self.toggle_panel(PanelKind::Terminal, cx)
+    }
+
+    async fn new_terminal(&mut self, cx: &mut AsyncApp) -> Result<()> {
+        let created = {
+            let (features, mut ctx) = self.feature_ctx();
+            features.terminal_panel.create(&mut ctx, cx).await
+        };
+        match created {
+            Ok(number) => {
+                self.workspace
+                    .show_panel(PanelKind::Terminal)
+                    .context("show the terminal dock")?;
+                self.overlays.clear();
+                self.status.set(format!("terminal {number}"));
+            }
+            Err(error) => self
+                .status
+                .set(format!("terminal failed to start: {error:#}")),
+        }
+        Ok(())
+    }
+
+    /// A task's terminal joins the terminal panel and is shown.
+    fn show_task_terminal(
+        &mut self,
+        terminal: gpui::Entity<zed_terminal::Terminal>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        {
+            let (features, mut ctx) = self.feature_ctx();
+            features.terminal_panel.adopt(terminal, &mut ctx, cx);
+        }
+        self.workspace
+            .show_panel(PanelKind::Terminal)
+            .context("show the terminal dock")?;
+        self.overlays.clear();
         Ok(())
     }
 
@@ -988,6 +1125,8 @@ impl App {
                     .project_panel
                     .execute(&mut ctx, command, confirmed, cx),
                 PanelKind::Outline => features.outline_panel.execute(&mut ctx, command, cx),
+                PanelKind::Git => features.git_panel.execute(&mut ctx, command, cx),
+                PanelKind::Terminal => PanelOutcome::Consumed,
             }
         };
         match outcome {
@@ -1015,6 +1154,8 @@ impl App {
         match panel {
             PanelKind::Project => features.project_panel.click(&mut ctx, row, cx),
             PanelKind::Outline => features.outline_panel.click(&mut ctx, row, cx),
+            PanelKind::Git => features.git_panel.click(&mut ctx, row, cx),
+            PanelKind::Terminal => {}
         }
     }
 
@@ -1069,9 +1210,10 @@ impl App {
             return;
         };
         match owner {
-            PickerOwner::Palette | PickerOwner::ProjectSearch | PickerOwner::Language => {
-                list.filter(query.text())
-            }
+            PickerOwner::Palette
+            | PickerOwner::ProjectSearch
+            | PickerOwner::Language
+            | PickerOwner::Tasks => list.filter(query.text()),
             PickerOwner::QuickOpen => {
                 let query = query.text().to_owned();
                 let (features, mut ctx) = self.feature_ctx();
@@ -1183,11 +1325,15 @@ impl App {
     }
 }
 
-/// The key context a panel adds to [`PANEL_CONTEXT`].
-fn panel_context(panel: PanelKind) -> &'static str {
+/// The key context a focused panel resolves keys in: the shared panel
+/// context plus its own, except the terminal, which keeps the shared
+/// keys (arrows, Enter, Esc) for its shell.
+fn key_context(panel: PanelKind) -> String {
     match panel {
-        PanelKind::Project => project_panel::KEY_CONTEXT,
-        PanelKind::Outline => outline_panel::KEY_CONTEXT,
+        PanelKind::Project => format!("{PANEL_CONTEXT} {}", project_panel::KEY_CONTEXT),
+        PanelKind::Outline => format!("{PANEL_CONTEXT} {}", outline_panel::KEY_CONTEXT),
+        PanelKind::Git => format!("{PANEL_CONTEXT} {}", git_panel::KEY_CONTEXT),
+        PanelKind::Terminal => terminal_panel::KEY_CONTEXT.to_owned(),
     }
 }
 

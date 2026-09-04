@@ -125,6 +125,89 @@ impl Widget for PanelWidget<'_> {
     }
 }
 
+/// One occupied cell of a terminal panel, in body coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalCell {
+    pub row: usize,
+    pub column: usize,
+    pub symbol: String,
+    pub style: Style,
+}
+
+/// The visible grid of one terminal, projected by its feature from Zed's
+/// terminal content; this widget owns only the border and cell placement.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TerminalPanelSnapshot {
+    pub title: String,
+    pub cells: Vec<TerminalCell>,
+    /// Row and column of the terminal cursor, when it is shown.
+    pub cursor: Option<(usize, usize)>,
+}
+
+pub struct TerminalPanelWidget<'a> {
+    snapshot: &'a TerminalPanelSnapshot,
+    focused: bool,
+}
+
+impl<'a> TerminalPanelWidget<'a> {
+    pub fn new(snapshot: &'a TerminalPanelSnapshot, focused: bool) -> Self {
+        Self { snapshot, focused }
+    }
+
+    /// The body inside the border: the terminal's grid.
+    pub fn inner(area: Rect) -> Rect {
+        Block::default().borders(Borders::ALL).inner(area)
+    }
+
+    /// Where the hardware cursor goes while the terminal has focus.
+    pub fn cursor_position(&self, area: Rect) -> Option<Position> {
+        if !self.focused {
+            return None;
+        }
+        let inner = Self::inner(area);
+        let (row, column) = self.snapshot.cursor?;
+        if row >= usize::from(inner.height) || column >= usize::from(inner.width) {
+            return None;
+        }
+        Some(Position::new(
+            inner.x.saturating_add(u16::try_from(column).ok()?),
+            inner.y.saturating_add(u16::try_from(row).ok()?),
+        ))
+    }
+}
+
+impl Widget for TerminalPanelWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 3 || area.height < 3 {
+            return;
+        }
+        Clear.render(area, buf);
+        let border_style = if self.focused {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(self.snapshot.title.as_str())
+            .border_style(border_style);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        for cell in &self.snapshot.cells {
+            let (Ok(row), Ok(column)) = (u16::try_from(cell.row), u16::try_from(cell.column))
+            else {
+                continue;
+            };
+            if row >= inner.height || column >= inner.width {
+                continue;
+            }
+            if let Some(target) = buf.cell_mut((inner.x + column, inner.y + row)) {
+                target.set_symbol(&cell.symbol).set_style(cell.style);
+            }
+        }
+    }
+}
+
 /// A half-open selection range in terminal-cell coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectionRange {
@@ -1093,8 +1176,8 @@ mod tests {
 
     use super::{
         BackgroundRange, CellDecoration, Cursor, EditorWidget, OverlayRow, OverlaySnapshot,
-        PanelWidget, RenderSnapshot, SelectionRange, StyleSpan, TextPosition, Viewport,
-        window_start,
+        PanelWidget, RenderSnapshot, SelectionRange, StyleSpan, TerminalCell,
+        TerminalPanelSnapshot, TerminalPanelWidget, TextPosition, Viewport, window_start,
     };
 
     fn row(buf: &Buffer, y: u16) -> String {
@@ -2011,5 +2094,47 @@ mod tests {
         assert_eq!(window_start(5, Some(4), 3), 2);
         assert_eq!(window_start(5, None, 3), 0);
         assert_eq!(window_start(2, Some(1), 3), 0);
+    }
+
+    fn terminal_snapshot() -> TerminalPanelSnapshot {
+        TerminalPanelSnapshot {
+            title: " Terminal 1 · shell ".to_owned(),
+            cells: vec![TerminalCell {
+                row: 0,
+                column: 1,
+                symbol: "λ".to_owned(),
+                style: Style::default().fg(Color::LightGreen),
+            }],
+            cursor: Some((1, 2)),
+        }
+    }
+
+    #[test]
+    fn terminal_panel_places_cells_and_cursor_inside_the_border() {
+        let snapshot = terminal_snapshot();
+        let area = Rect::new(3, 4, 28, 4);
+        let mut buf = Buffer::empty(area);
+        TerminalPanelWidget::new(&snapshot, true).render(area, &mut buf);
+        assert_eq!(buf[(5, 5)].symbol(), "λ");
+        assert_eq!(
+            TerminalPanelWidget::new(&snapshot, true).cursor_position(area),
+            Some(Position::new(6, 6))
+        );
+        assert!(row(&buf, 4).contains("Terminal 1"));
+    }
+
+    #[test]
+    fn terminal_panel_hides_the_cursor_when_unfocused_or_hidden() {
+        let mut snapshot = terminal_snapshot();
+        let area = Rect::new(0, 0, 8, 4);
+        assert_eq!(
+            TerminalPanelWidget::new(&snapshot, false).cursor_position(area),
+            None
+        );
+        snapshot.cursor = None;
+        assert_eq!(
+            TerminalPanelWidget::new(&snapshot, true).cursor_position(area),
+            None
+        );
     }
 }
