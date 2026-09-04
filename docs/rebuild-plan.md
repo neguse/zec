@@ -1,7 +1,8 @@
 # Rebuild plan
 
-Status: core in place; features returning. This document is temporary and
-is deleted when the last row of the return table is done.
+Status: the core and rows 1 to 7 are in place, minus the debugger; the
+rest is deferred (see below). This document is temporary and is deleted
+when the last row of the return table is done.
 
 ## Approach
 
@@ -103,6 +104,22 @@ acceptance are the Editor's own; Codestral, the agent panel, and the
 inline assistant are decided with the remaining rows). 9 as the large-file
 PTY scenario only: no special casing exists, the normal Buffer and Editor
 path carries a 100,000-line file with a 64 KiB line.
+
+## Deferred
+
+Scope is cut for now, not decided against: each of these needs something
+this tree cannot verify on one machine, and returns when that exists. Old
+sources are paths in `f40e791`.
+
+| Feature | Old source | Needs before it returns |
+| --- | --- | --- |
+| debugger (row 7) | `debugger_panel.rs` | a DAP adapter such as gdb in CI, `.zed/debug.json` scenarios |
+| extension picker, icon themes (row 8) | `extension_picker.rs`, `theme_picker.rs` | the extension registry; icons have no terminal projection |
+| self-update CLI (row 8) | `update.rs`, `script/release-manifest` | a release pipeline publishing the signed manifest |
+| markdown preview, images (row 9) | `rich_content.rs` | a decision on a terminal renderer; image protocols per terminal |
+| remote SSH (row 10) | `remote_session.rs`, `zec_remote_server.rs` | the `zec-remote-server` binary and its archive distribution |
+| agent panel, inline assistant, Codestral (row 11) | `agent_panel.rs`, `inline_assistant.rs`, `fixture_acp` | an ACP fixture and a language model account in tests |
+| collaboration, notebook (row 12) | `collaboration_panel.rs`, `notebook.rs` | a Zed account and collab server; a Jupyter kernel |
 
 ## Behavior carried into the core
 
