@@ -31,6 +31,7 @@ which are also listed in the command palette:
 | `Ctrl-F` | Find in the buffer as you type; Enter / Shift-Enter step through matches |
 | `Ctrl-H` | Replace the current match (Enter) or all of them (Shift-Enter) |
 | `Ctrl-G` | Go to `line` or `line:column` |
+| `Alt-Left` / `Alt-Right` | Go back / forward through the jumps Quick Open, search hits, panels, the language server, and Go to Line made |
 | `Ctrl-Space`, `Alt-/` | Completions from the language server |
 | `F2` / `F8` | Hover documentation / Diagnostics |
 | `F12` / `Alt-F12` / `Shift-F12` | Go to definition / type definition / references |

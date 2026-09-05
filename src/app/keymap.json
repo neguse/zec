@@ -12,6 +12,8 @@
       "ctrl-f": "zec::Find",
       "ctrl-h": "zec::Replace",
       "ctrl-g": "zec::GoToLine",
+      "alt-left": "zec::GoBack",
+      "alt-right": "zec::GoForward",
       "ctrl-space": "zec::ShowCompletions",
       "alt-/": "zec::ShowCompletions",
       "f2": "zec::Hover",

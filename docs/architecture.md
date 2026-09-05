@@ -46,7 +46,7 @@ one until nothing else works.
 | `src/cli.rs` | argument parsing, `ZEC_DATA_DIR` | `paths` |
 | `src/logging.rs` | the `ZEC_LOG` file that captures Zed's `log` records | `log` |
 | `src/bin/fixture_lsp.rs` | a deterministic language server for the PTY tests | serde_json |
-| `src/app/` | `App`, `Event`, `Command`, overlays, documents, the tab list, `update`, `draw`, the loop | everything |
+| `src/app/` | `App`, `Event`, `Command`, overlays, documents, the tab list, navigation history, `update`, `draw`, the loop | everything |
 | `src/terminal/` | raw mode and restore, capability detection, reader thread, key translation, cell widgets, line prompt, picker list, clipboard | Ratatui, Crossterm |
 | `src/zed/` | GPUI boot, `Project` and stores, hidden Editor windows, snapshot capture, subscriptions, keymap lookup, config watchers, `--smoke` | Zed crates |
 | `src/features/<name>/` | one feature | `app` contract types, `terminal`, `zed` |
@@ -98,6 +98,7 @@ struct App {
     root: Option<PathBuf>,       // the visible worktree root, when a directory was opened
     workspace: WorkspaceModel,   // pane tree, tabs, docks, and focus; reducer with invariants
     documents: Documents,        // ItemId -> Document
+    history: NavHistory,         // per pane, where the caret was before each jump
     overlays: Overlays,          // stack; the top owns focus while it is a prompt or picker
     status: Status,              // one transient message
     frame: Option<Frame>,        // the last render plan and pane snapshots, for mouse hit testing and scrolling

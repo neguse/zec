@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use gpui::AsyncApp;
 use ratatui::layout::Position;
+use text::ToPoint as _;
 use workspace::searchable::Direction as SearchDirection;
 
 use super::{
@@ -14,6 +15,7 @@ use super::{
     documents::Document,
     event::{ConfigEvent, DocumentEvent, Event, Input},
     feature::{self, Ctx, FeatureEvent, Features, PanelOutcome},
+    history::Location,
     overlay::{Overlay, PickerOwner, PickerPayload, PromptTarget},
     workspace::{Axis, Direction, DockChange, DockPosition, Focus, ItemId, PaneId, PanelKind},
 };
@@ -426,8 +428,10 @@ impl App {
                 Ok(Flow::Continue)
             }
             OverlayOutcome::Submit(PromptTarget::GoToLine, text, _) => {
+                let from = self.location(cx);
                 let (features, mut ctx) = self.feature_ctx();
                 features.buffer_search.go_to(&mut ctx, &text, cx);
+                self.record_jump(from, cx);
                 Ok(Flow::Continue)
             }
             OverlayOutcome::Submit(
@@ -620,6 +624,8 @@ impl App {
                 let (features, mut ctx) = self.feature_ctx();
                 features.buffer_search.go_to_line(&mut ctx);
             }
+            Command::GoBack => self.navigate(true, cx)?,
+            Command::GoForward => self.navigate(false, cx)?,
             Command::ShowCompletions => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.language.show_completions(&mut ctx, cx);
@@ -786,6 +792,9 @@ impl App {
             .close_item(item)
             .context("close item through the workspace")?;
         self.documents.close(item, cx)?;
+        self.history.forget_item(item);
+        let panes = self.workspace.root().panes();
+        self.history.retain_panes(|pane| panes.contains(&pane));
         self.item_changed();
         self.status.set("tab closed");
         Ok(Flow::Continue)
@@ -911,7 +920,8 @@ impl App {
         Ok(())
     }
 
-    /// Opens `path` and places the caret at a buffer point.
+    /// Opens `path` and places the caret at a buffer point: one jump in
+    /// the navigation history.
     async fn open_location(
         &mut self,
         path: PathBuf,
@@ -919,7 +929,8 @@ impl App {
         column: u32,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        match self.open_document_at(path, cx).await {
+        let from = self.location(cx);
+        match self.show_path(path, cx).await {
             Ok(message) => {
                 let document = self.active_document_mut();
                 document.follow.manual_vertical_scroll = false;
@@ -928,6 +939,7 @@ impl App {
                     text::Point::new(row, column),
                     cx,
                 )?;
+                self.record_jump(from, cx);
                 self.status.set(message);
             }
             Err(error) => self.status.set(format!("open failed: {error:#}")),
@@ -935,8 +947,17 @@ impl App {
         Ok(())
     }
 
-    /// Opens `path` in a tab, or activates the tab already showing it.
+    /// Opens `path` in a tab, or activates the tab already showing it, as
+    /// one jump in the navigation history.
     async fn open_document_at(&mut self, path: PathBuf, cx: &mut AsyncApp) -> Result<String> {
+        let from = self.location(cx);
+        let message = self.show_path(path, cx).await?;
+        self.record_jump(from, cx);
+        Ok(message)
+    }
+
+    /// Opens `path` in a tab, or activates the tab already showing it.
+    async fn show_path(&mut self, path: PathBuf, cx: &mut AsyncApp) -> Result<String> {
         let buffer = self.services.open_file(&path, cx).await?;
         // A buffer already shown is activated where it is, preferring the
         // active pane when a split shows it twice.
@@ -1157,10 +1178,12 @@ impl App {
                 Err(error) => self.status.set(format!("open failed: {error:#}")),
             },
             PanelOutcome::Jump { point, label } => {
+                let from = self.location(cx);
                 let document = self.active_document_mut();
                 document.follow.manual_vertical_scroll = false;
                 zed::editor::place_caret_at_point(&document.editor, point, cx)?;
                 self.workspace.focus_editor();
+                self.record_jump(from, cx);
                 self.status.set(format!("jumped to {label}"));
             }
         }
@@ -1312,6 +1335,82 @@ impl App {
                 *overwrite = None;
             }
         }
+    }
+
+    /// The active caret as a history entry, anchored so it follows edits.
+    fn location(&self, cx: &mut AsyncApp) -> Option<Location> {
+        let item = self.workspace.active_item();
+        let document = self.documents.get(item)?;
+        let point = zed::editor::caret_point(&document.editor, cx).ok()?;
+        let anchor = document
+            .buffer
+            .read_with(cx, |buffer, _| buffer.anchor_before(point));
+        Some(Location { item, anchor })
+    }
+
+    /// The buffer point a history entry names today.
+    fn resolve(&self, location: Location, cx: &AsyncApp) -> Option<text::Point> {
+        let document = self.documents.get(location.item)?;
+        Some(
+            document
+                .buffer
+                .read_with(cx, |buffer, _| location.anchor.to_point(&buffer.snapshot())),
+        )
+    }
+
+    /// Records `from` as the start of the jump just made, unless the caret
+    /// did not move; the entry belongs to the pane the jump landed in.
+    fn record_jump(&mut self, from: Option<Location>, cx: &mut AsyncApp) {
+        let Some(from) = from else {
+            return;
+        };
+        let Some(now) = self.location(cx) else {
+            return;
+        };
+        if from.item == now.item && self.resolve(from, cx) == self.resolve(now, cx) {
+            return;
+        }
+        self.history.record(self.workspace.active_pane(), from);
+    }
+
+    /// Returns to the previous location (`back`) or advances to the next
+    /// one in the active pane's history.
+    fn navigate(&mut self, back: bool, cx: &mut AsyncApp) -> Result<()> {
+        let Some(current) = self.location(cx) else {
+            return Ok(());
+        };
+        let pane = self.workspace.active_pane();
+        let live = |item: ItemId| self.documents.get(item).is_some();
+        let target = if back {
+            self.history.back(pane, current, live)
+        } else {
+            self.history.forward(pane, current, live)
+        };
+        let Some(target) = target else {
+            self.status.set(if back {
+                "no earlier location"
+            } else {
+                "no later location"
+            });
+            return Ok(());
+        };
+        let point = self
+            .resolve(target, cx)
+            .context("history entry has no document")?;
+        self.workspace
+            .focus_item(target.item)
+            .context("activate the history entry's tab")?;
+        self.item_changed();
+        let label = self.active_document().label(cx);
+        let document = self.active_document_mut();
+        document.follow.manual_vertical_scroll = false;
+        zed::editor::place_caret_at_point(&document.editor, point, cx)?;
+        self.status.set(format!(
+            "{} to {label}:{}",
+            if back { "back" } else { "forward" },
+            point.row + 1
+        ));
+        Ok(())
     }
 
     fn show_item(&mut self, item: ItemId) -> Result<()> {
