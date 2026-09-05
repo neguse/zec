@@ -2080,13 +2080,33 @@ impl PtySession {
     }
 
     fn diagnostic(&self) -> String {
-        let tail_start = self.transcript.len().saturating_sub(DIAGNOSTIC_TAIL);
+        // A long run of one byte at the end (ConPTY pads with spaces) would
+        // hide the last escape sequences; report it as a count instead.
+        let run_byte = self.transcript.last().copied();
+        let run = self
+            .transcript
+            .iter()
+            .rev()
+            .take_while(|byte| Some(**byte) == run_byte)
+            .count();
+        let (body, run_note) = if run >= 64 {
+            let end = self.transcript.len() - run;
+            (
+                &self.transcript[..end],
+                format!(" (then {run} x {:?})", char::from(run_byte.unwrap_or(0))),
+            )
+        } else {
+            (&self.transcript[..], String::new())
+        };
+        let tail_start = body.len().saturating_sub(DIAGNOSTIC_TAIL);
+        let (row, column) = self.parser.screen().cursor_position();
         let log = fs::read_to_string(&self.log_path).unwrap_or_default();
         let log_start = log.len().saturating_sub(4 * DIAGNOSTIC_TAIL);
         format!(
-            "screen:\n{}\nraw tail:\n{:?}\nlog tail:\n{}",
+            "screen ({} bytes received, cursor at row {row} column {column}):\n{}\nraw tail{run_note}:\n{:?}\nlog tail:\n{}",
+            self.transcript.len(),
             self.parser.screen().contents(),
-            String::from_utf8_lossy(&self.transcript[tail_start..]),
+            String::from_utf8_lossy(&body[tail_start..]),
             &log[log_start..]
         )
     }
