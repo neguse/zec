@@ -85,12 +85,20 @@ const CTRL_PAGE_UP: &[u8] = b"\x1b[5;5~";
 const F3: &[u8] = b"\x1bOR";
 #[cfg(unix)]
 const CTRL_TILDE: &[u8] = b"\x1b[126;5u";
+#[cfg(windows)]
+const CTRL_TILDE: &[u8] = b"\x1b[192;0;126;1;24;1_";
 #[cfg(unix)]
 const CTRL_SHIFT_G: &[u8] = b"\x1b[103;6u";
+#[cfg(windows)]
+const CTRL_SHIFT_G: &[u8] = b"\x1b[71;0;0;1;24;1_";
 #[cfg(unix)]
 const CTRL_SHIFT_B: &[u8] = b"\x1b[98;6u";
+#[cfg(windows)]
+const CTRL_SHIFT_B: &[u8] = b"\x1b[66;0;0;1;24;1_";
 #[cfg(unix)]
 const CTRL_ALT_B: &[u8] = b"\x1b[98;7u";
+#[cfg(windows)]
+const CTRL_ALT_B: &[u8] = b"\x1b[66;0;0;1;10;1_";
 const SPACE: &[u8] = b" ";
 const END: &[u8] = b"\x1b[F";
 const DELETE: &[u8] = b"\x1b[3~";
@@ -827,7 +835,6 @@ fn outline_panel_lists_symbols_and_jumps_to_them() -> Result<()> {
     session.assert_terminal_restored(&baseline)
 }
 
-#[cfg(unix)]
 #[test]
 fn terminal_panel_runs_shells_in_the_bottom_dock() -> Result<()> {
     let temp = tempfile::tempdir().context("create PTY fixture")?;
@@ -844,7 +851,9 @@ fn terminal_panel_runs_shells_in_the_bottom_dock() -> Result<()> {
     session.wait_for_screen("terminal 1 shown", ACTION_TIMEOUT, |screen| {
         screen.contains("Terminal 1") && screen.contains("terminal 1  |")
     })?;
-    session.send(b"printf 'TERM_%s_OK\\n' E2E\r")?;
+    // The quotes keep the typed line from matching before the shell runs
+    // it; every shell Zed starts (sh, bash, zsh, pwsh) prints the same.
+    session.send(b"echo TERM_\"E2E\"_OK\r")?;
     session.wait_for_screen("shell ran the command", ACTION_TIMEOUT, |screen| {
         screen.contains("TERM_E2E_OK")
     })?;
@@ -884,7 +893,6 @@ fn terminal_panel_runs_shells_in_the_bottom_dock() -> Result<()> {
     session.assert_terminal_restored(&baseline)
 }
 
-#[cfg(unix)]
 #[test]
 fn git_panel_stages_and_commits_through_zed() -> Result<()> {
     let temp = tempfile::tempdir().context("create PTY fixture")?;
@@ -959,20 +967,22 @@ fn git_panel_stages_and_commits_through_zed() -> Result<()> {
     session.assert_terminal_restored(&baseline)
 }
 
-#[cfg(unix)]
 #[test]
 fn tasks_run_in_the_terminal_panel() -> Result<()> {
     let temp = tempfile::tempdir().context("create PTY fixture")?;
     let root = temp.path().join("task-repo");
     fs::create_dir_all(root.join(".zed"))?;
     fs::write(root.join("notes.txt"), "notes\n")?;
-    let marker = root.join("marker.txt");
+    // `mkdir` is spelled the same in every shell Zed may run the task in.
+    let marker = root.join("marker");
     fs::write(
         root.join(".zed/tasks.json"),
-        format!(
-            r#"[{{"label": "E2E Task", "command": "sh", "args": ["-c", "printf done > {}"]}}]"#,
-            marker.display()
-        ),
+        serde_json::json!([{
+            "label": "E2E Task",
+            "command": "mkdir",
+            "args": [marker.to_str().context("marker path is not UTF-8")?],
+        }])
+        .to_string(),
     )?;
 
     let pair = open_pty()?;
@@ -1003,17 +1013,14 @@ fn tasks_run_in_the_terminal_panel() -> Result<()> {
     session.wait_for_screen("task ran in the dock", ACTION_TIMEOUT, |screen| {
         screen.contains("task E2E Task finished") && screen.contains("Terminal 1 · E2E Task")
     })?;
-    ensure!(
-        fs::read_to_string(&marker)? == "done",
-        "the task did not write its marker"
-    );
+    ensure!(marker.is_dir(), "the task did not create its marker");
 
-    fs::remove_file(&marker)?;
+    fs::remove_dir(&marker)?;
     session.send(CTRL_ALT_B)?;
     session.wait_for_screen("task rerun in a new terminal", ACTION_TIMEOUT, |screen| {
         screen.contains("Terminal 2 · E2E Task")
     })?;
-    session.wait_until("marker rewritten", ACTION_TIMEOUT, |_| marker.is_file())?;
+    session.wait_until("marker recreated", ACTION_TIMEOUT, |_| marker.is_dir())?;
 
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
