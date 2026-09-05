@@ -24,6 +24,7 @@ use crate::{
         git_panel,
         language::{LanguageOutcome, LocationKind},
         outline_panel, project_panel,
+        project_search::SearchOption,
         terminal_panel::{self, TerminalOutcome},
     },
     terminal::{
@@ -342,10 +343,10 @@ impl App {
                     KeyCode::Esc => {
                         self.overlays.pop();
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down => {
                         *first = (*first + 1).min(rows.len().saturating_sub(1));
                     }
-                    KeyCode::Up | KeyCode::Char('k') => *first = first.saturating_sub(1),
+                    KeyCode::Up => *first = first.saturating_sub(1),
                     KeyCode::PageDown => *first = (*first + 10).min(rows.len().saturating_sub(1)),
                     KeyCode::PageUp => *first = first.saturating_sub(10),
                     _ => {}
@@ -599,6 +600,17 @@ impl App {
             Command::ProjectSearch => {
                 let (features, mut ctx) = self.feature_ctx();
                 features.project_search.open(&mut ctx);
+            }
+            Command::SearchToggleRegex
+            | Command::SearchToggleCaseSensitive
+            | Command::SearchToggleWholeWord => {
+                let option = match command {
+                    Command::SearchToggleRegex => SearchOption::Regex,
+                    Command::SearchToggleCaseSensitive => SearchOption::CaseSensitive,
+                    _ => SearchOption::WholeWord,
+                };
+                let (features, mut ctx) = self.feature_ctx();
+                features.project_search.toggle(&mut ctx, option, cx);
             }
             Command::Find => {
                 let (features, mut ctx) = self.feature_ctx();
@@ -1219,17 +1231,17 @@ impl App {
     /// A prompt's text changed, by key or paste: a feature that searches
     /// as the user types hears about it.
     fn prompt_changed(&mut self, cx: &mut AsyncApp) {
-        let Some(Overlay::Prompt {
-            target: PromptTarget::Find,
-            line,
-            ..
-        }) = self.overlays.top_mut()
-        else {
+        let Some(Overlay::Prompt { target, line, .. }) = self.overlays.top() else {
             return;
         };
+        let target = target.clone();
         let text = line.text().to_owned();
         let (features, mut ctx) = self.feature_ctx();
-        features.buffer_search.query_changed(&mut ctx, &text, cx);
+        match target {
+            PromptTarget::Find => features.buffer_search.query_changed(&mut ctx, &text, cx),
+            PromptTarget::ProjectSearch => features.project_search.query_changed(&mut ctx),
+            _ => {}
+        }
     }
 
     /// A picker's query changed: the palette filters its fixed entries, a

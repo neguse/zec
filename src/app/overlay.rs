@@ -92,8 +92,8 @@ pub enum Overlay {
         list: PickerList<PickerPayload>,
         owner: PickerOwner,
     },
-    /// Read-only rows, such as hover documentation; Up and Down scroll,
-    /// Esc closes.
+    /// Read-only rows, such as hover documentation; Up, Down, PageUp, and
+    /// PageDown scroll, Esc closes.
     Text {
         title: &'static str,
         rows: Vec<String>,
