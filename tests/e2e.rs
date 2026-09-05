@@ -61,7 +61,10 @@ const CTRL_ALT_LEFT: &[u8] = b"\x1b[1;7D";
 const CTRL_ALT_RIGHT: &[u8] = b"\x1b[1;7C";
 const CTRL_ALT_SHIFT_LEFT: &[u8] = b"\x1b[1;8D";
 const CTRL_ALT_SHIFT_UP: &[u8] = b"\x1b[1;8A";
+#[cfg(unix)]
 const CTRL_ALT_EQUALS: &[u8] = b"\x1b[61;7u";
+#[cfg(windows)]
+const CTRL_ALT_EQUALS: &[u8] = b"\x1b[187;0;0;1;10;1_";
 const DOWN: &[u8] = b"\x1b[B";
 const F2: &[u8] = b"\x1bOQ";
 const F7: &[u8] = b"\x1b[18~";
@@ -70,13 +73,23 @@ const F6: &[u8] = b"\x1b[17~";
 const F8: &[u8] = b"\x1b[19~";
 const SHIFT_F12: &[u8] = b"\x1b[24;2~";
 const ALT_SLASH: &[u8] = b"\x1b/";
+#[cfg(unix)]
 const CTRL_PERIOD: &[u8] = b"\x1b[46;5u";
+#[cfg(windows)]
+const CTRL_PERIOD: &[u8] = b"\x1b[190;0;0;1;8;1_";
+#[cfg(unix)]
 const CTRL_SHIFT_T: &[u8] = b"\x1b[116;6u";
+#[cfg(windows)]
+const CTRL_SHIFT_T: &[u8] = b"\x1b[84;0;0;1;24;1_";
 const CTRL_PAGE_UP: &[u8] = b"\x1b[5;5~";
 const F3: &[u8] = b"\x1bOR";
+#[cfg(unix)]
 const CTRL_TILDE: &[u8] = b"\x1b[126;5u";
+#[cfg(unix)]
 const CTRL_SHIFT_G: &[u8] = b"\x1b[103;6u";
+#[cfg(unix)]
 const CTRL_SHIFT_B: &[u8] = b"\x1b[98;6u";
+#[cfg(unix)]
 const CTRL_ALT_B: &[u8] = b"\x1b[98;7u";
 const SPACE: &[u8] = b" ";
 const END: &[u8] = b"\x1b[F";
@@ -85,12 +98,21 @@ const CTRL_U: &[u8] = b"\x15";
 const ALT_F: &[u8] = b"\x1bf";
 const CTRL_F: &[u8] = b"\x06";
 const CTRL_G: &[u8] = b"\x07";
+#[cfg(unix)]
 const CTRL_ALT_T: &[u8] = b"\x1b[116;7u";
+#[cfg(windows)]
+const CTRL_ALT_T: &[u8] = b"\x1b[84;0;0;1;10;1_";
 const ALT_BACKSLASH: &[u8] = b"\x1b\\";
 const ALT_L: &[u8] = b"\x1bl";
 // CSI u forms: a legacy Ctrl-H is indistinguishable from Backspace.
+#[cfg(unix)]
 const CTRL_H: &[u8] = b"\x1b[104;5u";
+#[cfg(windows)]
+const CTRL_H: &[u8] = b"\x1b[72;0;8;1;8;1_";
+#[cfg(unix)]
 const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
+#[cfg(windows)]
+const SHIFT_ENTER: &[u8] = b"\x1b[13;0;13;1;16;1_";
 const F1: &[u8] = b"\x1bOP";
 const F4: &[u8] = b"\x1bOS";
 const ESC: &[u8] = b"\x1b";
@@ -659,10 +681,9 @@ fn project_panel_browses_opens_and_mutates_the_tree() -> Result<()> {
     })?;
     session.send(DOWN)?;
     session.send(ENTER)?;
+    let opened = format!("opened {}", Path::new("src").join("main.rs").display());
     session.wait_for_screen("file opened from the panel", ACTION_TIMEOUT, |screen| {
-        screen.contains("fn main() {}")
-            && screen.contains("opened src/main.rs")
-            && screen.contains("[main.rs]")
+        screen.contains("fn main() {}") && screen.contains(&opened) && screen.contains("[main.rs]")
     })?;
 
     // Opening returned focus to the editor; the toggle focuses the panel
