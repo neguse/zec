@@ -1376,19 +1376,19 @@ mod tests {
 
     #[test]
     fn prompt_paths_resolve_against_cwd_without_expansion() {
-        let cwd = Path::new("/work");
+        // A real absolute directory: a bare `/work` is not absolute on
+        // Windows, where `std::path::absolute` would prepend the drive.
+        let cwd = std::env::temp_dir();
+        assert_eq!(resolve_path(&cwd, "a.txt").unwrap(), cwd.join("a.txt"));
         assert_eq!(
-            resolve_path(cwd, "a.txt").unwrap(),
-            PathBuf::from("/work/a.txt")
+            resolve_path(&cwd, "~/a.txt").unwrap(),
+            cwd.join("~").join("a.txt")
         );
+        let absolute = cwd.join("abs.txt");
         assert_eq!(
-            resolve_path(cwd, "~/a.txt").unwrap(),
-            PathBuf::from("/work/~/a.txt")
+            resolve_path(&cwd, absolute.to_str().unwrap()).unwrap(),
+            absolute
         );
-        assert_eq!(
-            resolve_path(cwd, "/abs.txt").unwrap(),
-            PathBuf::from("/abs.txt")
-        );
-        assert!(resolve_path(cwd, "").is_err());
+        assert!(resolve_path(&cwd, "").is_err());
     }
 }

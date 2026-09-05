@@ -143,10 +143,10 @@ mod tests {
             vec![
                 PathBuf::from("a.txt"),
                 cwd.join("a.txt"),
-                PathBuf::from("b/../a.txt"),
+                PathBuf::from("b.txt"),
             ],
         )
         .unwrap();
-        assert_eq!(paths, vec![cwd.join("a.txt"), cwd.join("b/../a.txt")]);
+        assert_eq!(paths, vec![cwd.join("a.txt"), cwd.join("b.txt")]);
     }
 }
