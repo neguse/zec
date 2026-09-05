@@ -141,6 +141,9 @@ enum Event {
     Fatal(String),             // the reader thread stopped
     Document(DocumentEvent),   // ReloadFinished { buffer_id, result }
     Config(ConfigEvent),       // settings or keymap file reloaded
+    WorktreeRestricted(PathBuf), // Zed holds repository-controlled processes until trusted
+    LanguageServer { name, running },
+    Feature(FeatureEvent),     // a completion of work a feature spawned
 }
 ```
 
@@ -193,7 +196,18 @@ Mouse input goes to the pane or dock under the last frame. An overlay
 answers a key with:
 
 ```rust
-enum OverlayOutcome { Consumed, Submit(String), Cancel, Command(Command) }
+enum OverlayOutcome {
+    Consumed,
+    Changed,                                  // a prompt's text changed
+    QueryChanged,                             // a picker's query changed; its owner refreshes
+    Submit(PromptTarget, String, bool),       // Enter, or Shift-Enter when the flag is set
+    Cancel(&'static str),                     // a picker, by title
+    CancelPrompt(PromptTarget, &'static str),
+    Command(Command),                         // a palette entry, or a key bound in `zec_overlay`
+    OpenPath(PathBuf),
+    OpenLocation { path, row, column },
+    Pick(PickerOwner, &'static str, usize),   // an `Index` entry of a feature-owned picker
+}
 ```
 
 ```rust
@@ -210,8 +224,8 @@ palette filters its fixed entries in place, and a feature-owned picker
 asks its feature, which replaces the entries when its match completes.
 An accepted entry carries a `PickerPayload`: a command, a path, or a
 location the app opens, or an `Index` the owning feature resolves (a
-completion, a code action). `Text` is read-only: Up and Down scroll,
-`Esc` pops the top overlay. Every overlay is bound to the active tab and
+completion, a code action). `Text` is read-only: Up, Down, PageUp, and
+PageDown scroll, `Esc` pops the top overlay. Every overlay is bound to the active tab and
 closes when that tab changes. `Confirm` replaces every second-press flag:
 `execute` settles a pending confirmation in one place, so repeating the
 confirmed command carries `confirmed = true` and any other command
@@ -323,7 +337,8 @@ right after `runtime::init`.
   set an atomic flag; the reader thread turns it into `Event::Signal`, and
   `SIGTSTP` becomes `Flow::Suspend`.
 - The reader thread does blocking Crossterm reads and starts only after raw
-  mode is active. Input events apply backpressure to preserve order;
+  mode is active; started earlier it races a fast session restore and
+  swallows the first keystroke. Input events apply backpressure to preserve order;
   `Redraw` uses `try_send`. The reader coalesces resize bursts and polls
   the size at low frequency for PTYs that miss resize events.
 - Exactly one layer converts Zed's UTF-8 byte columns to grapheme cell
@@ -342,7 +357,7 @@ right after `runtime::init`.
   save trigger first, as Zed's editor does, so on-save whitespace and
   newline rules apply.
 - Native grammars are registered as lazy loaders; languages compile their
-  queries on first use.
+  queries on first use. Eager registration costs seconds on the first frame.
 - Language servers are Zed's: the Project starts an adapter's server when
   a buffer of its language opens, downloading the binary the way Zed does
   unless `lsp.<server>.binary.path` in `settings.json` names one. Zed
@@ -354,6 +369,26 @@ right after `runtime::init`.
 - `zed/editor.rs` holds the helpers that turn Zed entity events into zec
   events, capture display snapshots, and dispatch keystrokes and actions
   into the hidden window.
+
+## Constraints
+
+Behavior that is easy to break without noticing:
+
+- Repaint cost is bounded by the viewport, not the document: a
+  100,000-line file with a 64 KiB line repaints at the same cost as a
+  small one.
+- `Ctrl-S` is handled by zec; Zed's binding is a Workspace action that
+  has no Workspace here.
+- Save As resolves relative to the startup cwd with no shell expansion,
+  overwrites a regular file only on a confirmed second submit, refuses
+  directories and special files, and refuses to bind two Buffers to one
+  path.
+- A clean Buffer auto-reloads on external change; a dirty one shows `!`
+  and saves over the disk only after confirmation. Reload is an undoable
+  Zed transaction. An external rename follows the Buffer's file identity;
+  an external delete keeps the text and recreates the path on save.
+- Scratch buffers come from `BufferStore::create_local_buffer`, never
+  `Buffer::local`, so they save through the same store as files.
 
 ## Verification
 

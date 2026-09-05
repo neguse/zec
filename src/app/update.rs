@@ -340,10 +340,10 @@ impl App {
                     KeyCode::Esc => {
                         self.overlays.pop();
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down => {
                         *first = (*first + 1).min(rows.len().saturating_sub(1));
                     }
-                    KeyCode::Up | KeyCode::Char('k') => *first = first.saturating_sub(1),
+                    KeyCode::Up => *first = first.saturating_sub(1),
                     KeyCode::PageDown => *first = (*first + 10).min(rows.len().saturating_sub(1)),
                     KeyCode::PageUp => *first = first.saturating_sub(10),
                     _ => {}

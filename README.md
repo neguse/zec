@@ -6,12 +6,8 @@ Windows); zec feeds Crossterm input into Zed's keymap and projects Zed's
 display snapshot onto terminal cells with Ratatui. Zed's crates are pinned
 Git dependencies; there is no fork.
 
-The tree is being rebuilt around [docs/architecture.md](docs/architecture.md).
-Today it is the core: open, edit, save, Save As, reload with external change
-tracking, tabs, syntax highlighting, Zed settings and keymap, a command
-palette, and a terminal lifecycle that restores the terminal on every exit
-path. Features from the previous tree return one at a time in the order
-given in [docs/rebuild-plan.md](docs/rebuild-plan.md).
+The design is [docs/architecture.md](docs/architecture.md); what is
+deliberately absent, deferred, or next is [docs/roadmap.md](docs/roadmap.md).
 
 ## Usage
 
