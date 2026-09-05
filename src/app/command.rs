@@ -9,6 +9,9 @@ use gpui::App;
 
 macro_rules! commands {
     ($( $variant:ident => $label:literal, )*) => {
+        // A variant is the keymap-facing action name (`zec::CommandPalette`),
+        // so it may legitimately start with the enum's own name.
+        #[allow(clippy::enum_variant_names)]
         #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
         pub enum Command {
             $( $variant, )*

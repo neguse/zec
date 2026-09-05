@@ -120,7 +120,14 @@ impl Widget for PanelWidget<'_> {
                 style = style.add_modifier(Modifier::DIM);
             }
             buf.set_style(row_area, style);
-            render_line(&row.text, style, &[], y, inner, inner, 0, buf);
+            render_line(
+                &row.text,
+                style,
+                &[],
+                y,
+                LineWindow::unscrolled(inner, inner),
+                buf,
+            );
         }
     }
 }
@@ -749,9 +756,7 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
                 snapshot.gutter_style,
                 &[],
                 y,
-                gutter_rect,
-                gutter_area,
-                0,
+                LineWindow::unscrolled(gutter_rect, gutter_area),
                 buf,
             );
         }
@@ -765,9 +770,11 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
                 .map(Vec::as_slice)
                 .unwrap_or_default(),
             y,
-            text_rect,
-            text_area,
-            snapshot.viewport.left_column,
+            LineWindow {
+                area: text_rect,
+                clipped: text_area,
+                left_column: snapshot.viewport.left_column,
+            },
             buf,
         );
         render_background_row(snapshot, document_row, line, y, text_rect, text_area, buf);
@@ -799,9 +806,7 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
         status_style,
         &[],
         status_y,
-        area,
-        clipped,
-        0,
+        LineWindow::unscrolled(area, clipped),
         buf,
     );
 }
@@ -851,9 +856,11 @@ fn render_inline_annotations(
             annotation.style,
             &[],
             y,
-            annotation_area,
-            clipped,
-            visible_start - annotation.column,
+            LineWindow {
+                area: annotation_area,
+                clipped,
+                left_column: visible_start - annotation.column,
+            },
             buf,
         );
     }
@@ -896,10 +903,10 @@ fn render_cell_decorations(
         };
         let blank = cell.symbol() == " ";
         if blank {
-            if let Some(glyph) = decoration.glyph.as_deref() {
-                if glyph.cell_width() == 1 {
-                    cell.set_symbol(glyph);
-                }
+            if let Some(glyph) = decoration.glyph.as_deref()
+                && glyph.cell_width() == 1
+            {
+                cell.set_symbol(glyph);
             }
             cell.set_style(decoration.style);
         } else if decoration.style_on_text {
@@ -1042,9 +1049,7 @@ fn render_overlay(
             style,
             &[],
             y,
-            inner,
-            clipped,
-            0,
+            LineWindow::unscrolled(inner, clipped),
             buf,
         );
     }
@@ -1154,17 +1159,39 @@ fn visible_range_rect(
     (x_start < x_end).then(|| Rect::new(x_start, y, x_end - x_start, 1))
 }
 
+/// Where a line lands on the screen: the row's full horizontal extent, the
+/// part of it that may be painted, and the columns scrolled off its left.
+#[derive(Clone, Copy)]
+struct LineWindow {
+    area: Rect,
+    clipped: Rect,
+    left_column: usize,
+}
+
+impl LineWindow {
+    fn unscrolled(area: Rect, clipped: Rect) -> Self {
+        Self {
+            area,
+            clipped,
+            left_column: 0,
+        }
+    }
+}
+
 /// Draw one display-ready line, clipping in terminal-cell coordinates.
 fn render_line(
     line: &str,
     style: Style,
     style_spans: &[StyleSpan],
     y: u16,
-    area: Rect,
-    clipped: Rect,
-    left_column: usize,
+    window: LineWindow,
     buf: &mut Buffer,
 ) {
+    let LineWindow {
+        area,
+        clipped,
+        left_column,
+    } = window;
     if area.width == 0 || y < clipped.y || y >= clipped.bottom() {
         return;
     }

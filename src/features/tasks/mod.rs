@@ -108,9 +108,7 @@ impl Tasks {
         index: usize,
         cx: &mut AsyncApp,
     ) -> Option<Entity<Terminal>> {
-        let Some((kind, task)) = self.candidates.get(index).cloned() else {
-            return None;
-        };
+        let (kind, task) = self.candidates.get(index).cloned()?;
         ctx.overlays.pop();
         self.spawn(ctx, kind, task, cx).await
     }

@@ -85,6 +85,7 @@ Or build from source:
 ## Building
 
 ```sh
+cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --bin zec
 cargo test --locked --bin zec -- --test-threads=1
 cargo test --locked --test e2e -- --test-threads=1

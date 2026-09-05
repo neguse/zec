@@ -21,7 +21,7 @@ impl Lookup {
         };
         let (bindings, _pending) = self
             .keymap
-            .bindings_for_input(&[keystroke.clone()], &[context]);
+            .bindings_for_input(std::slice::from_ref(keystroke), &[context]);
         bindings
             .iter()
             .map(|binding| binding.action().name())
