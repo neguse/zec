@@ -78,6 +78,13 @@ for example `{"lsp": {"rust-analyzer": {"binary": {"path": "..."}}}}`.
 `ZEC_LOG=path` writes Zed's log records, including language server
 lifecycle, to a file.
 
+## Installing
+
+Each [release](https://github.com/neguse/zec/releases) attaches
+`zec-x86_64-linux.tar.gz` and `zec-x86_64-windows.zip`, each holding the
+one binary; unpack it onto `PATH`. The Linux binary depends on glibc only.
+Or build from source:
+
 ## Building
 
 ```sh
