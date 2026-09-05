@@ -96,6 +96,8 @@ const END: &[u8] = b"\x1b[F";
 const DELETE: &[u8] = b"\x1b[3~";
 const CTRL_U: &[u8] = b"\x15";
 const ALT_F: &[u8] = b"\x1bf";
+const ALT_C: &[u8] = b"\x1bc";
+const ALT_R: &[u8] = b"\x1br";
 const CTRL_F: &[u8] = b"\x06";
 const CTRL_G: &[u8] = b"\x07";
 #[cfg(unix)]
@@ -213,11 +215,30 @@ fn project_search_lists_hits_and_opens_the_selected_location() -> Result<()> {
     session.wait_ready()?;
     session.assert_raw_mode_enabled(&baseline)?;
 
+    // Options toggle in the prompt and persist between searches.
     session.send(ALT_F)?;
     session.wait_for_screen("project search prompt", ACTION_TIMEOUT, |screen| {
         screen.contains("Project search:")
     })?;
-    session.paste("needle")?;
+    session.send(ALT_C)?;
+    session.wait_for_screen("match case shown", ACTION_TIMEOUT, |screen| {
+        screen.contains("Project search:") && screen.contains("|  match case")
+    })?;
+    session.paste("Needle")?;
+    session.send(ENTER)?;
+    session.wait_for_screen("case-sensitive search misses", ACTION_TIMEOUT, |screen| {
+        screen.contains("no matches for Needle")
+    })?;
+    session.send(ALT_F)?;
+    session.wait_for_screen("options persisted", ACTION_TIMEOUT, |screen| {
+        screen.contains("Project search:") && screen.contains("|  match case")
+    })?;
+    session.send(ALT_C)?;
+    session.send(ALT_R)?;
+    session.wait_for_screen("regex shown alone", ACTION_TIMEOUT, |screen| {
+        screen.contains("|  regex") && !screen.contains("match case")
+    })?;
+    session.paste("nee.le")?;
     session.send(ENTER)?;
     session.wait_for_screen("project search hits by path", ACTION_TIMEOUT, |screen| {
         screen.contains("Matches:")
