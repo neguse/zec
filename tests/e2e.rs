@@ -115,7 +115,10 @@ const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 const SHIFT_ENTER: &[u8] = b"\x1b[13;0;13;1;16;1_";
 const F1: &[u8] = b"\x1bOP";
 const F4: &[u8] = b"\x1bOS";
+#[cfg(unix)]
 const ESC: &[u8] = b"\x1b";
+#[cfg(windows)]
+const ESC: &[u8] = b"\x1b[27;0;27;1;0;1_";
 const ENTER: &[u8] = b"\r";
 
 // This is one execute! call in the terminal session's restore. Keeping the
@@ -529,7 +532,7 @@ fn language_servers_answer_through_zed() -> Result<()> {
     session.send(CTRL_P)?;
     session.paste("main.rs")?;
     session.wait_for_screen("quick open lists main.rs", ACTION_TIMEOUT, |screen| {
-        screen.contains("Quick open: main.rs") && screen.contains("› src/main.rs")
+        screen.contains("Quick open: main.rs") && screen.contains(&native("› src/main.rs"))
     })?;
     session.send(ENTER)?;
     session.wait_for_screen("language server started", ACTION_TIMEOUT, |screen| {
@@ -578,23 +581,23 @@ fn language_servers_answer_through_zed() -> Result<()> {
     session.send(F8)?;
     session.wait_for_screen("diagnostics listed", ACTION_TIMEOUT, |screen| {
         screen.contains("Diagnostics:")
-            && screen.contains("src/main.rs:1")
+            && screen.contains(&native("src/main.rs:1"))
             && screen.contains("warning deterministic fixture warning")
     })?;
     session.send(ENTER)?;
     session.wait_for_screen("diagnostic opened", ACTION_TIMEOUT, |screen| {
-        screen.contains("switched to src/main.rs")
+        screen.contains(&native("switched to src/main.rs"))
     })?;
 
     // References need a second open buffer to list more than one hit.
     session.send(CTRL_P)?;
     session.paste("lib.rs")?;
     session.wait_for_screen("quick open lists lib.rs", ACTION_TIMEOUT, |screen| {
-        screen.contains("Quick open: lib.rs") && screen.contains("› src/lib.rs")
+        screen.contains("Quick open: lib.rs") && screen.contains(&native("› src/lib.rs"))
     })?;
     session.send(ENTER)?;
     session.wait_for_screen("lib.rs opened", ACTION_TIMEOUT, |screen| {
-        screen.contains("opened src/lib.rs")
+        screen.contains(&native("opened src/lib.rs"))
     })?;
     session.send(CTRL_PAGE_UP)?;
     session.wait_for_screen("back on main.rs", ACTION_TIMEOUT, |screen| {
@@ -603,13 +606,13 @@ fn language_servers_answer_through_zed() -> Result<()> {
     session.send(SHIFT_F12)?;
     session.wait_for_screen("references listed", ACTION_TIMEOUT, |screen| {
         screen.contains("References:")
-            && screen.contains("src/main.rs:1")
-            && screen.contains("src/lib.rs:1")
+            && screen.contains(&native("src/main.rs:1"))
+            && screen.contains(&native("src/lib.rs:1"))
     })?;
     session.send(DOWN)?;
     session.send(ENTER)?;
     session.wait_for_screen("reference opened", ACTION_TIMEOUT, |screen| {
-        screen.contains("switched to src/lib.rs") && screen.contains("[lib.rs]")
+        screen.contains(&native("switched to src/lib.rs")) && screen.contains("[lib.rs]")
     })?;
     session.send(CTRL_PAGE_UP)?;
     session.wait_for_screen("back on main.rs again", ACTION_TIMEOUT, |screen| {
@@ -681,7 +684,7 @@ fn project_panel_browses_opens_and_mutates_the_tree() -> Result<()> {
     })?;
     session.send(DOWN)?;
     session.send(ENTER)?;
-    let opened = format!("opened {}", Path::new("src").join("main.rs").display());
+    let opened = native("opened src/main.rs");
     session.wait_for_screen("file opened from the panel", ACTION_TIMEOUT, |screen| {
         screen.contains("fn main() {}") && screen.contains(&opened) && screen.contains("[main.rs]")
     })?;
@@ -701,7 +704,9 @@ fn project_panel_browses_opens_and_mutates_the_tree() -> Result<()> {
     session.wait_for_screen(
         "file created through the project",
         ACTION_TIMEOUT,
-        |screen| screen.contains("created src/created.txt") && screen.contains("created.txt"),
+        |screen| {
+            screen.contains(&native("created src/created.txt")) && screen.contains("created.txt")
+        },
     )?;
     ensure!(
         root.join("src/created.txt").is_file(),
@@ -716,7 +721,7 @@ fn project_panel_browses_opens_and_mutates_the_tree() -> Result<()> {
     session.paste("renamed.txt")?;
     session.send(ENTER)?;
     session.wait_for_screen("entry renamed", ACTION_TIMEOUT, |screen| {
-        screen.contains("renamed to src/renamed.txt") && screen.contains("renamed.txt")
+        screen.contains(&native("renamed to src/renamed.txt")) && screen.contains("renamed.txt")
     })?;
     ensure!(
         root.join("src/renamed.txt").is_file() && !root.join("src/created.txt").exists(),
@@ -1543,6 +1548,12 @@ fn suspend_restores_and_resume_reenters_the_terminal(directory: &Path) -> Result
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "post-SIGCONT exit failed: {status}");
     session.assert_terminal_restored(&baseline)
+}
+
+/// `text` with `/` as the platform's separator, for screen text that
+/// shows a relative path.
+fn native(text: &str) -> String {
+    text.replace('/', std::path::MAIN_SEPARATOR_STR)
 }
 
 fn open_pty() -> Result<PtyPair> {
