@@ -76,10 +76,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
           rustc --version --verbose
           cargo --version
           rustfmt --version
+          cargo clippy --version
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -94,6 +95,10 @@ jobs:
           set -euo pipefail
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
           cargo fmt --all -- --check
+
+      - name: Lint
+        timeout-minutes: 30
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build zec
         timeout-minutes: 60
@@ -133,10 +138,11 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
           rustc --version --verbose
           cargo --version
           rustfmt --version
+          cargo clippy --version
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -150,6 +156,10 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 --no-deps | Out-Null
           cargo fmt --all -- --check
+
+      - name: Lint
+        timeout-minutes: 45
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build zec
         timeout-minutes: 60

@@ -308,7 +308,7 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
             }
             .await;
             let _ = result_sender.send(result);
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         })
         .detach();
     });
@@ -385,7 +385,7 @@ mod tests {
             );
             let _ = sender.send(results);
             cx.spawn(async move |cx| {
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
             })
             .detach();
         });

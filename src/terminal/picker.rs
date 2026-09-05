@@ -42,9 +42,7 @@ impl<T: Clone> PickerList<T> {
             .filter_map(|(index, entry)| {
                 let label = entry.label.to_lowercase();
                 let detail = entry.detail.to_lowercase();
-                let score = if query.is_empty() {
-                    0
-                } else if label.starts_with(&query) {
+                let score = if query.is_empty() || label.starts_with(&query) {
                     0
                 } else if label.contains(&query) {
                     1

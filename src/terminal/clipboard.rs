@@ -258,7 +258,7 @@ mod tests {
                 sender
                     .send((result, after_cut, after_undo))
                     .expect("send clipboard results");
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
             })
             .detach();
         });

@@ -51,7 +51,7 @@ pub fn smoke() {
                     println!("after undo: {:?}", editor.text(cx));
                 })
                 .expect("failed to update editor");
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         })
         .detach();
     });

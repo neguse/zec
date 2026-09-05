@@ -158,6 +158,7 @@ doc section that describes it.
 
 ```sh
 cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --bin zec -- --test-threads=1
 cargo test --locked --test e2e -- --test-threads=1
 ./target/debug/zec --smoke

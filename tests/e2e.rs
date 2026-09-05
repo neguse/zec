@@ -1189,7 +1189,7 @@ fn large_file_opens_navigates_edits_and_saves() -> Result<()> {
         let hwm_kib = status
             .lines()
             .find_map(|line| line.strip_prefix("VmHWM:"))
-            .and_then(|rest| rest.trim().split_whitespace().next())
+            .and_then(|rest| rest.split_whitespace().next())
             .and_then(|value| value.parse::<u64>().ok())
             .context("VmHWM missing from /proc status")?;
         ensure!(
@@ -1741,7 +1741,7 @@ impl PtySession {
         {
             let current = self.termios()?;
             ensure!(
-                &current != &initial.termios,
+                current != initial.termios,
                 "zec rendered its UI without enabling terminal raw mode"
             );
             ensure!(
@@ -1976,7 +1976,7 @@ impl PtySession {
             self.drain_available()?;
             let current = self.termios()?;
             ensure!(
-                &current == &initial.termios,
+                current == initial.termios,
                 "stty state differs after zec exit\n{}",
                 self.diagnostic()
             );
