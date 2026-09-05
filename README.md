@@ -7,7 +7,7 @@ display snapshot onto terminal cells with Ratatui. Zed's crates are pinned
 Git dependencies; there is no fork.
 
 The design is [docs/architecture.md](docs/architecture.md); what is
-deliberately absent, deferred, or next is [docs/roadmap.md](docs/roadmap.md).
+deliberately absent or deferred is [docs/roadmap.md](docs/roadmap.md).
 
 ## Usage
 
