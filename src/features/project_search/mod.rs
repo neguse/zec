@@ -4,6 +4,8 @@
 //! Zed owns the file set, the ignore rules, the matcher, and the anchors.
 //! zec projects each hit to `path:line  preview`, orders hits by path, and
 //! stops collecting at a bound so a common word cannot flood the picker.
+//! Regex, match case, and whole word are toggled in the prompt, shown after
+//! its text, and kept for the rest of the session.
 
 use std::{
     path::{Path, PathBuf},
@@ -13,6 +15,7 @@ use std::{
     },
 };
 
+use anyhow::Result;
 use gpui::AsyncApp;
 use project::search::{SearchQuery, SearchResult};
 use text::{Point, ToPoint as _};
@@ -48,10 +51,53 @@ pub enum ProjectSearchEvent {
     },
 }
 
+/// The toggles a search runs with; they persist for the session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SearchOptions {
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchOption {
+    Regex,
+    CaseSensitive,
+    WholeWord,
+}
+
+impl SearchOptions {
+    fn toggle(&mut self, option: SearchOption) {
+        let slot = match option {
+            SearchOption::Regex => &mut self.regex,
+            SearchOption::CaseSensitive => &mut self.case_sensitive,
+            SearchOption::WholeWord => &mut self.whole_word,
+        };
+        *slot = !*slot;
+    }
+
+    /// The active options as the prompt shows them after its text.
+    fn describe(self) -> Option<String> {
+        let names = [
+            (self.regex, "regex"),
+            (self.case_sensitive, "match case"),
+            (self.whole_word, "whole word"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect::<Vec<_>>();
+        (!names.is_empty()).then(|| names.join(", "))
+    }
+}
+
 #[derive(Default)]
 pub struct ProjectSearch {
     generation: u64,
     cancel: Arc<AtomicBool>,
+    options: SearchOptions,
+    /// The text of the last search, rerun when an option changes while
+    /// its hits are listed.
+    last_query: Option<String>,
 }
 
 impl ProjectSearch {
@@ -65,8 +111,49 @@ impl ProjectSearch {
             label: PROMPT,
             line: LinePrompt::new(),
             target: PromptTarget::ProjectSearch,
-            feedback: None,
+            feedback: self.options.describe(),
         });
+    }
+
+    /// The prompt's text changed, which cleared its feedback; the active
+    /// options return after the new text.
+    pub fn query_changed(&mut self, ctx: &mut Ctx) {
+        self.show_options(ctx);
+    }
+
+    /// Flips one option: in the prompt it shows after the text, over the
+    /// hits it reruns the search, elsewhere the status row reports it.
+    pub fn toggle(&mut self, ctx: &mut Ctx, option: SearchOption, cx: &mut AsyncApp) {
+        self.options.toggle(option);
+        match ctx.overlays.top() {
+            Some(Overlay::Prompt {
+                target: PromptTarget::ProjectSearch,
+                ..
+            }) => self.show_options(ctx),
+            Some(Overlay::Picker {
+                owner: PickerOwner::ProjectSearch,
+                ..
+            }) => {
+                if let Some(text) = self.last_query.clone() {
+                    self.submit(ctx, &text, cx);
+                }
+            }
+            _ => ctx.status.set(format!(
+                "project search options: {}",
+                self.options.describe().unwrap_or_else(|| "none".to_owned())
+            )),
+        }
+    }
+
+    fn show_options(&self, ctx: &mut Ctx) {
+        if let Some(Overlay::Prompt {
+            target: PromptTarget::ProjectSearch,
+            feedback,
+            ..
+        }) = ctx.overlays.top_mut()
+        {
+            *feedback = self.options.describe();
+        }
     }
 
     /// The prompt was submitted: a picker replaces it and fills once Zed
@@ -78,23 +165,19 @@ impl ProjectSearch {
         if text.trim().is_empty() {
             return;
         }
-        let query = match SearchQuery::text(
-            text,
-            false,
-            false,
-            false,
-            PathMatcher::default(),
-            PathMatcher::default(),
-            false,
-            None,
-        ) {
+        let query = match build_query(text, self.options) {
             Ok(query) => query,
             Err(error) => {
-                ctx.overlays.clear();
-                ctx.status.set(format!("search failed: {error:#}"));
+                // An invalid pattern keeps the prompt open to be fixed.
+                let message = format!("invalid pattern: {error:#}");
+                match ctx.overlays.top() {
+                    Some(Overlay::Prompt { .. }) => ctx.overlays.set_feedback(message),
+                    _ => ctx.status.set(message),
+                }
                 return;
             }
         };
+        self.last_query = Some(text.to_owned());
         ctx.overlays.clear();
         ctx.overlays.push(Overlay::Picker {
             title: TITLE,
@@ -240,6 +323,34 @@ impl ProjectSearch {
     }
 }
 
+/// Zed's query for `text` under `options`; a malformed regex is an error.
+fn build_query(text: &str, options: SearchOptions) -> Result<SearchQuery> {
+    if options.regex {
+        SearchQuery::regex(
+            text,
+            options.whole_word,
+            options.case_sensitive,
+            false,
+            false,
+            PathMatcher::default(),
+            PathMatcher::default(),
+            false,
+            None,
+        )
+    } else {
+        SearchQuery::text(
+            text,
+            options.whole_word,
+            options.case_sensitive,
+            false,
+            PathMatcher::default(),
+            PathMatcher::default(),
+            false,
+            None,
+        )
+    }
+}
+
 /// One line of context, trimmed and bounded so a minified file cannot
 /// take the whole row.
 fn preview(line: &str) -> String {
@@ -254,6 +365,37 @@ fn preview(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_describe_only_the_active_ones() {
+        let mut options = SearchOptions::default();
+        assert_eq!(options.describe(), None);
+        options.toggle(SearchOption::Regex);
+        options.toggle(SearchOption::WholeWord);
+        assert_eq!(options.describe().as_deref(), Some("regex, whole word"));
+        options.toggle(SearchOption::Regex);
+        assert_eq!(options.describe().as_deref(), Some("whole word"));
+    }
+
+    #[test]
+    fn queries_carry_the_options() {
+        let literal = build_query("a.b", SearchOptions::default()).unwrap();
+        assert!(!literal.is_regex());
+        assert!(!literal.case_sensitive());
+        assert!(!literal.whole_word());
+
+        let options = SearchOptions {
+            regex: true,
+            case_sensitive: true,
+            whole_word: true,
+        };
+        let regex = build_query("a.b", options).unwrap();
+        assert!(regex.is_regex());
+        assert!(regex.case_sensitive());
+        assert!(regex.whole_word());
+
+        assert!(build_query("(", options).is_err());
+    }
 
     #[test]
     fn previews_are_trimmed_and_bounded() {

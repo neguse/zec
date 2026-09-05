@@ -70,7 +70,10 @@
     "bindings": {
       "ctrl-q": "zec::Quit",
       "ctrl-f": "zec::Find",
-      "ctrl-h": "zec::Replace"
+      "ctrl-h": "zec::Replace",
+      "alt-r": "zec::SearchToggleRegex",
+      "alt-c": "zec::SearchToggleCaseSensitive",
+      "alt-w": "zec::SearchToggleWholeWord"
     }
   },
   {

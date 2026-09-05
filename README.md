@@ -27,7 +27,7 @@ which are also listed in the command palette:
 | `F1`, `Ctrl-Shift-P` | Command Palette |
 | `Ctrl-N` / `Ctrl-O` | New File / Open File |
 | `Ctrl-P` | Quick Open, a fuzzy file picker over the root |
-| `Alt-F` | Search Project: literal, case-insensitive, hits open at their line |
+| `Alt-F` | Search Project: hits open at their line; `Alt-R` / `Alt-C` / `Alt-W` toggle regex, match case, whole word |
 | `Ctrl-F` | Find in the buffer as you type; Enter / Shift-Enter step through matches |
 | `Ctrl-H` | Replace the current match (Enter) or all of them (Shift-Enter) |
 | `Ctrl-G` | Go to `line` or `line:column` |
