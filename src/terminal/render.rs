@@ -390,6 +390,12 @@ pub struct RenderSnapshot {
     pub inline_annotations: Vec<InlineAnnotation>,
     pub viewport: Viewport,
     pub status: String,
+    /// Transient information shown ahead of `status`; when the row is
+    /// narrow it gives way after the hints, and last.
+    pub status_message: Option<String>,
+    /// Key hints shown after `status`; dropped from the end as the row
+    /// narrows.
+    pub status_hints: Vec<String>,
     /// Terminal-cell column for an input cursor on the status row.
     pub status_cursor_column: Option<usize>,
     /// The topmost overlay. Domain state remains outside the renderer.
@@ -609,7 +615,10 @@ impl<'a> EditorWidget<'a> {
         Some(Position::new(x, y))
     }
 
-    fn status_text(&self) -> String {
+    /// The status row fitted to `width`: the pane's own text and the
+    /// cursor position always stay, then the message, then the hints.
+    fn status_text(&self, width: usize) -> String {
+        const SEPARATOR: &str = "  |  ";
         let cursor = self.snapshot.cursor.map(|cursor| {
             let line = self
                 .snapshot
@@ -628,13 +637,67 @@ impl<'a> EditorWidget<'a> {
             }
         });
 
-        match (self.snapshot.status.is_empty(), cursor) {
-            (true, Some(cursor)) => cursor,
-            (false, Some(cursor)) => format!("{}  {cursor}", self.snapshot.status),
-            (false, None) => self.snapshot.status.clone(),
-            (true, None) => String::new(),
+        let cursor = cursor.unwrap_or_default();
+        let message = self
+            .snapshot
+            .status_message
+            .as_deref()
+            .filter(|message| !message.is_empty());
+        let compose = |base: String| match message {
+            Some(message) => format!("{message}{SEPARATOR}{base}"),
+            None => base,
+        };
+        let message_width = message.map_or(0, |message| text_width(message) + SEPARATOR.len());
+
+        let hints = &self.snapshot.status_hints;
+        for kept in (0..=hints.len()).rev() {
+            let base = join_status(&self.snapshot.status, &hints[..kept], &cursor);
+            if message_width + text_width(&base) <= width {
+                return compose(base);
+            }
         }
+        let base = join_status(&self.snapshot.status, &[], &cursor);
+        let Some(message) = message else {
+            return base;
+        };
+        let room = width.saturating_sub(text_width(&base) + SEPARATOR.len());
+        if room == 0 {
+            return base;
+        }
+        format!("{}{SEPARATOR}{base}", shorten(message, room))
     }
+}
+
+/// `status`, the hints, and the cursor text, two spaces apart, skipping
+/// empty parts.
+fn join_status(status: &str, hints: &[String], cursor: &str) -> String {
+    std::iter::once(status)
+        .chain(hints.iter().map(String::as_str))
+        .chain(std::iter::once(cursor))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn text_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// `text` cut to `width` cells with a trailing ellipsis when it did not fit.
+fn shorten(text: &str, width: usize) -> String {
+    if text_width(text) <= width {
+        return text.to_owned();
+    }
+    let budget = width.saturating_sub(1);
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        if text_width(&text[..next]) > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}…", &text[..end])
 }
 
 impl Widget for EditorWidget<'_> {
@@ -732,7 +795,7 @@ pub fn render_snapshot(snapshot: &RenderSnapshot, area: Rect, buf: &mut Buffer) 
     let status_style = snapshot.text_style.add_modifier(Modifier::REVERSED);
     buf.set_style(status_area, status_style);
     render_line(
-        &EditorWidget::new(snapshot).status_text(),
+        &EditorWidget::new(snapshot).status_text(usize::from(status_area.width)),
         status_style,
         &[],
         status_y,
@@ -1209,6 +1272,8 @@ mod tests {
                 left_column: 0,
             },
             status: "NORMAL".into(),
+            status_message: None,
+            status_hints: Vec::new(),
             status_cursor_column: None,
             overlay: None,
         };
@@ -1226,6 +1291,41 @@ mod tests {
                 .expect("status cell")
                 .modifier
                 .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn status_row_keeps_the_pane_and_cursor_and_yields_hints_then_message() {
+        let snapshot = RenderSnapshot {
+            total_rows: 1,
+            lines: vec!["".into()],
+            cursor: Some(Cursor { row: 0, column: 0 }),
+            status: "zec [a.txt]".into(),
+            status_message: Some("opened a.txt".into()),
+            status_hints: vec!["Ctrl-N new".into(), "Ctrl-Q quit".into()],
+            ..RenderSnapshot::default()
+        };
+        let text = |width| EditorWidget::new(&snapshot).status_text(width);
+
+        assert_eq!(
+            text(70),
+            "opened a.txt  |  zec [a.txt]  Ctrl-N new  Ctrl-Q quit  Ln 1, Col 1"
+        );
+        assert_eq!(
+            text(60),
+            "opened a.txt  |  zec [a.txt]  Ctrl-N new  Ln 1, Col 1"
+        );
+        assert_eq!(text(45), "opened a.txt  |  zec [a.txt]  Ln 1, Col 1");
+        assert_eq!(text(36), "opened…  |  zec [a.txt]  Ln 1, Col 1");
+        assert_eq!(text(29), "zec [a.txt]  Ln 1, Col 1");
+
+        let quiet = RenderSnapshot {
+            status_message: None,
+            ..snapshot.clone()
+        };
+        assert_eq!(
+            EditorWidget::new(&quiet).status_text(40),
+            "zec [a.txt]  Ctrl-N new  Ln 1, Col 1"
         );
     }
 
@@ -1269,6 +1369,8 @@ mod tests {
                 left_column: 0,
             },
             status: "NORMAL".into(),
+            status_message: None,
+            status_hints: Vec::new(),
             ..RenderSnapshot::default()
         };
         let area = Rect::new(0, 0, 30, 4);
@@ -1640,6 +1742,8 @@ mod tests {
                 left_column: 4,
             },
             status: String::new(),
+            status_message: None,
+            status_hints: Vec::new(),
             status_cursor_column: None,
             overlay: None,
         };
@@ -1843,6 +1947,8 @@ mod tests {
                 left_column: 0,
             },
             status: "NORMAL".into(),
+            status_message: None,
+            status_hints: Vec::new(),
             status_cursor_column: None,
             overlay: None,
         };
@@ -1995,13 +2101,15 @@ mod tests {
                 left_column: 0,
             },
             status: "NORMAL".into(),
+            status_message: None,
+            status_hints: Vec::new(),
             ..RenderSnapshot::default()
         };
         let area = Rect::new(0, 0, 24, 3);
 
         assert_eq!(EditorWidget::new(&snapshot).cursor_position(area), None);
         assert_eq!(
-            EditorWidget::new(&snapshot).status_text(),
+            EditorWidget::new(&snapshot).status_text(24),
             "NORMAL  Ln 8, Col 3"
         );
     }

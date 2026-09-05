@@ -278,7 +278,12 @@ fn display_point_at(display: &DisplaySnapshot, position: TextPosition) -> Option
 
 /// The status row content the caller wants drawn under the document.
 pub struct StatusRow {
+    /// The pane's own line: a prompt, or `zec` and its tabs.
     pub text: String,
+    /// Transient information ahead of `text`.
+    pub message: Option<String>,
+    /// Key hints after `text`.
+    pub hints: Vec<String>,
     pub cursor_column: Option<usize>,
     pub overlay: Option<OverlaySnapshot>,
 }
@@ -418,6 +423,8 @@ pub fn capture(
             inline_annotations: Vec::new(),
             viewport,
             status: status.text,
+            status_message: status.message,
+            status_hints: status.hints,
             status_cursor_column: status.cursor_column,
             overlay: status.overlay,
         },

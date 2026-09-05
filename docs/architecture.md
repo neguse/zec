@@ -237,9 +237,11 @@ race a resize:
    `[top_row, top_row + height)` from Zed's `DisplaySnapshot`. The
    viewports are the only state `draw` mutates and the wrap widths the
    only Zed writes.
-3. `EditorWidget` renders each pane. The focused pane's status row shows
-   the tab strip and key hints, or the transient message, or the top
-   overlay's presentation (a prompt line or a bounded picker list); the
+3. `EditorWidget` renders each pane. The focused pane's status row is
+   fitted to the pane width: the tab strip and cursor position always
+   stay, key hints are dropped from the end, and the transient message
+   ahead of them is shortened with an ellipsis last; the top overlay's
+   presentation (a prompt line or a bounded picker list) replaces it. The
    other panes' rows show their tab strip. Each visible dock asks its
    panel feature for a `view`: rows (title, rows, selection) rendered with
    `PanelWidget`, or for the terminal panel the synced grid of Zed's

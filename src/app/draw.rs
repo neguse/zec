@@ -145,6 +145,8 @@ impl App {
             } else {
                 StatusRow {
                     text: self.tab_strip(pane_area.pane, cx)?,
+                    message: None,
+                    hints: Vec::new(),
                     cursor_column: None,
                     overlay: None,
                 }
@@ -273,13 +275,19 @@ impl App {
             .iter()
             .map(|(command, text)| format!("{} {text}", self.key_hint(*command)))
             .collect::<Vec<_>>();
+        // A narrow row drops hints from the end, so the situational one
+        // goes first.
         if self.services.restricted_root(cx).is_some() {
-            hints.push(format!("{} trust", self.key_hint(Command::TrustWorktree)));
+            hints.insert(
+                0,
+                format!("{} trust", self.key_hint(Command::TrustWorktree)),
+            );
         }
-        let hints = hints.join("  ");
-        let base = format!("zec {label}  {hints}");
-        let plain = |text| StatusRow {
-            text,
+        let text = format!("zec {label}");
+        let plain = |message: Option<String>| StatusRow {
+            text: text.clone(),
+            message,
+            hints: hints.clone(),
             cursor_column: None,
             overlay: None,
         };
@@ -290,14 +298,13 @@ impl App {
                 overlay,
             } => StatusRow {
                 text: status,
+                message: None,
+                hints: Vec::new(),
                 cursor_column: Some(cursor_column),
                 overlay,
             },
-            Presentation::Message(message) => plain(format!("{message}  |  {base}")),
-            Presentation::None => plain(match self.status.message() {
-                Some(message) => format!("{message}  |  {base}"),
-                None => base,
-            }),
+            Presentation::Message(message) => plain(Some(message)),
+            Presentation::None => plain(self.status.message().map(str::to_owned)),
         }
     }
 }
