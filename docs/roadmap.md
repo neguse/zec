@@ -5,7 +5,7 @@ previous tree returned one at a time as `src/features/<name>/`; the last
 complete previous tree is commit `f40e791`, whose `docs/` describe each
 feature and whose `tests/` are its acceptance criteria. This page records
 what is deliberately absent: what stayed in history when a feature
-returned, what is deferred, and what comes next.
+returned, and what is deferred.
 
 ## Left in history
 
@@ -39,10 +39,3 @@ this tree cannot verify on one machine, and returns when that exists.
 | remote SSH | `remote_session.rs`, `zec_remote_server.rs` | the `zec-remote-server` binary and its archive distribution |
 | agent panel, inline assistant | `agent_panel.rs`, `inline_assistant.rs`, `fixture_acp` | an ACP fixture and a language model account in tests |
 | collaboration, notebook | `collaboration_panel.rs`, `notebook.rs` | a Zed account and collab server; a Jupyter kernel |
-
-## Next
-
-- Release binaries for Linux and Windows built by CI.
-- Navigation history: go back and forward across the jumps that Quick
-  Open, project search, the panels, and the language server make.
-- Project search options: regex, case sensitivity, whole word.
