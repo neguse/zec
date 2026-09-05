@@ -1,0 +1,143 @@
+[
+  {
+    "context": "Editor",
+    "bindings": {
+      "f1": "zec::CommandPalette",
+      "ctrl-shift-p": "zec::CommandPalette",
+      "f4": "zec::ShowTerminalCapabilities",
+      "ctrl-n": "zec::NewFile",
+      "ctrl-o": "zec::OpenFile",
+      "ctrl-p": "zec::QuickOpen",
+      "alt-f": "zec::ProjectSearch",
+      "ctrl-f": "zec::Find",
+      "ctrl-h": "zec::Replace",
+      "ctrl-g": "zec::GoToLine",
+      "ctrl-space": "zec::ShowCompletions",
+      "alt-/": "zec::ShowCompletions",
+      "f2": "zec::Hover",
+      "f8": "zec::Diagnostics",
+      "f12": "zec::GoToDefinition",
+      "alt-f12": "zec::GoToTypeDefinition",
+      "shift-f12": "zec::FindReferences",
+      "f6": "zec::RenameSymbol",
+      "ctrl-.": "zec::CodeActions",
+      "ctrl-shift-t": "zec::TrustWorktree",
+      "ctrl-s": "zec::Save",
+      "ctrl-r": "zec::Reload",
+      "ctrl-w": "zec::CloseItem",
+      "ctrl-pageup": "zec::PreviousItem",
+      "ctrl-pagedown": "zec::NextItem",
+      "f10": "zec::SplitRight",
+      "shift-f10": "zec::SplitDown",
+      "ctrl-alt-left": "zec::FocusPaneLeft",
+      "ctrl-alt-right": "zec::FocusPaneRight",
+      "ctrl-alt-up": "zec::FocusPaneUp",
+      "ctrl-alt-down": "zec::FocusPaneDown",
+      "ctrl-alt-shift-left": "zec::MoveTabLeft",
+      "ctrl-alt-shift-right": "zec::MoveTabRight",
+      "ctrl-alt-shift-up": "zec::MoveTabUp",
+      "ctrl-alt-shift-down": "zec::MoveTabDown",
+      "ctrl-alt-=": "zec::GrowPane",
+      "ctrl-alt--": "zec::ShrinkPane",
+      "f7": "zec::ToggleProjectPanel",
+      "ctrl-shift-e": "zec::ToggleProjectPanel",
+      "f9": "zec::ToggleOutlinePanel",
+      "ctrl-shift-o": "zec::ToggleOutlinePanel",
+      "ctrl-shift-g": "zec::ToggleGitPanel",
+      "f3": "zec::ToggleTerminalPanel",
+      "ctrl-`": "zec::ToggleTerminalPanel",
+      "ctrl-~": "zec::NewTerminal",
+      "ctrl-shift-b": "zec::RunTask",
+      "ctrl-alt-b": "zec::RerunTask",
+      "ctrl-c": "zec::Copy",
+      "ctrl-x": "zec::Cut",
+      "ctrl-,": "zec::OpenSettings",
+      "ctrl-alt-,": "zec::OpenKeymap",
+      "ctrl-q": "zec::Quit",
+      "ctrl-z": "editor::Undo",
+      "ctrl-y": "editor::Redo",
+      "alt-z": "editor::ToggleSoftWrap",
+      "ctrl-alt-t": "zec::SelectTheme",
+      "alt-\\": "editor::ShowEditPrediction",
+      "alt-l": "editor::AcceptEditPrediction",
+      "alt-k": "editor::AcceptNextWordEditPrediction",
+      "alt-j": "editor::AcceptNextLineEditPrediction",
+      "ctrl-alt-shift-e": "editor::ToggleEditPrediction"
+    }
+  },
+  {
+    "context": "zec_overlay",
+    "bindings": {
+      "ctrl-q": "zec::Quit",
+      "ctrl-f": "zec::Find",
+      "ctrl-h": "zec::Replace"
+    }
+  },
+  {
+    "context": "zec_panel",
+    "bindings": {
+      "escape": "zec::FocusEditor",
+      "up": "zec::PanelSelectPrevious",
+      "down": "zec::PanelSelectNext",
+      "left": "zec::PanelCollapse",
+      "right": "zec::PanelExpand",
+      "enter": "zec::PanelActivate",
+      "f1": "zec::CommandPalette",
+      "ctrl-shift-p": "zec::CommandPalette",
+      "ctrl-p": "zec::QuickOpen",
+      "f7": "zec::ToggleProjectPanel",
+      "ctrl-shift-e": "zec::ToggleProjectPanel",
+      "f9": "zec::ToggleOutlinePanel",
+      "ctrl-shift-o": "zec::ToggleOutlinePanel",
+      "ctrl-shift-g": "zec::ToggleGitPanel",
+      "f3": "zec::ToggleTerminalPanel",
+      "ctrl-`": "zec::ToggleTerminalPanel",
+      "ctrl-~": "zec::NewTerminal",
+      "ctrl-shift-b": "zec::RunTask",
+      "ctrl-alt-b": "zec::RerunTask",
+      "ctrl-q": "zec::Quit"
+    }
+  },
+  {
+    "context": "zec_project_panel",
+    "bindings": {
+      "n": "zec::PanelNewFile",
+      "shift-n": "zec::PanelNewDirectory",
+      "f2": "zec::PanelRename",
+      "delete": "zec::PanelDelete",
+      "r": "zec::PanelRevealActive",
+      "i": "zec::PanelToggleIgnored"
+    }
+  },
+  {
+    "context": "zec_git_panel",
+    "bindings": {
+      "space": "zec::GitToggleStaged",
+      "a": "zec::GitStageAll",
+      "u": "zec::GitUnstageAll",
+      "c": "zec::GitCommit"
+    }
+  },
+  {
+    "context": "zec_terminal_panel",
+    "bindings": {
+      "f1": "zec::CommandPalette",
+      "ctrl-shift-p": "zec::CommandPalette",
+      "ctrl-p": "zec::QuickOpen",
+      "ctrl-q": "zec::Quit",
+      "f3": "zec::ToggleTerminalPanel",
+      "ctrl-`": "zec::ToggleTerminalPanel",
+      "ctrl-~": "zec::NewTerminal",
+      "ctrl-pageup": "zec::PreviousTerminal",
+      "ctrl-pagedown": "zec::NextTerminal",
+      "ctrl-alt-up": "zec::FocusEditor",
+      "f7": "zec::ToggleProjectPanel",
+      "ctrl-shift-e": "zec::ToggleProjectPanel",
+      "f9": "zec::ToggleOutlinePanel",
+      "ctrl-shift-o": "zec::ToggleOutlinePanel",
+      "ctrl-shift-g": "zec::ToggleGitPanel",
+      "ctrl-shift-b": "zec::RunTask",
+      "ctrl-alt-b": "zec::RerunTask"
+    }
+  }
+]

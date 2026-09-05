@@ -1,7 +1,0 @@
-[package]
-name = "alpha-2-fixture-project"
-version = "0.0.0"
-edition = "2024"
-publish = false
-
-[workspace]
