@@ -123,7 +123,8 @@ const ENTER: &[u8] = b"\r";
 
 // This is one execute! call in the terminal session's restore. Keeping the
 // full ordered sequence here catches a regression where only some terminal
-// features are reset.
+// features are reset. ConPTY rewrites the output, so only Unix checks it.
+#[cfg(unix)]
 const CLEANUP_ESCAPES: &[u8] = concat!(
     "\x1b[>4m",
     "\x1b[?25h",
@@ -1762,6 +1763,8 @@ impl PtySession {
         Ok(())
     }
 
+    /// Only the Linux memory check reads `/proc/<pid>`.
+    #[cfg(target_os = "linux")]
     fn pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|child| child.process_id())
     }
