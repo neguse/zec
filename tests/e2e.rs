@@ -96,6 +96,8 @@ const END: &[u8] = b"\x1b[F";
 const DELETE: &[u8] = b"\x1b[3~";
 const CTRL_U: &[u8] = b"\x15";
 const ALT_F: &[u8] = b"\x1bf";
+const ALT_LEFT: &[u8] = b"\x1b[1;3D";
+const ALT_RIGHT: &[u8] = b"\x1b[1;3C";
 const CTRL_F: &[u8] = b"\x06";
 const CTRL_G: &[u8] = b"\x07";
 #[cfg(unix)]
@@ -1201,6 +1203,101 @@ fn large_file_opens_navigates_edits_and_saves() -> Result<()> {
     session.send(CTRL_Q)?;
     let status = session.wait_for_exit(EXIT_TIMEOUT)?;
     ensure!(status.success(), "large file exit failed: {status}");
+    session.assert_terminal_restored(&baseline)
+}
+
+#[test]
+fn navigation_history_returns_across_jumps() -> Result<()> {
+    let temp = tempfile::tempdir().context("create PTY fixture")?;
+    let root = temp.path().join("history-repo");
+    fs::create_dir_all(&root)?;
+    fs::write(root.join("first.txt"), "E2E_HISTORY_FIRST\n")?;
+    fs::write(root.join("lib.rs"), "fn alpha() {}\n\nfn beta() {}\n")?;
+
+    let pair = open_pty()?;
+    let baseline = capture_baseline(&pair)?;
+    let mut session = PtySession::spawn(pair, &[root.as_os_str()])?;
+    session.wait_ready()?;
+
+    // Nothing to return to yet.
+    session.send(ALT_LEFT)?;
+    session.wait_for_screen("no earlier location", ACTION_TIMEOUT, |screen| {
+        screen.contains("no earlier location")
+    })?;
+
+    // Jump 1: Quick Open first.txt; jump 2: Quick Open lib.rs; jump 3: the
+    // outline moves the caret inside lib.rs.
+    session.send(CTRL_P)?;
+    session.wait_for_screen("quick open lists the root", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open:") && screen.contains("lib.rs")
+    })?;
+    session.paste("first")?;
+    session.wait_for_screen(
+        "quick open filtered to first.txt",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("Quick open: first") && !screen.contains("lib.rs"),
+    )?;
+    session.send(ENTER)?;
+    session.wait_for_screen("first.txt opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("opened first.txt") && screen.contains("E2E_HISTORY_FIRST")
+    })?;
+    session.send(CTRL_P)?;
+    session.wait_for_screen("quick open again", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open:") && screen.contains("lib.rs")
+    })?;
+    session.paste("lib")?;
+    session.wait_for_screen("quick open filtered to lib.rs", ACTION_TIMEOUT, |screen| {
+        screen.contains("Quick open: lib") && !screen.contains("first.txt")
+    })?;
+    session.send(ENTER)?;
+    session.wait_for_screen("lib.rs opened", ACTION_TIMEOUT, |screen| {
+        screen.contains("opened lib.rs") && screen.contains("fn beta() {}")
+    })?;
+    session.send(F9)?;
+    session.wait_for_screen("outline lists the symbols", ACTION_TIMEOUT, |screen| {
+        screen.contains("Outline lib.rs") && screen.matches("fn beta").count() == 2
+    })?;
+    session.send(DOWN)?;
+    session.send(ENTER)?;
+    session.wait_for_screen("jumped to beta", ACTION_TIMEOUT, |screen| {
+        screen.contains("jumped to fn beta")
+    })?;
+
+    // Back within the file, back to the previous file, forward again.
+    session.send(ALT_LEFT)?;
+    session.wait_for_screen("back to the top of lib.rs", ACTION_TIMEOUT, |screen| {
+        screen.contains("back to lib.rs:1")
+    })?;
+    session.paste("x")?;
+    session.wait_for_screen(
+        "edit lands at the returned caret",
+        ACTION_TIMEOUT,
+        |screen| screen.contains("xfn alpha() {}"),
+    )?;
+    session.send(ALT_LEFT)?;
+    session.wait_for_screen("back to first.txt", ACTION_TIMEOUT, |screen| {
+        screen.contains("back to first.txt:1") && screen.contains("E2E_HISTORY_FIRST")
+    })?;
+    session.send(ALT_RIGHT)?;
+    session.wait_for_screen("forward to lib.rs", ACTION_TIMEOUT, |screen| {
+        screen.contains("forward to lib.rs:1") && screen.contains("xfn alpha() {}")
+    })?;
+    session.send(ALT_RIGHT)?;
+    session.wait_for_screen("forward to beta", ACTION_TIMEOUT, |screen| {
+        screen.contains("forward to lib.rs:3")
+    })?;
+    session.send(ALT_RIGHT)?;
+    session.wait_for_screen("no later location", ACTION_TIMEOUT, |screen| {
+        screen.contains("no later location")
+    })?;
+
+    session.send(CTRL_Q)?;
+    session.wait_for_screen("dirty quit confirmation", ACTION_TIMEOUT, |screen| {
+        screen.contains("unsaved or deleted tab(s)")
+    })?;
+    session.send(CTRL_Q)?;
+    let status = session.wait_for_exit(EXIT_TIMEOUT)?;
+    ensure!(status.success(), "navigation history exit failed: {status}");
     session.assert_terminal_restored(&baseline)
 }
 

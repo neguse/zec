@@ -5,6 +5,7 @@ pub mod documents;
 mod draw;
 pub mod event;
 pub mod feature;
+mod history;
 mod layout;
 pub mod overlay;
 pub mod status;
@@ -74,6 +75,8 @@ pub struct App {
     root: Option<PathBuf>,
     workspace: WorkspaceModel,
     documents: Documents,
+    /// Where the caret was before each jump, per pane.
+    history: history::NavHistory,
     overlays: Overlays,
     status: Status,
     features: Features,
@@ -202,6 +205,7 @@ impl App {
             overlays: Overlays::default(),
             status,
             features,
+            history: history::NavHistory::default(),
             frame: None,
             resize: None,
             needs_invalidate: false,

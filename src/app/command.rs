@@ -68,6 +68,8 @@ commands! {
     Find => "Find",
     Replace => "Replace",
     GoToLine => "Go to Line",
+    GoBack => "Go Back",
+    GoForward => "Go Forward",
     ShowCompletions => "Show Completions",
     Hover => "Show Hover",
     Diagnostics => "Show Diagnostics",
