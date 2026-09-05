@@ -1689,16 +1689,17 @@ impl PtySession {
     fn wait_ready(&mut self) -> Result<()> {
         self.wait_until("zec initial frame", STARTUP_TIMEOUT, |session| {
             let screen = session.parser.screen();
-            // ConPTY flattens alternate-screen, bracketed-paste, and mouse
-            // negotiation; only the repaint is observable there.
+            // The status row proves the first frame. ConPTY flattens
+            // alternate-screen, bracketed-paste, and mouse negotiation;
+            // only the repaint is observable there.
+            let painted = contains_bytes(&session.transcript, b"Ctrl-N new");
             if cfg!(unix) {
-                contains_bytes(&session.transcript, b"Ctrl-N new")
+                painted
                     && screen.alternate_screen()
                     && screen.bracketed_paste()
                     && screen.mouse_protocol_mode() != MouseProtocolMode::None
             } else {
-                contains_bytes(&session.transcript, b"F1 commands")
-                    && contains_bytes(&session.transcript, b"\x1b[2J")
+                painted && contains_bytes(&session.transcript, b"\x1b[2J")
             }
         })
     }
