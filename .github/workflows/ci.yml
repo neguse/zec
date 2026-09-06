@@ -100,6 +100,14 @@ jobs:
         timeout-minutes: 30
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Check the third-party notices generate
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo about --version 2>/dev/null || cargo install cargo-about --locked --version 0.9.2 --features cli
+          cargo about generate --locked about.hbs -o /dev/null
+
       - name: Build zec
         timeout-minutes: 60
         run: cargo build --locked --bin zec --bin fixture_lsp

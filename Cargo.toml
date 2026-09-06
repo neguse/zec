@@ -11,10 +11,12 @@ publish = false
 [profile.dev]
 debug = "line-tables-only"
 
-# Release binaries keep line tables too, so a reported panic has a usable
-# backtrace; everything else stays at Cargo's defaults to bound build time.
+# Release binaries keep their symbol table, so a reported panic names its
+# functions, but drop DWARF: with the Zed dependency graph the line tables
+# alone quadruple the Linux archive. Everything else stays at Cargo's
+# defaults to bound build time.
 [profile.release]
-debug = "line-tables-only"
+strip = "debuginfo"
 
 [[bin]]
 name = "zec"

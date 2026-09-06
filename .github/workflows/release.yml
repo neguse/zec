@@ -1,6 +1,7 @@
 name: Release
 
-# A tag `vX.Y.Z` builds release binaries for Linux and Windows and attaches
+# A tag `vX.Y.Z` builds release binaries for Linux and Windows, packs each
+# with the license and the generated third-party notices, and attaches
 # them to a GitHub release. A pull request that touches this file or the
 # release profile, and a manual dispatch, build the same binaries as
 # workflow artifacts without publishing.
@@ -114,19 +115,33 @@ jobs:
         timeout-minutes: 150
         run: cargo build --locked --release --bin zec
 
+      - name: Generate the third-party notices
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo about --version 2>/dev/null || cargo install cargo-about --locked --version 0.9.2 --features cli
+          # No --offline: cargo-about resolves every target, so `cargo metadata`
+          # must be able to fetch crates the host build never needed.
+          cargo about generate --locked about.hbs -o THIRD_PARTY_LICENSES.html
+          mkdir -p dist
+          cp LICENSE THIRD_PARTY_LICENSES.html dist/
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          tar -C target/release -czf "${{ matrix.archive }}" zec
+          cp target/release/zec dist/
+          tar -C dist -czf "${{ matrix.archive }}" zec LICENSE THIRD_PARTY_LICENSES.html
           ./target/release/zec --version
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path target\release\zec.exe -DestinationPath "${{ matrix.archive }}"
+          Copy-Item target\release\zec.exe dist\
+          Compress-Archive -Path dist\zec.exe, dist\LICENSE, dist\THIRD_PARTY_LICENSES.html -DestinationPath "${{ matrix.archive }}"
           & .\target\release\zec.exe --version
           if ($LASTEXITCODE -ne 0) { throw "zec --version exited with $LASTEXITCODE" }
 
