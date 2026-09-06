@@ -82,6 +82,17 @@ Each [release](https://github.com/neguse/zec/releases) attaches
 one binary; unpack it onto `PATH`. The Linux binary depends on glibc only.
 Or build from source:
 
+## License
+
+zec is free software under the GNU General Public License, version 3 or
+(at your option) any later version; the text is in [LICENSE](LICENSE). It
+links Zed's crates, which are GPL-3.0-or-later with Apache-2.0 components
+where Zed marks them, and embeds Zed's fonts, icons, and themes under their
+own licenses. A release archive carries the license and the notices of
+every dependency, generated with `cargo about`. The source corresponding
+to a release is the repository at its tag, including `Cargo.lock` and the
+pinned Zed revision.
+
 ## Building
 
 ```sh
